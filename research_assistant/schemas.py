@@ -44,10 +44,17 @@ class _Record:
                 f"{cls.__name__}: missing required field(s): {', '.join(missing)}"
             )
         known = {f.name for f in fields(cls)}
-        kwargs = {k: v for k, v in data.items() if k in known}
-        if kwargs.get("authors") is not None:
-            kwargs["authors"] = tuple(kwargs["authors"])
-        return cls(**kwargs)
+        # An explicit `null` is dropped rather than passed through: required
+        # fields already raised above if null, so this only ever affects
+        # optional fields, where dropping the key lets the dataclass default
+        # apply instead of storing a bare None where e.g. a tuple is expected.
+        kwargs = {k: v for k, v in data.items() if k in known and v is not None}
+        try:
+            if "authors" in kwargs:
+                kwargs["authors"] = tuple(kwargs["authors"])
+            return cls(**kwargs)
+        except (TypeError, ValueError) as exc:
+            raise SchemaError(f"{cls.__name__}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,10 @@ class DownloadedPaper(_Record):
     raw_reference: str | None = None
     doi: str | None = None
     arxiv_id: str | None = None
+    doi_source: str | None = None         # how the DOI was resolved: grobid | crossref
+    authoritative: bool | None = None     # whether the source key came from a real identifier
+    cited_by: str | None = None           # source_file of the paper that cited this one
+    xml_id: str | None = None             # GROBID biblStruct id of the originating reference
 
 
 @dataclass(frozen=True)

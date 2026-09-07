@@ -55,6 +55,31 @@ class TestReference(unittest.TestCase):
         self.assertEqual(ref.authors, ())
         self.assertEqual(ref.extraction_method, "grobid")
 
+    def test_explicit_null_on_optional_field_yields_the_default(self):
+        """An explicit `null` must be treated the same as absent, not passed
+        through raw -- otherwise `authors` ends up `None` instead of `()`
+        and callers hit `TypeError: 'NoneType' object is not iterable`."""
+        ref = Reference.from_dict(
+            {"raw_reference": "r", "source_file": "s.pdf", "authors": None}
+        )
+        self.assertEqual(ref.authors, ())
+
+    def test_explicit_null_on_required_field_still_raises(self):
+        """Dropping nulls must not extend to required fields: a manifest
+        emitting `"source_file": null` is exactly the malformed input this
+        module exists to catch."""
+        with self.assertRaises(SchemaError):
+            Reference.from_dict({"raw_reference": "r", "source_file": None})
+
+    def test_malformed_value_raises_schema_error_not_type_error(self):
+        """A present-but-wrong-shaped value must fail as SchemaError, not
+        leak the raw TypeError from the tuple() coercion or the
+        constructor call."""
+        with self.assertRaises(SchemaError):
+            Reference.from_dict(
+                {"raw_reference": "r", "source_file": "s.pdf", "authors": 5}
+            )
+
 
 class TestDownloadedPaper(unittest.TestCase):
     def test_missing_path_raises_rather_than_half_building(self):
@@ -77,6 +102,28 @@ class TestDownloadedPaper(unittest.TestCase):
     def test_non_dict_input_raises(self):
         with self.assertRaises(SchemaError):
             DownloadedPaper.from_dict("not a dict")
+
+    def test_agent2_fetcher_fields_round_trip(self):
+        """agent2_fetcher.py in the source repo writes these four fields;
+        from_dict silently drops unknown keys, so without them declared a
+        round trip would lose `cited_by` -- the provenance link back to the
+        paper that cited this one -- on every run."""
+        paper = DownloadedPaper(
+            key="doi:10.1/x",
+            path="data/pulled_pdfs/doi_10.1_x.pdf",
+            provider="crossref",
+            fetched_at="2026-09-07T00:00:00Z",
+            doi_source="crossref",
+            authoritative=True,
+            cited_by="seed.pdf",
+            xml_id="b12",
+        )
+        round_tripped = DownloadedPaper.from_dict(paper.to_dict())
+        self.assertEqual(round_tripped, paper)
+        self.assertEqual(round_tripped.cited_by, "seed.pdf")
+        self.assertEqual(round_tripped.xml_id, "b12")
+        self.assertEqual(round_tripped.doi_source, "crossref")
+        self.assertTrue(round_tripped.authoritative)
 
 
 class TestSeedPaper(unittest.TestCase):
