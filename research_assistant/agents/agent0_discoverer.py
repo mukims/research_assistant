@@ -16,9 +16,11 @@ seed paper itself is indexed, not only the papers it cites.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
 import time
 
 import requests
@@ -34,9 +36,9 @@ from research_assistant.config import (
     S2_SEARCH_URL,
 )
 from research_assistant.schemas import SeedPaper
-from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for
+from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for, _is_pdf
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.source_key import source_key
+from research_assistant.shared.source_key import source_key, normalise_doi
 
 logger = get_logger("agent0")
 
@@ -237,6 +239,19 @@ def get_seed(query):
     return _load_seeds().get(query)
 
 
+def get_seed_by_path(path):
+    """Return (record, query) for a seed record with matching path, or (None, None).
+    Iterates in reverse so that the most recent record for a path is returned."""
+    if not path:
+        return None, None
+    norm = os.path.abspath(path)
+    for q, rec in reversed(list(_load_seeds().items())):
+        p = rec.get("path")
+        if p and os.path.abspath(p) == norm:
+            return rec, q
+    return None, None
+
+
 # ─── Direct-URL fallback ─────────────────────────────────────────────────────
 
 _ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?|[a-z-]+/[0-9]{7})")
@@ -297,6 +312,296 @@ def discover_from_url(query, url, force=False):
     )
 
 
+# ─── Direct-file fallback ────────────────────────────────────────────────────
+
+_DOI_RE = re.compile(rb"(?i)(?:doi[:\s/]|https?://doi\.org/|doi\.org\\/)(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)")
+_ARXIV_RE_BYTES = re.compile(rb"(?i)arxiv[:\s/]+([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?)")
+_PDF_TITLE_RE = re.compile(rb"/Title\s*(?:\((.*?)\)|<([0-9a-fA-F]+)>)", re.DOTALL)
+_XMP_TITLE_RE = re.compile(rb"<dc:title>[\s\S]*?<rdf:li[^>]*>([\s\S]*?)</rdf:li>", re.IGNORECASE)
+_XMP_TITLE_FALLBACK_RE = re.compile(rb"<dc:title>([\s\S]*?)</dc:title>", re.IGNORECASE)
+_XMP_DOI_RE = re.compile(rb"<(?:prism:doi|dc:identifier)>\s*(?:doi:)?\s*(10\.\d{4,9}/[^<\s]+)\s*</", re.IGNORECASE)
+
+_HEADER_JUNK_RE = re.compile(
+    r"(?i)^(?:arxiv[:\s/]|https?://|doi[:\s/]|10\.\d{4,9}/|"
+    r"journal of|physical review|nature\b|science\b|proceedings of|"
+    r"ieee\b|springer|elsevier|volume\b|vol\.\b|issue\b|no\.\b|pp\.\b|pages\b|"
+    r"published|accepted|received|issn\b|typeset|draft version)",
+)
+
+
+def _decode_pdf_title(raw_str: bytes | str) -> str | None:
+    """Decode PDF title string from literal bytes/str or hex string."""
+    if isinstance(raw_str, str):
+        raw_str = raw_str.encode("utf-8", "ignore")
+    if not raw_str:
+        return None
+    if raw_str.startswith(b"\xfe\xff"):
+        try:
+            return raw_str.decode("utf-16-be").strip()
+        except Exception:
+            pass
+    elif raw_str.startswith(b"\xff\xfe"):
+        try:
+            return raw_str.decode("utf-16-le").strip()
+        except Exception:
+            pass
+    decoded = (
+        raw_str.replace(b"\\(", b"(")
+        .replace(b"\\)", b")")
+        .replace(b"\\\\", b"\\")
+        .replace(b"\\r", b" ")
+        .replace(b"\\n", b" ")
+        .replace(b"\\t", b" ")
+    )
+    try:
+        text = decoded.decode("utf-8", "ignore").strip()
+    except Exception:
+        text = decoded.decode("latin-1", "ignore").strip()
+    return re.sub(r"\s+", " ", text) if text else None
+
+
+def _clean_title(title: str | None) -> str | None:
+    if not title:
+        return None
+    t = title.strip()
+    t = (
+        t.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) > 3 and t.lower() not in ("untitled", "default", "none", "nan", "untitled document"):
+        return t
+    return None
+
+
+def _clean_doi(raw_doi: str | None) -> str | None:
+    if not raw_doi:
+        return None
+    d = raw_doi.strip().rstrip(".,;)>]").strip()
+    m = re.search(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+", d)
+    if m:
+        d = m.group(0).rstrip(".,;)>]")
+        return normalise_doi(d) or d.lower()
+    return None
+
+
+def _is_pdf_content(first_chunk: bytes) -> bool:
+    """PDF header (%PDF-) anywhere in first 1024 bytes per ISO 32000-1 §7.5.2."""
+    return b"%PDF-" in first_chunk[:1024]
+
+
+def _inspect_pdf(file_path: str, raw_bytes: bytes | None = None) -> tuple[str | None, str | None, str | None]:
+    """Extract (title, doi, arxiv_id) from PDF metadata or text if available."""
+    title, doi, arxiv_id = None, None, None
+
+    # 1. Try PyMuPDF if installed
+    doc = None
+    try:
+        import fitz
+        if file_path and os.path.exists(file_path):
+            doc = fitz.open(file_path)
+        elif raw_bytes:
+            doc = fitz.open(stream=raw_bytes, filetype="pdf")
+
+        if doc:
+            meta = doc.metadata or {}
+            t = _clean_title(meta.get("title"))
+            if t:
+                title = t
+
+            for page_num in range(min(2, len(doc))):
+                text = doc[page_num].get_text("text")
+                if not arxiv_id:
+                    m_arx = re.search(r"(?i)arxiv[:\s/]+([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?)", text)
+                    if m_arx:
+                        arxiv_id = m_arx.group(1)
+                if not doi:
+                    m_doi = re.search(r"(?i)(?:doi[:\s/]|https?://doi\.org/)(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", text)
+                    if m_doi:
+                        doi = _clean_doi(m_doi.group(1))
+                if not title and page_num == 0:
+                    lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 3]
+                    for candidate_line in lines[:10]:
+                        if _HEADER_JUNK_RE.search(candidate_line):
+                            continue
+                        cand_title = _clean_title(candidate_line)
+                        if cand_title and len(cand_title) > 5:
+                            title = cand_title
+                            break
+    except Exception:
+        pass
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+    # 2. Fallback regex on raw bytes
+    if raw_bytes is None and file_path and os.path.exists(file_path):
+        try:
+            size = os.path.getsize(file_path)
+            with open(file_path, "rb") as f:
+                if size <= 1024 * 1024:
+                    raw_bytes = f.read()
+                else:
+                    head = f.read(512 * 1024)
+                    f.seek(max(0, size - 512 * 1024))
+                    tail = f.read(512 * 1024)
+                    raw_bytes = head + b"\n" + tail
+        except OSError:
+            raw_bytes = b""
+    elif raw_bytes is None:
+        raw_bytes = b""
+
+    # Look for arXiv ID
+    if not arxiv_id and raw_bytes:
+        m_arx = _ARXIV_RE_BYTES.search(raw_bytes[:128 * 1024])
+        if m_arx:
+            try:
+                arxiv_id = m_arx.group(1).decode("utf-8", "ignore")
+            except Exception:
+                pass
+
+    # Look for DOI
+    if not doi and raw_bytes:
+        m_xmp_doi = _XMP_DOI_RE.search(raw_bytes)
+        if m_xmp_doi:
+            try:
+                doi = _clean_doi(m_xmp_doi.group(1).decode("utf-8", "ignore"))
+            except Exception:
+                pass
+        if not doi:
+            m_doi = _DOI_RE.search(raw_bytes[:128 * 1024])
+            if m_doi:
+                try:
+                    doi = _clean_doi(m_doi.group(1).decode("utf-8", "ignore"))
+                except Exception:
+                    pass
+
+    # Look for Title
+    if not title and raw_bytes:
+        m_xmp = _XMP_TITLE_RE.search(raw_bytes) or _XMP_TITLE_FALLBACK_RE.search(raw_bytes)
+        if m_xmp:
+            try:
+                cand = _clean_title(m_xmp.group(1).decode("utf-8", "ignore"))
+                if cand:
+                    title = cand
+            except Exception:
+                pass
+
+        if not title:
+            m_title = _PDF_TITLE_RE.search(raw_bytes)
+            if m_title:
+                raw_t = m_title.group(1)
+                hex_t = m_title.group(2)
+                if hex_t:
+                    try:
+                        raw_bytes_t = bytes.fromhex(hex_t.decode("ascii"))
+                        cand = _decode_pdf_title(raw_bytes_t)
+                        title = _clean_title(cand)
+                    except Exception:
+                        pass
+                elif raw_t:
+                    cand = _decode_pdf_title(raw_t)
+                    title = _clean_title(cand)
+
+    return title, doi, arxiv_id
+
+
+def discover_from_file(
+    query: str = "",
+    file_input: str | bytes | os.PathLike = "",
+    filename: str | None = None,
+    force: bool = False,
+) -> str | None:
+    """Seed directly from an uploaded or local PDF file.
+
+    Validates that the file is a PDF, extracts or infers metadata (title, DOI, arXiv ID),
+    computes a deterministic key, copies/writes it to RAW_DIR, and records the seed paper.
+    If *query* is empty, the paper's title or cleaned filename is used as the query.
+
+    Returns the local path in RAW_DIR, or None if the file is invalid or cannot be read.
+    """
+    os.makedirs(RAW_DIR, exist_ok=True)
+
+    if isinstance(file_input, (str, os.PathLike)):
+        file_path = str(file_input)
+        if not os.path.exists(file_path):
+            logger.error("Seed file does not exist: %s", file_path)
+            return None
+        filename = filename or os.path.basename(file_path)
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
+        except OSError as exc:
+            logger.error("Could not read seed file %s: %s", file_path, exc)
+            return None
+    elif hasattr(file_input, "read"):
+        filename = filename or getattr(file_input, "name", "uploaded_paper.pdf")
+        content = file_input.read()
+        file_path = None
+    elif isinstance(file_input, (bytes, bytearray)):
+        content = bytes(file_input)
+        filename = filename or "uploaded_paper.pdf"
+        file_path = None
+    else:
+        logger.error("Unsupported file input type: %s", type(file_input))
+        return None
+
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+
+    if not _is_pdf_content(content[:1024]):
+        logger.error("File is not a valid PDF (header does not contain %%PDF-): %s", filename)
+        return None
+
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    clean_stem = re.sub(r"[_\-]+", " ", stem).strip()
+    title, doi, arxiv_id = _inspect_pdf(file_path or "", raw_bytes=content)
+
+    if arxiv_id:
+        key = f"arxiv:{arxiv_id}"
+    elif doi:
+        key = f"doi:{normalise_doi(doi) or doi.lower()}"
+    else:
+        digest = hashlib.sha1(content).hexdigest()[:16]
+        key = f"file:{digest}"
+
+    dest = os.path.join(RAW_DIR, filename_for(key))
+
+    if os.path.exists(dest) and not force:
+        logger.info("PDF already on disk in RAW_DIR: %s", os.path.basename(dest))
+    else:
+        tmp_path = dest + ".part"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(content)
+            os.replace(tmp_path, dest)
+        except OSError as exc:
+            logger.error("Failed writing seed PDF to %s: %s", dest, exc)
+            return None
+        logger.info("Saved seed PDF -> %s", os.path.basename(dest))
+
+    seeds = _load_seeds()
+    effective_query = (query or "").strip() or title or clean_stem or "Uploaded seed paper"
+    seeds[effective_query] = SeedPaper(
+        key=key,
+        path=dest,
+        fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        source="upload",
+        title=title or clean_stem,
+        doi=doi,
+        arxiv_id=arxiv_id,
+    ).to_dict()
+    _save_seeds(seeds)
+
+    return dest
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 
@@ -333,10 +638,14 @@ def discover(query, force=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Agent 0 — Seed paper discoverer")
-    parser.add_argument("--query", required=True, help="Research idea to seed from.")
+    parser.add_argument("--query", default="", help="Research idea to seed from.")
     parser.add_argument(
         "--url",
         help="Seed directly from this PDF / arXiv link instead of searching.",
+    )
+    parser.add_argument(
+        "--file",
+        help="Seed directly from a local PDF file instead of searching.",
     )
     parser.add_argument(
         "--force",
@@ -345,9 +654,13 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.url:
+    if args.file:
+        path = discover_from_file(args.query, args.file, force=args.force)
+    elif args.url:
         path = discover_from_url(args.query, args.url, force=args.force)
     else:
+        if not args.query:
+            parser.error("Must provide --query, --file, or --url")
         path = discover(args.query, force=args.force)
     if not path:
         raise SystemExit(1)

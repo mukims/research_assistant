@@ -8,6 +8,7 @@ runs Agent 5 (batch citer) over a whole draft. Tab 4 is Agent 7's multi-turn
 research chat. Tab 5 renders HOW_TO_USE.md.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -119,19 +120,31 @@ def _render_suggestion(result):
 
 
 def _render_seed_and_downloads(query, final):
+    # If the pipeline stopped without establishing a seed, do not render phantom seeds or prior references.
+    if not final.get("seed_path") and final.get("stopped"):
+        return
+
     seeds = _manifest(config.SEED_PAPERS_PATH)
     seed = seeds.get(query) or {}
-    # Query-key mismatch fallback: if there's exactly one seed on record, use it.
-    if not seed and len(seeds) == 1:
+    if not seed and final.get("seed_path"):
+        norm_path = os.path.abspath(final["seed_path"])
+        for s in reversed(list(seeds.values())):
+            if s.get("path") and os.path.abspath(s["path"]) == norm_path:
+                seed = s
+                break
+    # Query-key mismatch fallback: only if a seed was actually established for this run
+    if not seed and final.get("seed_path") and len(seeds) == 1:
         seed = next(iter(seeds.values()))
 
     title = seed.get("title") or final.get("seed_label")
-    if title or seed:
+    if (title or seed) and final.get("seed_path"):
         with st.container(border=True):
             st.markdown(f"**🌱 Seed paper** — {title or seed.get('key', '—')}")
             bits = []
             if seed.get("url"):
                 bits.append(f"[PDF]({seed['url']})")
+            elif seed.get("source") == "upload":
+                bits.append("📁 Uploaded PDF")
             if seed.get("arxiv_id"):
                 bits.append(f"arXiv:{seed['arxiv_id']}")
             if seed.get("doi"):
@@ -141,22 +154,23 @@ def _render_seed_and_downloads(query, final):
             if bits:
                 st.caption(" · ".join(bits))
 
-    downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
-    failed = _manifest(config.FAILED_DOWNLOADS_PATH)
-    if downloaded or failed:
-        with st.expander(
-            f"📄 Reference PDFs — {len(downloaded)} fetched, {len(failed)} unavailable",
-            expanded=bool(downloaded) and not final.get("answer"),
-        ):
-            for rec in downloaded.values():
-                t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
-                st.markdown(f"- ✅ {t}")
-            for rec in failed.values():
-                t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
-                st.markdown(
-                    f"- ⚠️ {t}  \n  <sub>{rec.get('reason', '')}</sub>",
-                    unsafe_allow_html=True,
-                )
+    if final.get("seed_path"):
+        downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
+        failed = _manifest(config.FAILED_DOWNLOADS_PATH)
+        if downloaded or failed:
+            with st.expander(
+                f"📄 Reference PDFs — {len(downloaded)} fetched, {len(failed)} unavailable",
+                expanded=bool(downloaded) and not final.get("answer"),
+            ):
+                for rec in downloaded.values():
+                    t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
+                    st.markdown(f"- ✅ {t}")
+                for rec in failed.values():
+                    t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
+                    st.markdown(
+                        f"- ⚠️ {t}  \n  <sub>{rec.get('reason', '')}</sub>",
+                        unsafe_allow_html=True,
+                    )
 
 
 def _render_shortlist(selected):
@@ -174,10 +188,14 @@ def _render_build(final, query):
 
     if final.get("stopped"):
         st.warning(final["stopped"], icon="⚠️")
-        if "supply an arXiv" in final["stopped"] or "could not download" in final["stopped"]:
+        if (
+            "supply an arXiv" in final["stopped"]
+            or "could not download" in final["stopped"]
+            or "could not load seed PDF" in final["stopped"]
+        ):
             st.info(
-                "Paste an arXiv or PDF link into **Seed paper URL** above and "
-                "build again to ground the answer in a real corpus.",
+                "Upload a seed PDF or paste an arXiv/PDF link into **Seed paper URL** "
+                "above and build again to ground the answer in a real corpus.",
                 icon="💡",
             )
         if final.get("answer"):
@@ -247,32 +265,84 @@ tab_build, tab_cite, tab_batch, tab_chat, tab_help = st.tabs(
 # ─── Tab 1: build a corpus ─────────────────────────────────────────────────
 
 with tab_build:
-    with st.form("build_form"):
-        query = st.text_input(
-            "Research idea",
-            placeholder="topological protection in disordered quantum wires",
-        )
-        seed_url = st.text_input(
-            "Seed paper URL",
-            placeholder="https://arxiv.org/abs/2401.12345 — leave blank to search automatically",
-            help="Used when the search finds no open-access PDF. "
-                 "Accepts an arXiv link or a direct .pdf URL.",
-        )
-        c1, c2 = st.columns(2)
-        ask = c1.toggle("Answer my query at the end", value=True)
-        force = c2.toggle("Force re-run every stage", value=False)
-        submitted = st.form_submit_button("Build corpus", type="primary")
+    source_type = st.radio(
+        "Start pipeline from",
+        ["📄 Upload a seed PDF", "🔍 Search for a paper"],
+        horizontal=True,
+    )
 
-    if submitted and query.strip():
-        q = query.strip()
+    seed_file_path = None
+    seed_url_val = None
+    q = ""
+    submitted = False
+    ask = True
+    force = False
+
+    if source_type == "📄 Upload a seed PDF":
+        with st.form("upload_seed_form"):
+            uploaded_pdf = st.file_uploader(
+                "Seed paper (.pdf)",
+                type=["pdf"],
+                help="Start from this PDF as the seed paper. Its references will be extracted, fetched, and indexed.",
+            )
+            pdf_query = st.text_input(
+                "Research topic / question (optional)",
+                placeholder="e.g. topological protection in disordered wires (leave blank to infer from paper)",
+                help="If provided, used for the final related-work answer. If blank, automatically inferred from the paper title or filename.",
+            )
+            c1, c2 = st.columns(2)
+            ask = c1.toggle("Answer my query at the end", value=True)
+            force = c2.toggle("Force re-run every stage", value=False)
+            submitted = st.form_submit_button("Build corpus from PDF", type="primary")
+
+        if submitted:
+            if not uploaded_pdf:
+                st.warning("Please upload a PDF file to begin.", icon="⚠️")
+            elif uploaded_pdf.size == 0:
+                st.warning("The uploaded PDF is empty (0 bytes).", icon="⚠️")
+            else:
+                uploads_dir = os.path.join(config.DATA_DIR, "uploads")
+                os.makedirs(uploads_dir, exist_ok=True)
+                safe_name = os.path.basename(uploaded_pdf.name) or "uploaded_paper.pdf"
+                seed_file_path = os.path.join(uploads_dir, safe_name)
+                with open(seed_file_path, "wb") as f:
+                    f.write(uploaded_pdf.getbuffer())
+                q = pdf_query.strip()
+    else:
+        with st.form("build_form"):
+            query = st.text_input(
+                "Research idea",
+                placeholder="topological protection in disordered quantum wires",
+            )
+            seed_url = st.text_input(
+                "Seed paper URL",
+                placeholder="https://arxiv.org/abs/2401.12345 — leave blank to search automatically",
+                help="Used when the search finds no open-access PDF. "
+                     "Accepts an arXiv link or a direct .pdf URL.",
+            )
+            c1, c2 = st.columns(2)
+            ask = c1.toggle("Answer my query at the end", value=True)
+            force = c2.toggle("Force re-run every stage", value=False)
+            submitted = st.form_submit_button("Build corpus", type="primary")
+
+        if submitted:
+            if not query.strip():
+                st.warning("Please enter a research idea to search.", icon="⚠️")
+            else:
+                q = query.strip()
+                seed_url_val = seed_url.strip() or None
+
+    if submitted and (seed_file_path or q):
         graph = _graph()
-        cfg = {"configurable": {"thread_id": q[:64]}}
+        thread_seed = q or (os.path.basename(seed_file_path) if seed_file_path else "run")
+        cfg = {"configurable": {"thread_id": hashlib.sha1(thread_seed.encode()).hexdigest()[:16]}}
         inputs = {
             "query": q,
             "workers": 1,
             "force": force,
             "ask": ask,
-            "seed_url": seed_url.strip() or None,
+            "seed_url": seed_url_val,
+            "seed_file": seed_file_path,
         }
 
         # Filled progressively as nodes complete, so the seed + downloads show
@@ -289,7 +359,8 @@ with tab_build:
                         final.update(payload or {})
                         if node in ("discover", "ingest_seed", "fetch", "ingest_refs"):
                             with live.container():
-                                _render_seed_and_downloads(q, final)
+                                effective_display_q = final.get("query") or q
+                                _render_seed_and_downloads(effective_display_q, final)
                 final = graph.get_state(cfg).values
                 if final.get("stopped"):
                     status.update(label="Stopped early", state="error")
@@ -300,19 +371,20 @@ with tab_build:
                 st.exception(e)
 
         live.empty()
+        effective_final_q = final.get("query") or q or final.get("seed_label", "")
         st.session_state["build_result"] = final
-        st.session_state["build_query"] = q
+        st.session_state["build_query"] = effective_final_q
 
     if st.session_state.get("build_result"):
         _render_build(
             st.session_state["build_result"],
             st.session_state.get("build_query", ""),
         )
-    elif not (submitted and query.strip()):
+    else:
         st.caption(
-            "Agent 0 finds a paper → Agent 1 reads its references → "
+            "Agent 0 gets the seed paper → Agent 1 reads its references → "
             "Agent 2 fetches them → Agent 3 indexes everything → "
-            "the top papers get summarised and matched to your idea."
+            "the top papers get summarised and matched to your topic."
         )
 
 

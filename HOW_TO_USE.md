@@ -69,8 +69,16 @@ restart it, or point `GROBID_SERVER` at a hosted instance you trust.
 
 ## Tab 1 — Research a topic
 
-This is the tab that builds the corpus. Everything else depends on it.
+This is the tab that builds the corpus. Everything else depends on it. You can begin from your own PDF or let the assistant search for one:
 
+### Option A: Upload a seed PDF
+1. **Seed paper (.pdf)** — Upload any research paper in PDF format. The assistant seeds directly from your uploaded paper, indexes it, and mines its bibliography to build the corpus.
+2. **Research topic / question** *(optional)* — Specify a query or question to guide the final related-work synthesis. If left blank, the topic is automatically inferred from the paper's title or filename.
+3. **Answer my query at the end** *(on by default)* — runs the related-work synthesis once ingestion finishes.
+4. **Force re-run every stage** *(off by default)* — ignores saved state and redoes everything.
+5. **Build corpus from PDF.** Progress appears live as each stage finishes.
+
+### Option B: Search for a paper
 1. **Research idea** — one line of plain English. This gets used as a search
    query against arXiv, OpenAlex and Semantic Scholar, so it should read like a
    topic, not a question.
