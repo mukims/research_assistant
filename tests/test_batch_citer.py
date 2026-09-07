@@ -1,7 +1,14 @@
+import json
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from research_assistant.agents.agent5_batch_citer import _batch_needs_citation, _cite_keys
+from research_assistant.agents.agent5_batch_citer import (
+    _batch_needs_citation,
+    _cite_keys,
+    run_batch_citer,
+)
 from research_assistant.shared.llm import ChatResult
 
 
@@ -117,6 +124,118 @@ class TestVerdictAlignment(unittest.TestCase):
             return_value=_reply("Here you go:\n\n1. YES\n\n2. NO\n"),
         ):
             self.assertEqual(_batch_needs_citation(["one", "two"]), [True, False])
+
+
+class TestRunBatchCiter(unittest.TestCase):
+    """Regression coverage for run_batch_citer's two safety properties.
+
+    Neither property was exercised anywhere in the suite before this class —
+    a reviewer flipped ``if _cite_keys(cited_sentence):`` to ``if True:`` in
+    ``run_batch_citer`` and every existing test still passed. That inversion
+    would make ``_citations.json`` assert sources that never backed a claim,
+    and would make ``_report.md`` report declined citations as successes.
+
+    (a) A successful per-sentence call that *declines* to cite (its reply
+        contains no ``\\cite{}``) must not be recorded as a citation.
+    (b) A citation-need check that fails after retries must abort the whole
+        run and write none of the three output files.
+
+    The retrieval seams (``load_search_resources``, ``hybrid_search``) are
+    mocked so the test never touches a real ChromaDB/BM25 index; ``chat`` is
+    mocked so it never calls a real model. All output is written under a
+    ``tempfile.TemporaryDirectory`` so nothing lands in the repo.
+    """
+
+    DRAFT_TEXT = "Graphene exhibits ballistic transport at low temperature."
+
+    def _write_draft(self, tmpdir):
+        draft_path = os.path.join(tmpdir, "draft.txt")
+        with open(draft_path, "w") as f:
+            f.write(self.DRAFT_TEXT)
+        return draft_path
+
+    def test_declined_citation_is_not_recorded_as_cited(self):
+        """A successful call that declines to cite must not count as cited."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = self._write_draft(tmpdir)
+            out_path = os.path.join(tmpdir, "cited.txt")
+
+            with patch(
+                "research_assistant.agents.agent5_batch_citer.load_search_resources",
+                return_value=(None, None, [], []),
+            ), patch(
+                "research_assistant.agents.agent5_batch_citer.hybrid_search",
+                return_value=[
+                    {
+                        "text": "Ballistic transport has been observed in graphene at cryogenic temperatures.",
+                        "metadata": {"citation_source": "Doe, J. et al. (2020)"},
+                    }
+                ],
+            ), patch(
+                "research_assistant.agents.agent5_batch_citer.chat",
+                side_effect=[
+                    _reply("1. YES"),
+                    _reply(
+                        "CITED: The original sentence unchanged.\n"
+                        "REASON: The context does not support this claim."
+                    ),
+                ],
+            ):
+                result = run_batch_citer(draft_path, out_path)
+
+            self.assertEqual(result, out_path)
+
+            mapping_path = out_path.replace(".txt", "_citations.json")
+            report_path = out_path.replace(".txt", "_report.md")
+            self.assertTrue(os.path.exists(out_path))
+            self.assertTrue(os.path.exists(mapping_path))
+            self.assertTrue(os.path.exists(report_path))
+
+            with open(mapping_path) as f:
+                mapping = json.load(f)
+            # The retrieved source was never actually used in a \cite{}, so
+            # it must not appear in the key -> source mapping that drives
+            # BibTeX generation.
+            self.assertEqual(mapping, {})
+
+            with open(report_path) as f:
+                report = f.read()
+            # The declined sentence must be tallied as "needed a citation,
+            # none made" -- never folded into the "Cited" count.
+            self.assertIn("| Cited | 0 |", report)
+            self.assertIn("**Needed a citation, none made** | **1**", report)
+
+    def test_failed_citation_need_check_aborts_without_writing(self):
+        """A citation-need check that fails after retries must write nothing.
+
+        A misaligned verdict list would attribute one sentence's citation
+        decision to another, and a partially-written draft is worse than no
+        draft -- so a failure here must abort before any output is written.
+        ``_batch_needs_citation`` is wrapped in ``@retry(max_retries=2)``, so
+        making its underlying ``chat`` call always raise means it is invoked
+        twice (with the retry's backoff sleep stubbed out) before the
+        exception finally surfaces to ``run_batch_citer`` -- that is expected.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = self._write_draft(tmpdir)
+            out_path = os.path.join(tmpdir, "cited.txt")
+
+            with patch(
+                "research_assistant.agents.agent5_batch_citer.load_search_resources",
+                return_value=(None, None, [], []),
+            ), patch(
+                "research_assistant.agents.agent5_batch_citer.chat",
+                side_effect=RuntimeError("simulated LLM failure"),
+            ), patch("research_assistant.shared.retry.time.sleep"):
+                result = run_batch_citer(draft_path, out_path)
+
+            self.assertIsNone(result)
+
+            mapping_path = out_path.replace(".txt", "_citations.json")
+            report_path = out_path.replace(".txt", "_report.md")
+            self.assertFalse(os.path.exists(out_path))
+            self.assertFalse(os.path.exists(mapping_path))
+            self.assertFalse(os.path.exists(report_path))
 
 
 if __name__ == "__main__":
