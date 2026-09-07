@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# All runtime state lives under data/ — see config.DATA_DIR
+data/
+
+# Layout-detection checkpoint (symlinked, ~830MB)
+model_final.pth
