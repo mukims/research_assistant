@@ -42,45 +42,6 @@ logger = get_logger("agent2")
 TRUSTED_CONFIDENCE = ("high", "medium")
 
 
-def _safe_component(text: str, limit: int) -> str:
-    """Filesystem-safe slug of *text*, truncated to *limit* characters."""
-    return re.sub(r"[^a-zA-Z0-9_\-]", "_", text)[:limit].strip("_")
-
-
-def paper_filename(title: str, doi: str | None = None, arxiv_id: str | None = None) -> str:
-    """Return a filename identifying the *paper*, stable across runs.
-
-    The name is derived from the work's own identity — its DOI, else its arXiv
-    id, else its title — so two citation strings that resolve to the same paper
-    produce the same filename and the second lookup reuses the first download.
-
-    The previous scheme appended the citation's position in the fetch queue,
-    which is recomputed every run because the queue only holds citations not yet
-    resolved. The same reference formatted two ways in two source papers (or
-    across two runs) therefore landed under two names, and each copy was fetched
-    over the network and then fully re-parsed — layout detection on every page
-    plus a VLM call per figure. It also gave Agent 5 two different cite keys for
-    one paper, so a draft could cite the same work twice under different labels.
-
-    fetch_papers() itself now derives the destination filename from the
-    reference's source_key via shared.fetch.filename_for(), which additionally
-    covers pmid/url-derived identities — this function is kept as the naming
-    primitive it replaced, since it is still a well-defined, independently
-    useful (title, doi, arxiv_id) -> filename mapping.
-    """
-    # Lower-cased so that a title returned with different capitalisation or
-    # trailing punctuation still resolves to one file. The identifier that
-    # follows is what actually guarantees distinct papers stay distinct; the
-    # title is there to keep filenames and logs readable. This also matches
-    # shared.ingestion.pdf_key(), which lower-cases the document identity.
-    stem = _safe_component(title.lower(), 50) if title and title != "Unknown" else "untitled"
-    if doi:
-        return f"{stem}_{_safe_component(doi, 40)}.pdf"
-    if arxiv_id:
-        return f"{stem}_arxiv_{_safe_component(arxiv_id, 30)}.pdf"
-    return f"{stem}.pdf"
-
-
 def _checkpoint(downloaded, failed):
     """Write state to disk after every paper — crash-safe incremental saves."""
     with open(DOWNLOADED_JSON_PATH, "w") as f:

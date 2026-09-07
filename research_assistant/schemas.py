@@ -81,7 +81,7 @@ class DownloadedPaper(_Record):
 
     key: str                              # source_key — the primary identity
     path: str
-    provider: str                         # unpaywall | europepmc | arxiv | crossref
+    provider: str                         # unpaywall | europepmc | arxiv
     fetched_at: str
     title: str | None = None
     raw_reference: str | None = None
