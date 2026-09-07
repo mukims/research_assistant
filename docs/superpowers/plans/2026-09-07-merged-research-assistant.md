@@ -12,13 +12,26 @@
 
 ## Global Constraints
 
-- **No git.** The user chose no version control. Every task ends with a **Checkpoint** step (run the tests) instead of a commit. Nothing in this plan runs `git`. *(If you want revertable tasks, say so and I'll `git init` first — the plan is unaffected otherwise.)*
+- **Git is initialised** on branch `main`, with the spec and this plan already committed (`da7af8d`). Every task's final **Checkpoint** step is: run the full suite, then commit only if it is green. Never commit with failing tests — the point of a per-task commit is that each one is a working state you can return to.
+- **Commit message format:** conventional-commit subject, a body saying *why* where it is not obvious, and this trailer verbatim:
+  ```
+  Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+  ```
+- **Never `git add -A` or `git add .`** — the tree contains an 830 MB symlinked checkpoint and a `data/` directory. Stage the files the task names, explicitly.
 - **Source repos are read-only.** `/Users/shardul/Downloads/tech_ireland` and `/Users/shardul/Downloads/citation_builder` are copied *from*, never modified.
 - **No corpus or weights are copied.** `data/` starts empty. `model_final.pth` is a symlink to `/Users/shardul/Downloads/tech_ireland/model_final.pth`.
 - **Import convention:** absolute, always `research_assistant.…`. No relative imports.
 - **Heavy imports stay function-local.** ChromaDB, torch, detectron2/layoutparser, OpenCV, PyMuPDF and the LangChain embedding stack are imported *inside* the functions that use them. This is load-bearing: CI installs only `requirements-test.txt`, and module-scope imports make the suite uncollectable there.
 - **After this merge, no module outside `research_assistant/shared/llm.py` imports `ollama` or `openai`.**
 - **Test command:** `CITATION_LOG_FILE=0 python -m pytest tests/ -v`
+- **Checkpoint procedure.** Wherever a task's last step says *Checkpoint*, it means exactly this:
+  ```bash
+  cd /Users/shardul/Downloads/research_assistant
+  CITATION_LOG_FILE=0 python -m pytest tests/ -v      # must be green (Task 1: run its Step 9 check instead — no tests exist yet)
+  git add <the files this task created or modified>   # named explicitly, never -A
+  git commit -m "<type>: <subject>" -m "<why>" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+  ```
+  If the suite is red, fix it before committing. Report the failure rather than committing around it.
 - **Import sweep** (the CI gate that catches broken imports no test covers):
   ```bash
   CITATION_LOG_FILE=0 python -c "
@@ -107,21 +120,15 @@ Then append to `requirements.txt` (agents 5–7 and `watch.py` need it; neither 
 watchdog==6.0.0
 ```
 
-- [ ] **Step 4: Write `.gitignore`**
+- [ ] **Step 4: Verify `.gitignore`**
 
-```gitignore
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.venv/
-venv/
+Already written and committed during repo setup. Confirm it covers `data/`,
+`model_final.pth`, `__pycache__/`, `*.egg-info/`, `.pytest_cache/` and
+`.DS_Store`; the symlinked checkpoint and the runtime state directory must
+never be staged. No change needed unless something is missing.
 
-# All runtime state lives under data/ — see config.DATA_DIR
-data/
-
-# Layout-detection checkpoint (symlinked, ~830MB)
-model_final.pth
+```bash
+cd /Users/shardul/Downloads/research_assistant && cat .gitignore
 ```
 
 - [ ] **Step 5: Copy `log.py` and `retry.py`, rewrite their imports**
