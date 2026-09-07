@@ -213,7 +213,8 @@ python -m research_assistant.agents.agent7_research_chat
 python watch.py
 ```
 
-Or the Streamlit UI (same five interactive agents, with a browser front-end):
+Or the Streamlit UI (four interactive agents across five tabs — the fifth
+tab is documentation, not an agent — with a browser front-end):
 
 ```bash
 streamlit run app.py

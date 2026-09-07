@@ -219,7 +219,8 @@ with st.sidebar:
     st.caption(("🟢" if grobid_up else "🔴") + f" **GROBID** — {config.GROBID_SERVER}")
     if not grobid_up:
         st.warning(
-            "GROBID isn't responding — reference extraction (Agent 1) will fail.",
+            "GROBID isn't responding — Agent 1 will fall back to weaker, "
+            "unstructured reference extraction (no DOIs, no authors).",
             icon="⚠️",
         )
     if config.LLM_BACKEND == "openai" and not config.OPENAI_API_KEY:

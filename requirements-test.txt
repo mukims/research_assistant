@@ -17,6 +17,13 @@
 #
 # pytest replaces unittest discover — it collects the existing
 # unittest.TestCase classes unchanged, so no test file needed to change.
+#
+# watchdog is here for CI's import sweep, not for the tests themselves:
+# agent6_manual_ingestor.py imports it at module scope (unlike the ML stack,
+# it is not deferred into a function), so anything that imports that module
+# needs it installed. It is pure Python with no compiled-wheel risk, so it
+# doesn't compromise this file's "light packages only" invariant.
 pytest~=9.1
 numpy~=2.2.6
 requests~=2.32
+watchdog~=6.0

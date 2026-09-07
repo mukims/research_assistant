@@ -67,7 +67,7 @@ def suggest_citation(text, top_k=DEFAULT_TOP_K, search_resources=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Citation AI Assistant")
+    parser = argparse.ArgumentParser(description="Agent 4 — Assistant (Research Assistant)")
     parser.add_argument("--text", type=str, required=True, help="Draft text you want to cite.")
     parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K, help="Number of retrieved components.")
     args = parser.parse_args()
