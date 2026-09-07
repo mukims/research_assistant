@@ -13,6 +13,13 @@ a half-built record is exactly the failure being designed out.
 
 from dataclasses import MISSING, asdict, dataclass, fields
 
+# The one union shape this module checks. Finding I3: agent2_fetcher.py wrote
+# a tuple into `doi_source` (str | None) because of an operator-precedence
+# bug, and nothing here caught it before it reached disk. This is
+# deliberately narrow -- str | None is the shape every optional scalar field
+# below actually uses -- not a general type system.
+_STR_OR_NONE = str | None
+
 
 class SchemaError(ValueError):
     """A record could not be built from the given mapping."""
@@ -49,6 +56,30 @@ class _Record:
         # optional fields, where dropping the key lets the dataclass default
         # apply instead of storing a bare None where e.g. a tuple is expected.
         kwargs = {k: v for k, v in data.items() if k in known and v is not None}
+
+        # `authors` becomes tuple(value) below. tuple() does not reject a
+        # bare string -- it happily explodes "Smith, J." into a 9-tuple of
+        # characters, one per letter, which then produces a different
+        # source_key than the list-of-names it was supposed to be. Catch
+        # that shape specifically, before it reaches tuple().
+        if isinstance(kwargs.get("authors"), str):
+            raise SchemaError(
+                f"{cls.__name__}.authors: expected a list of names, got a bare "
+                f"string ({kwargs['authors']!r})"
+            )
+
+        # Lightweight scalar check: a field declared `str | None` must be a
+        # str whenever it is present (None was already filtered out above).
+        # Deliberately narrow -- see _STR_OR_NONE's comment -- this is not a
+        # general type system, just the one shape that has actually broken.
+        field_types = {f.name: f.type for f in fields(cls)}
+        for name, value in kwargs.items():
+            if field_types.get(name) == _STR_OR_NONE and not isinstance(value, str):
+                raise SchemaError(
+                    f"{cls.__name__}.{name}: expected str, got {type(value).__name__} "
+                    f"({value!r})"
+                )
+
         try:
             if "authors" in kwargs:
                 kwargs["authors"] = tuple(kwargs["authors"])

@@ -25,7 +25,9 @@ os.makedirs(config.DATA_DIR, exist_ok=True)
 
 def _graph():
     # Rebuilt per run so each build starts from a clean checkpointer.
-    from research_assistant import orchestrate
+    # orchestrate.py is a root-level entry point, not a package module —
+    # it must be imported bare, not as research_assistant.orchestrate.
+    import orchestrate
 
     return orchestrate.build_graph()
 

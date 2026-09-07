@@ -96,18 +96,3 @@ def source_key(record, min_doi_confidence=("high", "medium")):
 def is_authoritative(key):
     """True when the key came from a real identifier rather than a derived one."""
     return bool(key) and key.split(":", 1)[0] in ("doi", "arxiv", "pmid")
-
-
-def title_blocking_key(record):
-    """
-    A coarse key for finding near-duplicates that hashing alone will miss.
-
-    Two parses of one paper can differ by a subtitle or a dropped word, which
-    changes the title hash. Group candidates on this, then compare properly
-    within each group.
-    """
-    title = _fold_title(record.get("title"))
-    if not title:
-        return None
-    tokens = [t for t in title.split() if len(t) > 3][:4]
-    return " ".join(sorted(tokens)) or None

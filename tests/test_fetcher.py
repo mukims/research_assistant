@@ -80,6 +80,64 @@ class TestPaperFilename(unittest.TestCase):
         self.assertEqual(filename_for(key), "doi_10.1038_nature05180.pdf")
 
 
+class _FakeCrossrefResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class TestResolveDoi(unittest.TestCase):
+    """Finding I3: `return doi, "grobid-unverified" if doi else (None, None)`
+    parses as `return doi, ("grobid-unverified" if doi else (None, None))` —
+    a tuple written into what should be a plain (doi, how) pair, so
+    doi_source ends up `[null, null]` in downloaded.json. Line 106 was
+    already parenthesised correctly; only line 103 had the bug."""
+
+    def _ref(self, **overrides):
+        ref = {"doi": "10.1000/xyz", "doi_confidence": "low", "title": "Some title"}
+        ref.update(overrides)
+        return ref
+
+    def test_crossref_request_failure_returns_a_plain_two_tuple(self):
+        import requests as requests_mod
+
+        with patch.object(agent2_fetcher.requests, "get",
+                           side_effect=requests_mod.RequestException("boom")):
+            result = agent2_fetcher.resolve_doi(self._ref())
+
+        self.assertEqual(result, ("10.1000/xyz", "grobid-unverified"))
+        self.assertIsInstance(result[1], str)
+
+    def test_crossref_no_results_returns_a_plain_two_tuple(self):
+        with patch.object(agent2_fetcher.requests, "get",
+                           return_value=_FakeCrossrefResponse({"message": {"items": []}})):
+            result = agent2_fetcher.resolve_doi(self._ref())
+
+        self.assertEqual(result, ("10.1000/xyz", "grobid-unverified"))
+
+    def test_no_doi_and_crossref_failure_returns_none_none(self):
+        import requests as requests_mod
+
+        with patch.object(agent2_fetcher.requests, "get",
+                           side_effect=requests_mod.RequestException("boom")):
+            result = agent2_fetcher.resolve_doi(self._ref(doi=None))
+
+        self.assertEqual(result, (None, None))
+
+    def test_crossref_success_resolves_via_crossref(self):
+        with patch.object(agent2_fetcher.requests, "get",
+                           return_value=_FakeCrossrefResponse(
+                               {"message": {"items": [{"DOI": "10.9999/found"}]}})):
+            result = agent2_fetcher.resolve_doi(self._ref())
+
+        self.assertEqual(result, ("10.9999/found", "crossref"))
+
+
 class TestManifestParsing(unittest.TestCase):
     def test_malformed_entry_is_skipped_not_treated_as_a_path(self):
         """The old shim turned a record with no path into a missing file."""

@@ -80,6 +80,25 @@ class TestReference(unittest.TestCase):
                 {"raw_reference": "r", "source_file": "s.pdf", "authors": 5}
             )
 
+    def test_bare_string_authors_raises_rather_than_exploding_into_characters(self):
+        """Finding I3's second half: tuple() does not reject a plain string --
+        tuple("Smith, J.") silently becomes a 9-tuple of individual
+        characters, which then produces a different source_key than the
+        list-of-names it was meant to be. A bare string must be rejected
+        outright, not coerced."""
+        with self.assertRaises(SchemaError):
+            Reference.from_dict(
+                {"raw_reference": "r", "source_file": "s.pdf", "authors": "Smith, J."}
+            )
+
+    def test_non_string_optional_scalar_field_raises(self):
+        """Finding I3: a str | None field (e.g. title) must reject a non-str,
+        non-None value rather than silently storing it."""
+        with self.assertRaises(SchemaError):
+            Reference.from_dict(
+                {"raw_reference": "r", "source_file": "s.pdf", "title": ["not", "a", "string"]}
+            )
+
 
 class TestDownloadedPaper(unittest.TestCase):
     def test_missing_path_raises_rather_than_half_building(self):
@@ -124,6 +143,16 @@ class TestDownloadedPaper(unittest.TestCase):
         self.assertEqual(round_tripped.xml_id, "b12")
         self.assertEqual(round_tripped.doi_source, "crossref")
         self.assertTrue(round_tripped.authoritative)
+
+    def test_tuple_written_into_doi_source_raises_schema_error(self):
+        """The exact shape Finding I3's operator-precedence bug in
+        agent2_fetcher.resolve_doi() produced: a JSON-decoded 2-list landing
+        in a str | None field instead of a string."""
+        with self.assertRaises(SchemaError):
+            DownloadedPaper.from_dict({
+                "key": "doi:10.1/x", "path": "p", "provider": "unpaywall",
+                "fetched_at": "now", "doi_source": [None, None],
+            })
 
 
 class TestSeedPaper(unittest.TestCase):

@@ -665,10 +665,15 @@ def ingest_pdfs(
     else:
         logger.info("%sNo content extracted from the processed PDF(s).", log_prefix)
 
-    # Mark every PDF that was attempted, including ones that yielded nothing.
-    # A corrupt, empty, or duplicate paper produces no new chunks, and without a
-    # mark it would be re-parsed on every single run for the rest of time.
-    manifest.add_many(pdf_key(path) for path in candidates)
+    # Mark every PDF that was attempted and did not fail, including ones that
+    # yielded nothing. A corrupt, empty, or duplicate paper produces no new
+    # chunks, and without a mark it would be re-parsed on every single run for
+    # the rest of time — that part is deliberate. But a path a worker crashed
+    # on is also in candidates, and marking it too would hide the crash: only
+    # --force (which reprocesses everything) would ever recover it.
+    failed_paths = set(result["failed"])
+    marked = [path for path in candidates if path not in failed_paths]
+    manifest.add_many(pdf_key(path) for path in marked)
 
     # Rebuilding is only worthwhile when the collection actually changed, but
     # the index must also exist for search to work at all.

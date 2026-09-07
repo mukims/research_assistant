@@ -30,6 +30,7 @@ Users never need to run individual agent scripts — just drop files into the
 right directories and the orchestrator handles the rest.
 """
 
+import json
 import os
 import sys
 import glob
@@ -48,6 +49,7 @@ from research_assistant.config import (
     RAW_DIR,
     DRAFTS_DIR,
     PULLED_PDFS_DIR,
+    DOWNLOADED_JSON_PATH,
     PDF_COOLDOWN_SECONDS,
     DRAFT_COOLDOWN_SECONDS,
     MANUAL_COOLDOWN_SECONDS,
@@ -57,6 +59,38 @@ from research_assistant.shared.log import get_logger
 from research_assistant.shared.ingestion import ingest_pdfs
 
 logger = get_logger("orchestrator")
+
+
+def _labeled_pdfs(paths):
+    """{path: label} for ingest_pdfs, preferring the title Agent 2 recorded.
+
+    Passing ingest_pdfs a bare list (rather than a {path: label} mapping)
+    makes it fall back to the filename stem for every entry — e.g.
+    "doi_10.1038_nature05180" — which becomes citation_source on every chunk
+    and from there the \\cite{} key in Agent 4/5/7's output. Once ingest_pdfs
+    marks a path in the manifest, Agent 3 can never correct that label later
+    (see agent3_ingestor._pdfs_from_manifest's docstring), and this module's
+    two ingest_pdfs call sites are the default path under watch.py — so the
+    label has to be right the first time here, not just in Agent 3's own run.
+
+    Reuses agent3_ingestor._pdfs_from_manifest, which prefers the parsed
+    title, then the raw reference string, then the source key. Falls back to
+    the plain filename stem only for a path with no entry in downloaded.json
+    at all (e.g. a PDF dropped in by hand rather than fetched by Agent 2).
+    """
+    from research_assistant.agents.agent3_ingestor import _pdfs_from_manifest
+
+    try:
+        with open(DOWNLOADED_JSON_PATH, encoding="utf-8") as fh:
+            downloaded = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        downloaded = {}
+
+    by_path = _pdfs_from_manifest(downloaded)
+    return {
+        path: by_path.get(path, os.path.splitext(os.path.basename(path))[0])
+        for path in paths
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -76,7 +110,7 @@ def sync_database(workers=1):
         logger.info("[Sync] No PDFs in pulled_pdfs/ — nothing to sync.")
         return None
 
-    result = ingest_pdfs(pdf_files, workers=workers, log_prefix="[Sync] ")
+    result = ingest_pdfs(_labeled_pdfs(pdf_files), workers=workers, log_prefix="[Sync] ")
     logger.info(
         "[Sync] Complete — %d processed, %d already indexed, %d new chunk(s). ✓",
         result["processed"], result["skipped"], result["inserted"],
@@ -148,7 +182,7 @@ class PulledPDFHandler(FileSystemEventHandler):
         if not batch:
             return
         try:
-            ingest_pdfs(batch, workers=self.workers, log_prefix="[pulled_pdfs/] ")
+            ingest_pdfs(_labeled_pdfs(batch), workers=self.workers, log_prefix="[pulled_pdfs/] ")
         except Exception as e:
             logger.error("[pulled_pdfs/] Batch ingest failed: %s", e)
 

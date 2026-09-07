@@ -41,6 +41,15 @@ jobs:
         # embeddings) are imported lazily inside the functions that use them,
         # so the whole package tree imports fine without that stack installed;
         # CI deliberately does not install it.
+        #
+        # The three root entry points (app.py, orchestrate.py, watch.py) are
+        # included here too — not just the research_assistant package. C1 (a
+        # `from research_assistant import orchestrate` inside app.py, where
+        # orchestrate.py is actually a root-level script) lived in exactly
+        # the gap this used to leave open: the spec's own top risk (§10) is
+        # "the import rewrite misses a reference", and this sweep is its
+        # mitigation. langgraph and streamlit back these three imports; both
+        # are pure-Python wheels, added to requirements-test.txt for this.
         env:
           CITATION_LOG_FILE: "0"
         run: |
@@ -58,6 +67,7 @@ jobs:
                    research_assistant.agents.agent4_assistant \
                    research_assistant.agents.agent5_batch_citer \
                    research_assistant.agents.agent6_manual_ingestor \
-                   research_assistant.agents.agent7_research_chat; do
+                   research_assistant.agents.agent7_research_chat \
+                   app orchestrate watch; do
             python -c "import $m" || exit 1
           done

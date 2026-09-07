@@ -12,12 +12,19 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-from research_assistant.config import PROJECT_ROOT
+from research_assistant.config import DATA_DIR
 
 # Overridable so a test run, or a second checkout, does not append to the
 # project's own log. Set CITATION_LOG_DIR to redirect, or CITATION_LOG_FILE=0
 # to turn file logging off entirely and keep console output only.
-LOG_DIR  = os.environ.get("CITATION_LOG_DIR", os.path.join(PROJECT_ROOT, "logs"))
+#
+# Anchored to DATA_DIR, not PROJECT_ROOT: spec §4.2 requires everything the
+# pipeline writes to live under DATA_DIR, so that CITATION_DATA_DIR alone (the
+# documented lever for a read-only host) redirects logs along with everything
+# else, and so the log — which records query strings and the contact address
+# — falls under the existing `data/` entry in .gitignore instead of needing
+# its own.
+LOG_DIR  = os.environ.get("CITATION_LOG_DIR", os.path.join(DATA_DIR, "logs"))
 LOG_FILE = os.path.join(LOG_DIR, "research_assistant.log")
 LOG_TO_FILE = os.environ.get("CITATION_LOG_FILE", "1").lower() not in ("0", "false", "no")
 

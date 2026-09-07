@@ -23,6 +23,24 @@
 # it is not deferred into a function), so anything that imports that module
 # needs it installed. It is pure Python with no compiled-wheel risk, so it
 # doesn't compromise this file's "light packages only" invariant.
+#
+# beautifulsoup4 and lxml back test_extractor.py's TestTeiParsing /
+# TestDoiConfidence: agent1_extractor.parse_reference() and
+# parse_article_metadata() are real TEI parsing, not opaque logic, and both
+# packages are pure-Python-wheel/pinned in requirements.txt already — there
+# was never a reason they were untestable here. Pinned to the same versions
+# requirements.txt uses (which is itself pinned there for cp313-wheel
+# availability, not relevant to this file, but there is no reason to drift).
+beautifulsoup4==4.15.0
+lxml==4.9.4
+#
+# langgraph and streamlit are here for CI's import sweep only, which now
+# covers the three root entry points (app.py, orchestrate.py, watch.py) —
+# C1 (app.py importing orchestrate as though it were a package module) lived
+# in exactly the gap this closes. Both are pure-Python wheels, same versions
+# pinned in requirements.txt.
+langgraph==0.4.7
+streamlit==1.53.1
 pytest~=9.1
 numpy~=2.2.6
 requests~=2.32

@@ -152,6 +152,41 @@ class TestDenseIdHandling(unittest.TestCase):
             self.assertIs(type(r["chunk_index"]), int)
 
 
+class TestDocFilter(unittest.TestCase):
+    """The sparse-side half of doc_filter (search.py:79-83) is what keeps
+    stage-2 retrieval from leaking chunks out of papers the stage-1 gate
+    already rejected. It was previously untested in either direction:
+    replacing its predicate with `True` (a no-op filter) left the whole
+    suite green. The dense side is exercised too (via collection.query's
+    `where`), but FakeCollection ignores kwargs and returns a fixed id list
+    regardless, so this test isolates the sparse-side predicate specifically
+    by returning no dense hits at all."""
+
+    def test_sparse_side_excludes_documents_outside_the_filter(self):
+        # Index 0 is the single highest BM25 scorer, but its document is not
+        # in doc_filter. A no-op predicate (e.g. mutated to `True`) would let
+        # it leak through as the top result anyway.
+        scores = [10.0, 5.0, 4.0, 3.0, 2.0]
+        texts, metadatas = _corpus(len(scores))
+
+        results = hybrid_search(
+            "q",
+            FakeCollection([]),   # no dense hits — isolates the sparse side
+            FakeBM25(scores),
+            texts,
+            metadatas,
+            top_k=2,
+            embeddings_model=FakeEmbeddings(),
+            doc_filter={"doc1.pdf", "doc2.pdf"},
+        )
+
+        indices = [r["chunk_index"] for r in results]
+        self.assertNotIn(0, indices, "doc0.pdf is outside doc_filter and must not leak in")
+        self.assertEqual(indices, [1, 2])
+        for r in results:
+            self.assertIn(r["metadata"]["document"], {"doc1.pdf", "doc2.pdf"})
+
+
 class TestFusion(unittest.TestCase):
     def test_a_chunk_found_by_both_outranks_one_found_by_either(self):
         """That is the whole point of reciprocal rank fusion."""

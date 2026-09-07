@@ -121,6 +121,152 @@ class TestFallbackRouting(unittest.TestCase):
         self.assertEqual((refs, method), ([], "none"))
 
 
+class TestTeiParsing(unittest.TestCase):
+    """Real parsing against a literal TEI fixture — not mocks.
+
+    A prior task claimed TEI internals were untestable because bs4/lxml were
+    absent from the venv. That was false: both are pinned in requirements.txt
+    and install cleanly on 3.12 (requirements-test.txt now pulls them in too).
+    This closes that hole and, in particular, pins down xml_id: bs4 stores a
+    TEI ``xml:id`` attribute under the literal key ``"xml:id"``, not Clark
+    notation, so ``bibl.get("{http://www.w3.org/XML/1998/namespace}id")``
+    alone always returns None.
+    """
+
+    TEI = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <sourceDesc>
+        <biblStruct>
+          <analytic>
+            <title level="a" type="main">Emergent gauge fields in disordered wires</title>
+            <author>
+              <persName><forename type="first">Ada</forename><surname>Lovelace</surname></persName>
+            </author>
+            <idno type="DOI">10.1000/citing-paper</idno>
+          </analytic>
+        </biblStruct>
+      </sourceDesc>
+    </fileDesc>
+  </teiHeader>
+  <text>
+    <back>
+      <div type="references">
+        <listBibl>
+          <biblStruct xml:id="b0">
+            <analytic>
+              <title level="a" type="main">Absence of diffusion in certain random lattices</title>
+              <author>
+                <persName><forename type="first">P</forename><forename type="middle">W</forename><surname>Anderson</surname></persName>
+              </author>
+              <idno type="DOI">10.1103/physrev.109.1492</idno>
+            </analytic>
+            <monogr>
+              <title level="j">Physical Review</title>
+              <imprint>
+                <date type="published" when="1958">1958</date>
+              </imprint>
+            </monogr>
+            <note type="raw_reference">P. W. Anderson, Absence of diffusion in certain random lattices, Phys. Rev. 109, 1492 (1958).</note>
+          </biblStruct>
+          <biblStruct xml:id="b1">
+            <monogr>
+              <title level="m">Internal engineering report on wire fabrication</title>
+              <imprint>
+                <date type="published" when="2001">2001</date>
+              </imprint>
+            </monogr>
+            <note type="raw_reference">Acme Corp, Internal engineering report on wire fabrication, technical report, 2001.</note>
+          </biblStruct>
+        </listBibl>
+      </div>
+    </back>
+  </text>
+</TEI>"""
+
+    def setUp(self):
+        from bs4 import BeautifulSoup
+
+        self.soup = BeautifulSoup(self.TEI, "xml")
+        self.bibls = self.soup.find("listBibl").find_all("biblStruct")
+
+    def test_xml_id_is_read_from_the_literal_bs4_attribute_key(self):
+        """The regression test for Finding C2: must fail against
+        ``bibl.get("{http://www.w3.org/XML/1998/namespace}id") or
+        bibl.get("id")`` alone, which always returns None for bs4's XML
+        parser."""
+        ref = ex.parse_reference(self.bibls[0])
+        self.assertEqual(ref["xml_id"], "b0")
+
+    def test_second_reference_gets_its_own_xml_id(self):
+        ref = ex.parse_reference(self.bibls[1])
+        self.assertEqual(ref["xml_id"], "b1")
+
+    def test_title_authors_doi_year_and_container_are_parsed(self):
+        ref = ex.parse_reference(self.bibls[0])
+        self.assertEqual(ref["title"], "Absence of diffusion in certain random lattices")
+        self.assertEqual(ref["authors"], ["P W Anderson"])
+        self.assertEqual(ref["doi"], "10.1103/physrev.109.1492")
+        self.assertEqual(ref["year"], 1958)
+        self.assertEqual(ref["container"], "Physical Review")
+        self.assertEqual(ref["doi_confidence"], "high")
+
+    def test_book_style_reference_falls_back_to_monogr_title(self):
+        """No <analytic> on this one, so the title must come from <monogr>
+        rather than being left None."""
+        ref = ex.parse_reference(self.bibls[1])
+        self.assertEqual(ref["title"], "Internal engineering report on wire fabrication")
+        self.assertIsNone(ref["doi"])
+        self.assertIsNone(ref["doi_confidence"])
+
+    def test_article_metadata_from_the_tei_header(self):
+        article = ex.parse_article_metadata(self.soup, source_file="citing.pdf")
+        self.assertEqual(article["title"], "Emergent gauge fields in disordered wires")
+        self.assertEqual(article["doi"], "10.1000/citing-paper")
+        self.assertEqual(article["authors"], ["Ada Lovelace"])
+
+
+class TestDoiConfidence(unittest.TestCase):
+    def test_no_raw_reference_is_unknown(self):
+        self.assertEqual(ex._doi_confidence("Some title", None), "unknown")
+
+    def test_no_title_and_grey_literature_is_low(self):
+        self.assertEqual(
+            ex._doi_confidence(None, "Available online at http://example.com, accessed 2020."),
+            "low",
+        )
+
+    def test_no_title_and_not_grey_is_unknown(self):
+        self.assertEqual(
+            ex._doi_confidence(None, "Smith J. A paper. Nature, 2019."), "unknown"
+        )
+
+    def test_high_overlap_non_grey_is_high(self):
+        title = "Absence of diffusion in certain random lattices"
+        raw = (
+            "P. W. Anderson, Absence of diffusion in certain random lattices, "
+            "Phys. Rev. 109, 1492 (1958)."
+        )
+        self.assertEqual(ex._doi_confidence(title, raw), "high")
+
+    def test_high_overlap_but_grey_literature_is_downgraded_to_medium(self):
+        title = "Internal engineering report on wire fabrication"
+        raw = (
+            "Acme Corp, Internal engineering report on wire fabrication, "
+            "technical report, 2001."
+        )
+        self.assertEqual(ex._doi_confidence(title, raw), "medium")
+
+    def test_low_overlap_is_low(self):
+        self.assertEqual(
+            ex._doi_confidence(
+                "Completely unrelated title here", "Totally different raw string text"
+            ),
+            "low",
+        )
+
+
 class TestGrobidProbe(unittest.TestCase):
     def test_unreachable_server_is_false_not_an_exception(self):
         import requests
@@ -329,6 +475,41 @@ class TestRunExtractorPayload(RunExtractorTestCase):
              patch.object(ex, "extract_references", return_value=([], "none")):
             ex.run_extractor()
         batch.assert_called_once_with(self.raw_dir, ex.XML_OUTPUT_DIR)
+
+
+class TestOutcomeFiling(RunExtractorTestCase):
+    """Finding I5: Spec §8 claims this filing is covered; it was not. Both of
+    these mutations left all tests passing before this class existed:
+    filing every PDF under processed/ regardless of outcome, and deleting
+    both shutil.move calls entirely. That is the "a paper is never silently
+    swallowed" guarantee, so it must be tested against the real routing, not
+    just against _unique_destination() in isolation."""
+
+    def test_pdf_with_references_is_filed_under_processed(self):
+        pdf = self._touch_pdf("has_refs.pdf")
+        with patch.object(ex, "grobid_alive", return_value=False), \
+             patch.object(ex, "extract_references",
+                          return_value=([Reference(raw_reference="r", source_file="has_refs.pdf",
+                                                    extraction_method="regex")], "regex")):
+            ex.run_extractor()
+
+        processed_dir = os.path.join(self.raw_dir, "processed")
+        failed_dir = os.path.join(self.raw_dir, "failed")
+        self.assertFalse(os.path.exists(pdf), "source PDF must be moved out of raw/")
+        self.assertTrue(os.path.exists(os.path.join(processed_dir, "has_refs.pdf")))
+        self.assertFalse(os.path.exists(os.path.join(failed_dir, "has_refs.pdf")))
+
+    def test_pdf_with_no_references_is_filed_under_failed(self):
+        pdf = self._touch_pdf("no_refs.pdf")
+        with patch.object(ex, "grobid_alive", return_value=False), \
+             patch.object(ex, "extract_references", return_value=([], "none")):
+            ex.run_extractor()
+
+        processed_dir = os.path.join(self.raw_dir, "processed")
+        failed_dir = os.path.join(self.raw_dir, "failed")
+        self.assertFalse(os.path.exists(pdf), "source PDF must be moved out of raw/")
+        self.assertTrue(os.path.exists(os.path.join(failed_dir, "no_refs.pdf")))
+        self.assertFalse(os.path.exists(os.path.join(processed_dir, "no_refs.pdf")))
 
 
 if __name__ == "__main__":

@@ -220,7 +220,7 @@ def parse_reference(bibl, source_file=None):
 
     return {
         "source_file": source_file,
-        "xml_id": bibl.get("{http://www.w3.org/XML/1998/namespace}id") or bibl.get("id"),
+        "xml_id": bibl.get("xml:id") or bibl.get("{http://www.w3.org/XML/1998/namespace}id") or bibl.get("id"),
         "title": title,
         "container": container,
         "authors": authors,

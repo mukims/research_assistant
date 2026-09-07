@@ -21,9 +21,7 @@ Commands inside the chat:
 """
 
 import argparse
-import json
 import os
-import re
 from datetime import datetime
 
 from research_assistant.config import CHAT_MODEL, CHAT_OLLAMA_OPTIONS, DRAFTS_DIR

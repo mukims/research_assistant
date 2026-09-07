@@ -100,7 +100,7 @@ def resolve_doi(ref):
         items = res.json()["message"]["items"]
     except (requests.RequestException, KeyError, ValueError) as exc:
         logger.warning("Crossref lookup failed: %s", exc)
-        return doi, "grobid-unverified" if doi else (None, None)
+        return (doi, "grobid-unverified") if doi else (None, None)
 
     if not items:
         return (doi, "grobid-unverified") if doi else (None, None)

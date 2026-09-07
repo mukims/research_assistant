@@ -7,6 +7,7 @@ runtime — and they were previously implemented four separate times, with
 different answers in each.
 """
 
+import concurrent.futures
 import os
 import tempfile
 import unittest
@@ -144,6 +145,36 @@ class TestSkipAndMark(IngestPdfsCase):
         self.assertEqual(result["failed"], [os.path.join(self.tmp.name, "nope.pdf")])
         self.assertEqual(self.processed, [])
         self.assertEqual(manifest_mod.load(), {})
+
+    def test_crashed_worker_is_reported_not_marked(self):
+        """Finding I1: a path whose worker raised must land in result["failed"]
+        (as it already did) but must NOT be marked in the manifest — marking
+        it hides the crash forever, since only --force (which reprocesses
+        everything) would ever revisit it. A sibling PDF that succeeded in
+        the same batch must still be marked normally.
+
+        ProcessPoolExecutor is swapped for ThreadPoolExecutor here purely so
+        the fake process function (a closure over test state) does not need
+        to be pickled across a process boundary — the control flow in
+        ingest_pdfs() being exercised is identical either way.
+        """
+        good = _touch(self.tmp.name, "good.pdf")
+        bad = _touch(self.tmp.name, "bad.pdf")
+
+        def fake_process(path, label, *a, **k):
+            if path == bad:
+                raise RuntimeError("worker crashed")
+            return [{"content": "ok"}]
+
+        with patch.object(ing, "process_pdf", fake_process), \
+             patch.object(ing.concurrent.futures, "ProcessPoolExecutor",
+                          concurrent.futures.ThreadPoolExecutor):
+            result = ing.ingest_pdfs([good, bad], workers=2)
+
+        self.assertIn(bad, result["failed"])
+        marked = manifest_mod.load()
+        self.assertIn(ing.pdf_key(good), marked)
+        self.assertNotIn(ing.pdf_key(bad), marked)
 
 
 class TestIndexRebuild(IngestPdfsCase):
