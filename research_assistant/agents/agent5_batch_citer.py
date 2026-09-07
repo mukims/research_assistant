@@ -410,7 +410,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Batch Citation Agent")
+    parser = argparse.ArgumentParser(description="Agent 5 — Batch Citer (Research Assistant)")
     parser.add_argument("--file", type=str, required=True, help="Path to the draft text file.")
     parser.add_argument("--out", type=str, default="cited_draft.txt", help="Path to save the cited draft.")
     args = parser.parse_args()

@@ -1,8 +1,17 @@
-# Python 3.12 — pip install -r requirements.txt
+# Python 3.10–3.12 (pinned; see pyproject.toml's requires-python) —
+# pip install -r requirements.txt
 #
 # This is the core install: the Streamlit UI, the LangGraph orchestrator, the
 # text-only ingestion path, and both LLM backends. Layout detection (detectron2
 # + VLM figure captions) is optional and lives in requirements-layout.txt.
+#
+# Not 3.13+: lxml==4.9.4 ships no cp313 wheel and its generated C extension
+# does not compile against 3.13's revised CPython C API (several removed/
+# changed private functions) — pip falls back to a from-source build that
+# fails outright. Verified: `pip install -r requirements.txt` installs all 17
+# pins cleanly and every research_assistant.* module imports on Python 3.12;
+# the same command on 3.13 fails building lxml before it gets anywhere near
+# this project's own code.
 
 # ─── UI / orchestration ─────────────────────────────────────────────────────
 streamlit==1.53.1

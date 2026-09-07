@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "research-assistant"
 version = "0.1.0"
 description = "Multi-agent pipeline that builds a citable knowledge base from physics papers."
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 
 [tool.setuptools.packages.find]
 include = ["research_assistant*"]

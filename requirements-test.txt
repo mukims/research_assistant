@@ -1,7 +1,8 @@
 # Minimal dependencies to run the test suite.
 #
+#   python -m pip install -e .
 #   python -m pip install -r requirements-test.txt
-#   CITATION_LOG_FILE=0 python -m unittest discover -s . -p "test_*.py"
+#   CITATION_LOG_FILE=0 python -m pytest tests/ -v
 #
 # The suite exercises pure logic — citation parsing, paper naming, extractor
 # filing, ingestion bookkeeping, retrieval ranking. The heavy stack (ChromaDB,
@@ -13,5 +14,9 @@
 # research_assistant.shared.llm.chat()/chat_stream(), and test_llm.py exercises
 # the ollama/openai backends by injecting fakes into sys.modules rather than
 # importing the real packages.
+#
+# pytest replaces unittest discover — it collects the existing
+# unittest.TestCase classes unchanged, so no test file needed to change.
+pytest~=9.1
 numpy~=2.2.6
 requests~=2.32

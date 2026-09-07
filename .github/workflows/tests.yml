@@ -1,0 +1,63 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-test.txt
+
+      - name: Install the package
+        run: python -m pip install -e .
+
+      - name: Run tests
+        # Console output only — do not write into the project's data/logs/ directory.
+        env:
+          CITATION_LOG_FILE: "0"
+        run: python -m pytest tests/ -v
+
+      - name: Check every module still imports
+        # Catches a broken import that no test happens to cover. Modules
+        # needing the ML stack (chromadb, torch, detectron2, langchain
+        # embeddings) are imported lazily inside the functions that use them,
+        # so the whole package tree imports fine without that stack installed;
+        # CI deliberately does not install it.
+        env:
+          CITATION_LOG_FILE: "0"
+        run: |
+          for m in research_assistant.config research_assistant.prompts \
+                   research_assistant.schemas research_assistant.shared.log \
+                   research_assistant.shared.retry research_assistant.shared.manifest \
+                   research_assistant.shared.llm research_assistant.shared.db \
+                   research_assistant.shared.search research_assistant.shared.retrieve \
+                   research_assistant.shared.source_key research_assistant.shared.fetch \
+                   research_assistant.shared.ingestion \
+                   research_assistant.agents.agent0_discoverer \
+                   research_assistant.agents.agent1_extractor \
+                   research_assistant.agents.agent2_fetcher \
+                   research_assistant.agents.agent3_ingestor \
+                   research_assistant.agents.agent4_assistant \
+                   research_assistant.agents.agent5_batch_citer \
+                   research_assistant.agents.agent6_manual_ingestor \
+                   research_assistant.agents.agent7_research_chat; do
+            python -c "import $m" || exit 1
+          done
