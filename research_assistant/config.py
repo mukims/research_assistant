@@ -110,9 +110,14 @@ LAYOUT_DETECTION = _env_bool("CITATION_LAYOUT_DETECTION", True)
 DETECTRON_WEIGHTS = os.environ.get(
     "CITATION_DETECTRON_WEIGHTS", os.path.join(PROJECT_ROOT, "model_final.pth")
 )
-DETECTRON_CONFIG = os.environ.get(
-    "CITATION_DETECTRON_CONFIG",
-    "lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config",
+_default_detectron_config = (
+    os.path.join(PROJECT_ROOT, "publaynet_config.yaml")
+    if os.path.exists(os.path.join(PROJECT_ROOT, "publaynet_config.yaml"))
+    else "lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config"
+)
+DETECTRON_CONFIG = (
+    os.environ.get("CITATION_DETECTRON_CONFIG", "").strip()
+    or _default_detectron_config
 )
 DETECTRON_LABEL_MAP = {0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
 DETECTRON_SCORE_THRESH = 0.5

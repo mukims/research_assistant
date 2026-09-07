@@ -138,6 +138,46 @@ class TestDiscoverFromFile(unittest.TestCase):
         seeds = a0._load_seeds()
         self.assertIn("my bytes query", seeds)
 
+    def test_two_papers_with_the_same_inferred_query_both_keep_a_record(self):
+        """An inferred query must not silently overwrite another paper's record.
+
+        The seed manifest is keyed by query. When the caller supplies one that
+        is fine — re-running a query is meant to re-seed it. But on a blank
+        upload the query is *inferred* from the title or the filename stem, and
+        two different papers can infer the same string. Both are written to
+        RAW_DIR under distinct content-hash keys, so both must survive in the
+        manifest too; otherwise the first paper sits on disk with no seed
+        record, the UI shows the wrong seed card, and path -> seed lookup
+        fails for it.
+        """
+        a = a0.discover_from_file("", b"%PDF-1.4 first paper body", filename="paper.pdf")
+        b = a0.discover_from_file("", b"%PDF-1.4 second paper body", filename="paper.pdf")
+
+        self.assertNotEqual(a, b, "different content should land in different files")
+        seeds = a0._load_seeds()
+        self.assertEqual(len(seeds), 2)
+        self.assertEqual({s["path"] for s in seeds.values()}, {a, b})
+
+    def test_reuploading_the_same_paper_keeps_a_single_record(self):
+        """Same bytes means the same key — idempotent, not a second entry."""
+        a = a0.discover_from_file("", b"%PDF-1.4 identical body", filename="paper.pdf")
+        b = a0.discover_from_file("", b"%PDF-1.4 identical body", filename="paper.pdf")
+
+        self.assertEqual(a, b)
+        self.assertEqual(len(a0._load_seeds()), 1)
+
+    def test_a_supplied_query_still_re_seeds_in_place(self):
+        """Only the inferred case disambiguates; an explicit query keeps its slot.
+
+        `discover()` and `discover_from_url()` both rely on `seeds[query]` to
+        answer "have I already seeded this query?", so a supplied query has to
+        stay a stable key.
+        """
+        a0.discover_from_file("my topic", b"%PDF-1.4 first paper body", filename="a.pdf")
+        a0.discover_from_file("my topic", b"%PDF-1.4 second paper body", filename="b.pdf")
+
+        self.assertEqual(list(a0._load_seeds()), ["my topic"])
+
     def test_discover_from_file_rejects_invalid_pdf(self):
         not_a_pdf = os.path.join(self.tmp.name, "fake.pdf")
         with open(not_a_pdf, "wb") as f:

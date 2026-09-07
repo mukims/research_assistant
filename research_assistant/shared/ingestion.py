@@ -35,6 +35,7 @@ warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 # keeping them importable on their own is what makes them testable anywhere.
 
 from research_assistant.config import (
+    PROJECT_ROOT,
     VECTORDB_PATH,
     COLLECTION_NAME,
     SUMMARY_COLLECTION_NAME,
@@ -126,47 +127,134 @@ def describe_figure(image_path: str, fig_type: str, context: str) -> str:
 _detectron_model_cache = {}
 
 
-def _get_detectron_model(weights_path):
-    """Return a cached Detectron2 model (loaded once per unique weights path).
+def _get_detectron_model(weights_path=None, config_path=None):
+    """Return a cached Detectron2 model (loaded once per unique weights/config path).
 
     ``weights_path`` may be None — layoutparser then downloads the PubLayNet
-    weights that go with DETECTRON_CONFIG.
+    weights that go with ``config_path`` (or DETECTRON_CONFIG).
     """
+    if config_path is None:
+        config_path = DETECTRON_CONFIG
+    if weights_path is None and DETECTRON_WEIGHTS and os.path.exists(DETECTRON_WEIGHTS):
+        weights_path = DETECTRON_WEIGHTS
+
+    cache_key = (weights_path, config_path)
+    if cache_key in _detectron_model_cache:
+        return _detectron_model_cache[cache_key]
+    if config_path == DETECTRON_CONFIG and weights_path in _detectron_model_cache:
+        return _detectron_model_cache[weights_path]
+
     import layoutparser as lp
 
-    if weights_path not in _detectron_model_cache:
-        logger.debug("Loading Detectron2 model from %s…", weights_path or "the lp model zoo")
-        _detectron_model_cache[weights_path] = lp.Detectron2LayoutModel(
-            config_path=DETECTRON_CONFIG,
+    logger.debug(
+        "Loading Detectron2 model from %s (config: %s)…",
+        weights_path or "the lp model zoo",
+        config_path,
+    )
+    local_config = os.path.join(PROJECT_ROOT, "publaynet_config.yaml")
+    try:
+        model = lp.Detectron2LayoutModel(
+            config_path=config_path,
             model_path=weights_path,
             extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
             label_map=DETECTRON_LABEL_MAP,
         )
-    return _detectron_model_cache[weights_path]
+    except Exception as e:
+        is_same = False
+        try:
+            if os.path.exists(config_path) and os.path.exists(local_config):
+                is_same = (
+                    os.path.abspath(config_path) == os.path.abspath(local_config)
+                    or os.path.samefile(config_path, local_config)
+                )
+        except Exception:
+            pass
+
+        if not is_same and config_path != local_config and os.path.exists(local_config):
+            logger.warning(
+                "Failed to load Detectron2 model with config %s (%s: %s); "
+                "falling back to local config %s",
+                config_path, type(e).__name__, e, local_config,
+            )
+            model = lp.Detectron2LayoutModel(
+                config_path=local_config,
+                model_path=weights_path,
+                extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
+                label_map=DETECTRON_LABEL_MAP,
+            )
+            _detectron_model_cache[(weights_path, local_config)] = model
+        else:
+            raise
+
+    _detectron_model_cache[cache_key] = model
+    if config_path == DETECTRON_CONFIG:
+        _detectron_model_cache[weights_path] = model
+    return model
 
 
 # ─── Core PDF processing ─────────────────────────────────────────────────────
 
 
-def process_pdf(pdf_path: str, citation_string: str, detectron_weights=None, images_dir=None):
+EXTRACTION_MODES = ("layout", "text_only")
+
+
+def _tag_extraction(corpus: list[dict], mode: str) -> list[dict]:
+    """Record on each entry which extraction path produced it.
+
+    Layout detection falling back to text-only costs every figure and table in
+    the document, but the fallback is per-PDF and only logs a warning — so a
+    whole corpus can quietly come out with no figures at all. Tagging here, at
+    the single point where the choice is made, lets ingest_pdfs() count it.
+    The tag rides on the entries rather than the return type because
+    process_pdf() runs inside a process pool, where only the return value
+    crosses back. upsert_corpus() reads named keys, so the extra one is inert.
+    """
+    for entry in corpus:
+        entry["extraction"] = mode
+    return corpus
+
+
+def process_pdf(
+    pdf_path: str,
+    citation_string: str,
+    detectron_weights=None,
+    images_dir=None,
+    detectron_config=None,
+):
     """Extract a single PDF into corpus entries.
 
     With ``config.LAYOUT_DETECTION`` on: Detectron2 layout detection plus a VLM
-    description of every figure and table. With it off (the Hugging Face Space
-    default, and any checkout without detectron2): text-only extraction with
-    PyMuPDF. Both return the same ``list[dict]`` shape.
+    description of every figure and table. If layout detection is unavailable
+    or fails (due to missing dependencies, invalid config/weights, or runtime
+    errors), it gracefully falls back to text-only extraction with PyMuPDF.
+    With it off (the Hugging Face Space default, and any checkout without
+    detectron2): text-only extraction with PyMuPDF. Both return the same
+    ``list[dict]`` shape.
+
+    Every entry is tagged with the mode that produced it (``"layout"`` or
+    ``"text_only"``) so ingest_pdfs() can report how the batch was actually
+    extracted — see _tag_extraction().
     """
     if not LAYOUT_DETECTION:
-        return _extract_text_only(pdf_path, citation_string)
+        return _tag_extraction(_extract_text_only(pdf_path, citation_string), "text_only")
     try:
-        return _process_pdf_layout(pdf_path, citation_string, detectron_weights, images_dir)
-    except ImportError as e:
+        return _tag_extraction(
+            _process_pdf_layout(
+                pdf_path,
+                citation_string,
+                detectron_weights,
+                images_dir,
+                detectron_config=detectron_config,
+            ),
+            "layout",
+        )
+    except Exception as e:
         logger.warning(
-            "Layout stack unavailable (%s) — falling back to text-only extraction "
+            "Layout detection failed (%s) — falling back to text-only extraction "
             "for %s. Set CITATION_LAYOUT_DETECTION=0 to silence this.",
             e, os.path.basename(pdf_path),
         )
-        return _extract_text_only(pdf_path, citation_string)
+        return _tag_extraction(_extract_text_only(pdf_path, citation_string), "text_only")
 
 
 def _extract_text_only(pdf_path: str, citation_string: str):
@@ -183,7 +271,12 @@ def _extract_text_only(pdf_path: str, citation_string: str):
         return corpus
 
     for page_idx in range(len(pdf)):
-        for b in pdf[page_idx].get_text("blocks"):
+        try:
+            blocks = pdf[page_idx].get_text("blocks")
+        except Exception as e:
+            logger.warning("Failed to extract text from page %d of %s: %s", page_idx, pdf_path, e)
+            continue
+        for b in blocks:
             if b[6] != 0:                       # skip image blocks
                 continue
             text = b[4].replace("\n", " ").strip()
@@ -202,7 +295,13 @@ def _extract_text_only(pdf_path: str, citation_string: str):
     return corpus
 
 
-def _process_pdf_layout(pdf_path: str, citation_string: str, detectron_weights=None, images_dir=None):
+def _process_pdf_layout(
+    pdf_path: str,
+    citation_string: str,
+    detectron_weights=None,
+    images_dir=None,
+    detectron_config=None,
+):
     """
     Run Detectron2 layout detection and VLM figure description on a single PDF.
 
@@ -212,6 +311,7 @@ def _process_pdf_layout(pdf_path: str, citation_string: str, detectron_weights=N
         detectron_weights: Path to the Detectron2 checkpoint (defaults to config;
                            None / missing file → layoutparser downloads it).
         images_dir:        Directory to save cropped figures (defaults to config).
+        detectron_config:  Path or URL to the Detectron2 config (defaults to config).
 
     Returns:
         list[dict]: Corpus entries (text blocks + figure descriptions).
@@ -224,6 +324,7 @@ def _process_pdf_layout(pdf_path: str, citation_string: str, detectron_weights=N
     detectron_weights = detectron_weights or DETECTRON_WEIGHTS
     if not detectron_weights or not os.path.exists(detectron_weights):
         detectron_weights = None          # let layoutparser fetch PubLayNet weights
+    detectron_config = detectron_config or DETECTRON_CONFIG
     images_dir = images_dir or IMAGES_DIR
     os.makedirs(images_dir, exist_ok=True)
 
@@ -235,7 +336,7 @@ def _process_pdf_layout(pdf_path: str, citation_string: str, detectron_weights=N
 
     # Use cached model in sequential mode; in multiprocessing workers the
     # cache is per-process so each worker loads once then reuses.
-    model = _get_detectron_model(detectron_weights)
+    model = _get_detectron_model(detectron_weights, detectron_config)
 
     try:
         pdf = fitz.open(pdf_path)
@@ -273,7 +374,12 @@ def _process_pdf_layout(pdf_path: str, citation_string: str, detectron_weights=N
                 x1, y1 = max(0, int(x1 - pad)), max(0, int(y1 - pad))
                 x2, y2 = min(img.shape[1], int(x2 + pad)), min(img.shape[0], int(y2 + pad))
 
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
                 cropped = img[y1:y2, x1:x2]
+                if cropped.size == 0:
+                    continue
                 out_name = f"{pdf_name}_p{page_idx}_f{i}.png"
                 out_path = os.path.join(images_dir, out_name)
                 cv2.imwrite(out_path, cropped)
@@ -312,7 +418,8 @@ def _process_pdf_layout(pdf_path: str, citation_string: str, detectron_weights=N
         )
 
     except Exception as e:
-        logger.error("Failed to process %s: %s", pdf_path, e)
+        logger.error("Layout processing failed for %s: %s", pdf_path, e)
+        raise
 
     return corpus
 
@@ -658,6 +765,26 @@ def ingest_pdfs(
                     result["failed"].append(futures[future])
 
     result["processed"] = len(candidates)
+
+    # How the batch was actually extracted, counted per document rather than
+    # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for
+    # the same reason: a run that silently degraded should say so in its result,
+    # not only in a warning somewhere up the log.
+    by_mode = {mode: set() for mode in EXTRACTION_MODES}
+    for entry in corpus:
+        docs = by_mode.get(entry.get("extraction"))
+        if docs is not None and entry.get("document"):
+            docs.add(entry["document"])
+    result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}
+
+    if LAYOUT_DETECTION and by_mode["text_only"]:
+        logger.warning(
+            "%s%d of %d document(s) fell back to text-only extraction — no figures "
+            "or tables were indexed for them. See the warnings above for why layout "
+            "detection failed, or set CITATION_LAYOUT_DETECTION=0 if text-only is "
+            "what you intended.",
+            log_prefix, len(by_mode["text_only"]), result["processed"],
+        )
 
     if corpus:
         result["inserted"] = upsert_corpus(corpus)

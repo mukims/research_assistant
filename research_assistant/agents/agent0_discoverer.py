@@ -587,7 +587,22 @@ def discover_from_file(
         logger.info("Saved seed PDF -> %s", os.path.basename(dest))
 
     seeds = _load_seeds()
-    effective_query = (query or "").strip() or title or clean_stem or "Uploaded seed paper"
+    supplied_query = (query or "").strip()
+    effective_query = supplied_query or title or clean_stem or "Uploaded seed paper"
+
+    # The manifest is keyed by query, which is the right identity when the
+    # caller supplied one — discover() and discover_from_url() both rely on
+    # seeds[query] to answer "have I already seeded this query?". But an
+    # *inferred* query is derived from the paper's title or filename stem, and
+    # two different papers can infer the same string. Keying on it would drop
+    # the earlier paper's record while leaving its PDF in RAW_DIR, so the file
+    # would still be extracted and ingested with no seed record to point at.
+    # The paper's own key is unique, so it disambiguates.
+    if not supplied_query:
+        clash = seeds.get(effective_query)
+        if clash and clash.get("key") != key:
+            effective_query = f"{effective_query} [{key}]"
+
     seeds[effective_query] = SeedPaper(
         key=key,
         path=dest,

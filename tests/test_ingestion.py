@@ -243,6 +243,307 @@ class TestInputForms(IngestPdfsCase):
         self.assertEqual(self.rebuilds, 0)
 
 
+class TestProcessPdfFallback(unittest.TestCase):
+    """Tests verifying process_pdf() robustly falls back to text-only extraction."""
+
+    def test_process_pdf_falls_back_when_layout_detection_disabled(self):
+        with patch.object(ing, "LAYOUT_DETECTION", False), \
+             patch.object(ing, "_extract_text_only", return_value=[{"type": "text", "content": "extracted"}]) as mock_extract, \
+             patch.object(ing, "_process_pdf_layout") as mock_layout:
+            result = ing.process_pdf("paper.pdf", "citation_label")
+
+        mock_extract.assert_called_once_with("paper.pdf", "citation_label")
+        mock_layout.assert_not_called()
+        self.assertEqual(result, [{"type": "text", "content": "extracted", "extraction": "text_only"}])
+
+    def test_process_pdf_falls_back_on_import_error(self):
+        with patch.object(ing, "LAYOUT_DETECTION", True), \
+             patch.object(ing, "_process_pdf_layout", side_effect=ImportError("No module named 'layoutparser'")), \
+             patch.object(ing, "_extract_text_only", return_value=[{"type": "text", "content": "fallback_text"}]) as mock_extract:
+            result = ing.process_pdf("paper.pdf", "citation_label")
+
+        mock_extract.assert_called_once_with("paper.pdf", "citation_label")
+        self.assertEqual(result, [{"type": "text", "content": "fallback_text", "extraction": "text_only"}])
+
+    def test_process_pdf_falls_back_on_yaml_scanner_error(self):
+        try:
+            from yaml.scanner import ScannerError
+            yaml_err = ScannerError(None, None, "mapping values are not allowed here", None)
+        except ImportError:
+            yaml_err = Exception("mapping values are not allowed here")
+
+        with patch.object(ing, "LAYOUT_DETECTION", True), \
+             patch.object(ing, "_process_pdf_layout", side_effect=yaml_err), \
+             patch.object(ing, "_extract_text_only", return_value=[{"type": "text", "content": "recovered_content"}]) as mock_extract:
+            result = ing.process_pdf("doi_10.1038_paper.pdf", "doi_label")
+
+        mock_extract.assert_called_once_with("doi_10.1038_paper.pdf", "doi_label")
+        self.assertEqual(result, [{"type": "text", "content": "recovered_content", "extraction": "text_only"}])
+
+    def test_process_pdf_falls_back_on_layout_runtime_error(self):
+        with patch.object(ing, "LAYOUT_DETECTION", True), \
+             patch.object(ing, "_process_pdf_layout", side_effect=RuntimeError("CUDA out of memory in detect()")), \
+             patch.object(ing, "_extract_text_only", return_value=[{"type": "text", "content": "text_after_oom"}]) as mock_extract:
+            result = ing.process_pdf("large_paper.pdf", "citation_label")
+
+        mock_extract.assert_called_once_with("large_paper.pdf", "citation_label")
+        self.assertEqual(result, [{"type": "text", "content": "text_after_oom", "extraction": "text_only"}])
+
+
+    def test_process_pdf_passes_detectron_config(self):
+        with patch.object(ing, "LAYOUT_DETECTION", True), \
+             patch.object(ing, "_process_pdf_layout", return_value=[{"type": "text"}]) as mock_layout:
+            result = ing.process_pdf("paper.pdf", "citation_label", detectron_config="/custom/config.yaml")
+
+        mock_layout.assert_called_once_with(
+            "paper.pdf", "citation_label", None, None, detectron_config="/custom/config.yaml"
+        )
+        self.assertEqual(result, [{"type": "text", "extraction": "layout"}])
+
+    def test_extract_text_only_tolerates_corrupt_page(self):
+        fake_pdf = [unittest.mock.MagicMock(), unittest.mock.MagicMock()]
+        # Page 0 raises error on get_text
+        fake_pdf[0].get_text.side_effect = RuntimeError("Corrupted page stream")
+        # Page 1 succeeds
+        fake_pdf[1].get_text.return_value = [
+            (0, 0, 100, 100, "Valid text on page 2", 0, 0)
+        ]
+
+        fake_fitz = unittest.mock.MagicMock()
+        fake_fitz.open.return_value = fake_pdf
+
+        with patch.dict("sys.modules", {"fitz": fake_fitz}):
+            result = ing._extract_text_only("corrupt_page.pdf", "citation")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["page"], 1)
+        self.assertEqual(result[0]["content"], "Valid text on page 2")
+
+
+class TestDetectronModelLoading(unittest.TestCase):
+    """Tests for _get_detectron_model error handling, caching, and fallback."""
+
+    def setUp(self):
+        self._orig_cache = dict(ing._detectron_model_cache)
+        ing._detectron_model_cache.clear()
+
+    def tearDown(self):
+        ing._detectron_model_cache.clear()
+        ing._detectron_model_cache.update(self._orig_cache)
+
+    def test_get_detectron_model_uses_cache(self):
+        fake_model = object()
+        ing._detectron_model_cache[("weights.pth", "config.yaml")] = fake_model
+
+        model = ing._get_detectron_model("weights.pth", "config.yaml")
+        self.assertIs(model, fake_model)
+
+    def test_get_detectron_model_falls_back_to_local_config_on_remote_error(self):
+        try:
+            from yaml.scanner import ScannerError
+            remote_err = ScannerError(None, None, "mapping values are not allowed here", None)
+        except ImportError:
+            remote_err = Exception("mapping values are not allowed here")
+
+        calls = []
+        fake_lp_model = object()
+
+        def fake_detectron2_init(config_path, model_path, extra_config, label_map):
+            calls.append(config_path)
+            if config_path.startswith("lp://"):
+                raise remote_err
+            return fake_lp_model
+
+        fake_lp = unittest.mock.MagicMock()
+        fake_lp.Detectron2LayoutModel.side_effect = fake_detectron2_init
+
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch("os.path.exists", return_value=True):
+            model = ing._get_detectron_model(
+                weights_path="model.pth",
+                config_path="lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config",
+            )
+
+        self.assertIs(model, fake_lp_model)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].startswith("lp://"))
+        self.assertTrue(calls[1].endswith("publaynet_config.yaml"))
+
+    def test_get_detectron_model_raises_if_fallback_fails_too(self):
+        fake_lp = unittest.mock.MagicMock()
+        fake_lp.Detectron2LayoutModel.side_effect = RuntimeError("Fatal model init error")
+
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch("os.path.exists", return_value=True):
+            with self.assertRaises(RuntimeError):
+                ing._get_detectron_model(
+                    weights_path="model.pth",
+                    config_path="lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config",
+                )
+
+    def test_get_detectron_model_does_not_loop_if_local_config_fails(self):
+        calls = []
+        fake_lp = unittest.mock.MagicMock()
+
+        def fake_detectron2_init(config_path, model_path, extra_config, label_map):
+            calls.append(config_path)
+            raise ValueError("Invalid local config")
+
+        fake_lp.Detectron2LayoutModel.side_effect = fake_detectron2_init
+
+        local_cfg = os.path.join(ing.PROJECT_ROOT, "publaynet_config.yaml")
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch("os.path.exists", return_value=True):
+            with self.assertRaises(ValueError):
+                ing._get_detectron_model(weights_path="model.pth", config_path=local_cfg)
+
+        self.assertEqual(len(calls), 1)
+
+    def test_get_detectron_model_does_not_loop_on_relative_path_to_local_config(self):
+        calls = []
+        fake_lp = unittest.mock.MagicMock()
+
+        def fake_detectron2_init(config_path, model_path, extra_config, label_map):
+            calls.append(config_path)
+            raise ValueError("Corrupt local config")
+
+        fake_lp.Detectron2LayoutModel.side_effect = fake_detectron2_init
+
+        # Relative path referring to the same local publaynet_config.yaml
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch("os.path.exists", return_value=True):
+            with self.assertRaises(ValueError):
+                ing._get_detectron_model(weights_path="model.pth", config_path="publaynet_config.yaml")
+
+        self.assertEqual(len(calls), 1)
+
+    def test_get_detectron_model_defaults_weights_to_detectron_weights_if_present(self):
+        calls = []
+        fake_lp_model = object()
+
+        def fake_detectron2_init(config_path, model_path, extra_config, label_map):
+            calls.append((config_path, model_path))
+            return fake_lp_model
+
+        fake_lp = unittest.mock.MagicMock()
+        fake_lp.Detectron2LayoutModel.side_effect = fake_detectron2_init
+
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch.object(ing, "DETECTRON_WEIGHTS", "/repo/model_final.pth"), \
+             patch("os.path.exists", lambda p: p == "/repo/model_final.pth"):
+            model = ing._get_detectron_model(weights_path=None, config_path="config.yaml")
+
+        self.assertIs(model, fake_lp_model)
+        self.assertEqual(calls[0][1], "/repo/model_final.pth")
+
+    def test_get_detectron_model_custom_config_does_not_poison_default_cache(self):
+        fake_lp = unittest.mock.MagicMock()
+        fake_custom_model = object()
+        fake_lp.Detectron2LayoutModel.return_value = fake_custom_model
+
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch.object(ing, "DETECTRON_CONFIG", "default_config.yaml"):
+            model = ing._get_detectron_model("shared_weights.pth", "custom_config.yaml")
+
+        self.assertIs(model, fake_custom_model)
+        # Verify default weights key was NOT poisoned with custom config model
+        self.assertNotIn("shared_weights.pth", ing._detectron_model_cache)
+
+    def test_get_detectron_model_fallback_caches_local_config_key(self):
+        try:
+            from yaml.scanner import ScannerError
+            remote_err = ScannerError(None, None, "bad yaml", None)
+        except ImportError:
+            remote_err = Exception("bad yaml")
+
+        fake_lp_model = object()
+
+        def fake_detectron2_init(config_path, model_path, extra_config, label_map):
+            if config_path.startswith("lp://"):
+                raise remote_err
+            return fake_lp_model
+
+        fake_lp = unittest.mock.MagicMock()
+        fake_lp.Detectron2LayoutModel.side_effect = fake_detectron2_init
+
+        local_cfg = os.path.join(ing.PROJECT_ROOT, "publaynet_config.yaml")
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}), \
+             patch("os.path.exists", return_value=True):
+            model = ing._get_detectron_model(
+                weights_path="model.pth",
+                config_path="lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config",
+            )
+
+        self.assertIs(model, fake_lp_model)
+        # Both the original requested remote config and the resolved local config are cached
+        self.assertIn(("model.pth", "lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config"), ing._detectron_model_cache)
+        self.assertIn(("model.pth", local_cfg), ing._detectron_model_cache)
+
+
+class TestDetectronConfigResolution(unittest.TestCase):
+    """Tests for DETECTRON_CONFIG preference of local file over remote."""
+
+    def test_prefers_local_publaynet_config_when_present(self):
+        import importlib
+        import research_assistant.config as conf
+
+        with patch("os.path.exists", lambda path: path.endswith("publaynet_config.yaml")), \
+             patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("CITATION_DETECTRON_CONFIG", None)
+            importlib.reload(conf)
+            self.assertTrue(
+                conf.DETECTRON_CONFIG.endswith("publaynet_config.yaml"),
+                f"Expected publaynet_config.yaml, got {conf.DETECTRON_CONFIG}",
+            )
+
+    def test_respects_env_var_override(self):
+        import importlib
+        import research_assistant.config as conf
+
+        with patch.dict(os.environ, {"CITATION_DETECTRON_CONFIG": "/custom/path/config.yaml"}):
+            importlib.reload(conf)
+            self.assertEqual(conf.DETECTRON_CONFIG, "/custom/path/config.yaml")
+
+    def test_empty_env_var_falls_back_to_local_config(self):
+        import importlib
+        import research_assistant.config as conf
+
+        with patch("os.path.exists", lambda path: path.endswith("publaynet_config.yaml")), \
+             patch.dict(os.environ, {"CITATION_DETECTRON_CONFIG": ""}):
+            importlib.reload(conf)
+            self.assertTrue(
+                conf.DETECTRON_CONFIG.endswith("publaynet_config.yaml"),
+                f"Expected publaynet_config.yaml, got {conf.DETECTRON_CONFIG}",
+            )
+
+    def test_whitespace_env_var_falls_back_to_local_config(self):
+        import importlib
+        import research_assistant.config as conf
+
+        with patch("os.path.exists", lambda path: path.endswith("publaynet_config.yaml")), \
+             patch.dict(os.environ, {"CITATION_DETECTRON_CONFIG": "   \t\n"}):
+            importlib.reload(conf)
+            self.assertTrue(
+                conf.DETECTRON_CONFIG.endswith("publaynet_config.yaml"),
+                f"Expected publaynet_config.yaml, got {conf.DETECTRON_CONFIG}",
+            )
+
+    def test_defaults_to_remote_when_local_file_absent(self):
+        import importlib
+        import research_assistant.config as conf
+
+        with patch("os.path.exists", return_value=False), \
+             patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("CITATION_DETECTRON_CONFIG", None)
+            importlib.reload(conf)
+            self.assertTrue(
+                conf.DETECTRON_CONFIG.startswith("lp://"),
+                f"Expected lp://..., got {conf.DETECTRON_CONFIG}",
+            )
+        # Reload once more to restore original config state
+        importlib.reload(conf)
+
+
 class TestMarkingUsesTheManifest(ManifestBackedTestCase):
     def test_every_attempted_pdf_is_marked_even_when_it_yields_nothing(self):
         """A corrupt or empty PDF must still be marked, or it is re-parsed forever."""
@@ -251,6 +552,67 @@ class TestMarkingUsesTheManifest(ManifestBackedTestCase):
              patch.object(ing, "rebuild_bm25"):
             ing.ingest_pdfs({pdf: "label"}, rebuild_index=False)
         self.assertIn(ing.pdf_key(pdf), manifest_mod.load())
+
+
+class TestExtractionModeIsRecorded(unittest.TestCase):
+    """A silent degradation to text-only has to be visible in the result.
+
+    Layout detection failing costs every figure and table in the corpus, but
+    the fallback is per-PDF and only logs a warning — so a run can quietly
+    produce a corpus with no figures at all. Agent 1 records its
+    GROBID-vs-regex fallback per run under `extraction` for exactly this
+    reason; ingestion needs the same.
+    """
+
+    def test_layout_extraction_tags_its_entries(self):
+        with patch.object(ing, "LAYOUT_DETECTION", True), \
+             patch.object(ing, "_process_pdf_layout",
+                          return_value=[{"type": "text", "content": "x"}]):
+            corpus = ing.process_pdf("paper.pdf", "label")
+
+        self.assertEqual(corpus[0]["extraction"], "layout")
+
+    def test_text_only_fallback_tags_its_entries(self):
+        """The tag is what makes an unexpected fallback countable downstream."""
+        with patch.object(ing, "LAYOUT_DETECTION", True), \
+             patch.object(ing, "_process_pdf_layout",
+                          side_effect=RuntimeError("CUDA out of memory in detect()")), \
+             patch.object(ing, "_extract_text_only",
+                          return_value=[{"type": "text", "content": "x"}]):
+            corpus = ing.process_pdf("paper.pdf", "label")
+
+        self.assertEqual(corpus[0]["extraction"], "text_only")
+
+
+class TestIngestReportsExtractionModes(IngestPdfsCase):
+    def test_result_counts_documents_by_extraction_mode(self):
+        good = _touch(self.tmp.name, "good.pdf")
+        scan = _touch(self.tmp.name, "scan.pdf")
+
+        def fake_process(path, label, *a, **k):
+            mode = "text_only" if "scan" in path else "layout"
+            return [{"content": "x", "document": ing.pdf_key(path), "extraction": mode}]
+
+        with patch.object(ing, "process_pdf", fake_process):
+            result = ing.ingest_pdfs([good, scan], rebuild_index=False)
+
+        self.assertEqual(result["extraction"], {"layout": 1, "text_only": 1})
+
+    def test_every_page_of_one_document_counts_once(self):
+        """The tally is per document, not per corpus entry."""
+        pdf = _touch(self.tmp.name, "many_pages.pdf")
+
+        def fake_process(path, label, *a, **k):
+            key = ing.pdf_key(path)
+            return [
+                {"content": f"page-{i}", "document": key, "extraction": "text_only"}
+                for i in range(5)
+            ]
+
+        with patch.object(ing, "process_pdf", fake_process):
+            result = ing.ingest_pdfs([pdf], rebuild_index=False)
+
+        self.assertEqual(result["extraction"], {"layout": 0, "text_only": 1})
 
 
 if __name__ == "__main__":
