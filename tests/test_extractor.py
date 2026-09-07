@@ -130,6 +130,58 @@ class TestGrobidProbe(unittest.TestCase):
             self.assertFalse(ex.grobid_alive())
 
 
+class TestTeiParseMemoization(unittest.TestCase):
+    """Directed change 2: _references_from_grobid and _article_from_grobid
+    both read the same TEI file for any PDF that took the GROBID path, and
+    the Finding 1 fix makes _article_from_grobid run in more cases, so the
+    duplicate parse became more frequent, not less. The memoized helper must
+    still hand each caller its own copy — a cache that returns the same
+    mutable dict/list to everyone would let one caller's mutation corrupt
+    what another caller already received."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        ex._parse_tei_file_cached.cache_clear()
+        self.addCleanup(ex._parse_tei_file_cached.cache_clear)
+
+        self.tei_path = os.path.join(self.tmp.name, "a.grobid.tei.xml")
+        open(self.tei_path, "w").close()
+
+        patcher = patch.object(ex, "_tei_path_for", return_value=self.tei_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_second_caller_hits_the_cache_not_a_second_parse(self):
+        article = {"source_file": "a.pdf", "title": "T", "doi": None, "authors": []}
+        references = [{
+            "raw_reference": "r", "source_file": "a.pdf", "title": None,
+            "container": None, "authors": [], "year": None, "doi": None,
+            "doi_confidence": None, "xml_id": None,
+        }]
+        with patch.object(ex, "parse_tei_file",
+                           return_value=(article, references)) as parse_mock:
+            refs = ex._references_from_grobid("a.pdf")
+            got_article = ex._article_from_grobid("a.pdf")
+
+        parse_mock.assert_called_once_with(self.tei_path)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(got_article, article)
+
+    def test_mutating_a_returned_article_does_not_corrupt_the_cache(self):
+        """_article_from_grobid hands back the article dict as-is (no
+        reconstruction, unlike the Reference objects _references_from_grobid
+        builds), so this is exactly where a shared-object cache would leak a
+        mutation from one caller into the next."""
+        article = {"source_file": "a.pdf", "title": "T", "doi": None, "authors": []}
+        with patch.object(ex, "parse_tei_file", return_value=(article, [])):
+            first = ex._article_from_grobid("a.pdf")
+            first["title"] = "mutated"
+            second = ex._article_from_grobid("a.pdf")
+
+        self.assertEqual(second["title"], "T")
+
+
 class RunExtractorTestCase(unittest.TestCase):
     """Isolates run_extractor() to a temp RAW_DIR/output path per test, so it
     never touches the real data/ directory."""
@@ -200,7 +252,15 @@ class TestRunExtractorPayload(RunExtractorTestCase):
 
     def test_regex_only_pdf_contributes_no_article_record(self):
         """A PDF that fell back to regex has no TEI to read a header from —
-        that is expected, not a bug to paper over with a placeholder."""
+        that is expected, not a bug to paper over with a placeholder.
+
+        This covers only the *global* fallback (grobid_alive() is False for
+        the whole run). See
+        test_grobid_ok_but_pdf_used_regex_still_contributes_article below for
+        the per-PDF fallback case, which this test cannot catch: here
+        grobid_ok is False, so the buggy `if method == "grobid"` gate and the
+        correct `if grobid_ok` gate agree (both skip) — the regression only
+        shows up when grobid_ok is True but method isn't "grobid"."""
         self._touch_pdf("a.pdf")
         with patch.object(ex, "grobid_alive", return_value=False), \
              patch.object(ex, "extract_references",
@@ -211,6 +271,52 @@ class TestRunExtractorPayload(RunExtractorTestCase):
         with open(self.citations_path) as fh:
             payload = json.load(fh)
         self.assertEqual(payload["articles"], [])
+
+    def test_grobid_ok_but_pdf_used_regex_still_contributes_article(self):
+        """Finding 1 (Important): situation (b) — GROBID is up and processed
+        this PDF fine (TEI header, title, authors, DOI all parseable), but
+        found no reference list for it. extract_references then reports
+        method="regex" for this PDF, but the citing paper's own metadata is
+        still sitting on disk in the TEI and must not be silently discarded.
+
+        Gating article collection on `method == "grobid"` (the bug) drops it
+        here, because method describes only where the *references* came
+        from, not whether GROBID ran. Gating on `grobid_ok` (the fix) keeps
+        it, since _article_from_grobid does its own os.path.exists check and
+        is safe to call regardless of method."""
+        self._touch_pdf("a.pdf")
+        article = {"source_file": "a.pdf", "title": "T", "doi": None, "authors": []}
+        with patch.object(ex, "grobid_alive", return_value=True), \
+             patch.object(ex, "run_grobid_batch"), \
+             patch.object(ex, "extract_references",
+                          return_value=([Reference(raw_reference="r", source_file="a.pdf",
+                                                    extraction_method="regex")], "regex")), \
+             patch.object(ex, "_article_from_grobid", return_value=article) as article_mock:
+            ex.run_extractor()
+
+        with open(self.citations_path) as fh:
+            payload = json.load(fh)
+        self.assertEqual(payload["articles"], [article])
+        article_mock.assert_called_once_with(os.path.join(self.raw_dir, "a.pdf"))
+
+    def test_batch_failure_downgrades_grobid_ok_for_the_whole_run(self):
+        """Directed change 3: run_grobid_batch() raising (a client
+        construction or .process() failure, distinct from grobid_alive()
+        itself returning False) must downgrade grobid_ok to False for the
+        rest of the run, so every PDF is handled via the regex/none path
+        instead of the run crashing."""
+        self._touch_pdf("a.pdf")
+        self._touch_pdf("b.pdf")
+        with patch.object(ex, "grobid_alive", return_value=True), \
+             patch.object(ex, "run_grobid_batch", side_effect=RuntimeError("boom")), \
+             patch.object(ex, "_references_from_grobid") as grobid_refs, \
+             patch.object(ex, "_references_from_regex",
+                          return_value=[Reference(raw_reference="r", source_file="x.pdf",
+                                                   extraction_method="regex")]):
+            result = ex.run_extractor()
+
+        grobid_refs.assert_not_called()
+        self.assertEqual(result, {"reference_count": 2, "processed": 2, "failed": 0})
 
     def test_grobid_batch_is_called_once_up_front_not_per_pdf(self):
         """Ruling G3: run_grobid_batch is the batch call that honours

@@ -25,6 +25,7 @@ Provides:
                                          raw/processed/ and raw/failed/
 """
 
+import copy
 import glob
 import json
 import os
@@ -32,6 +33,7 @@ import re
 import shutil
 import subprocess
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 import requests
 
@@ -285,6 +287,31 @@ def parse_tei_file(tei_file_path):
     return article, references
 
 
+@lru_cache(maxsize=None)
+def _parse_tei_file_cached(tei_file_path: str):
+    """parse_tei_file(), memoized per path.
+
+    _references_from_grobid and _article_from_grobid both read the same TEI
+    file for any PDF that took the GROBID path; gating Finding 1's fix on
+    grobid_ok (rather than method) makes _article_from_grobid run for every
+    GROBID'd PDF, not just the ones whose references also came from GROBID —
+    so the duplicate parse this avoids is now more frequent, not less.
+
+    lru_cache hands back the *same* (article, references) tuple to every
+    caller, and both are built from mutable dicts/lists — so this function
+    is never called directly; go through _parse_tei_file() below, which
+    deep-copies before returning, so one caller mutating its copy can never
+    affect another.
+    """
+    return parse_tei_file(tei_file_path)
+
+
+def _parse_tei_file(tei_file_path: str):
+    """Cached parse_tei_file(), safe for callers to mutate their own copy."""
+    article, references = _parse_tei_file_cached(tei_file_path)
+    return copy.deepcopy(article), copy.deepcopy(references)
+
+
 def summarise(references):
     """Counts worth logging after a run. Takes dicts (Reference.to_dict())."""
     total = len(references)
@@ -330,7 +357,7 @@ def _references_from_grobid(pdf_path: str) -> list[Reference]:
         return []
 
     try:
-        _article, raw_references = parse_tei_file(tei_path)
+        _article, raw_references = _parse_tei_file(tei_path)
     except Exception as exc:  # noqa: BLE001 — malformed TEI means fall back
         logger.warning("Could not parse TEI for %s: %s", pdf_path, exc)
         return []
@@ -367,7 +394,7 @@ def _article_from_grobid(pdf_path: str) -> dict | None:
     if not os.path.exists(tei_path):
         return None
     try:
-        article, _references = parse_tei_file(tei_path)
+        article, _references = _parse_tei_file(tei_path)
     except Exception as exc:  # noqa: BLE001 — malformed TEI means skip it
         logger.warning("Could not parse article metadata for %s: %s", pdf_path, exc)
         return None
@@ -555,7 +582,16 @@ def run_extractor() -> dict:
         by_method[method] += 1
         name = os.path.basename(pdf)
 
-        if method == "grobid":
+        if grobid_ok:
+            # method describes only where the *references* came from. GROBID
+            # may have processed this PDF fine (TEI header, title, authors,
+            # DOI all present) while finding no reference list, in which case
+            # extract_references reports "regex" or "none" here — but the
+            # citing paper's own metadata is still sitting on disk and must
+            # not be dropped just because this PDF's method wasn't "grobid".
+            # _article_from_grobid() itself checks os.path.exists(tei_path),
+            # so this is a no-op — not a wasted lookup — when GROBID never
+            # produced a TEI for this PDF at all.
             article = _article_from_grobid(pdf)
             if article:
                 articles.append(article)
