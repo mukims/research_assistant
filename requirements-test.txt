@@ -9,8 +9,9 @@
 # lazily inside the functions the tests never call, so none of it is needed
 # here. That is deliberate: it keeps the tests runnable anywhere.
 #
-# ollama is required only because agent5_batch_citer imports it at module
-# scope, which the tests rely on to patch ollama.chat.
+# No provider SDK (ollama, openai) is needed here: every agent now calls
+# research_assistant.shared.llm.chat()/chat_stream(), and test_llm.py exercises
+# the ollama/openai backends by injecting fakes into sys.modules rather than
+# importing the real packages.
 numpy~=2.2.6
-ollama~=0.6.1
 requests~=2.32
