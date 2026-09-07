@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-assistant"
+version = "0.1.0"
+description = "Multi-agent pipeline that builds a citable knowledge base from physics papers."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["research_assistant*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
