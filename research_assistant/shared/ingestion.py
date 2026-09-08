@@ -127,11 +127,38 @@ def describe_figure(image_path: str, fig_type: str, context: str) -> str:
 _detectron_model_cache = {}
 
 
+class _LoadFailure:
+    """A (weights, config) pair whose model load already failed.
+
+    Kept in the model cache alongside successful models. process_pdf() swallows
+    a load failure into a text-only fallback, so nothing upstream stops the next
+    document from trying again — without this, a config that cannot load makes
+    every paper in a batch pay for a full Detectron2 construction that is
+    guaranteed to fail. Living in the same dict means the existing cache-clearing
+    also resets it.
+    """
+
+    __slots__ = ("error",)
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+
+def _build_detectron_model(lp, config_path, weights_path):
+    return lp.Detectron2LayoutModel(
+        config_path=config_path,
+        model_path=weights_path,
+        extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
+        label_map=DETECTRON_LABEL_MAP,
+    )
+
+
 def _get_detectron_model(weights_path=None, config_path=None):
     """Return a cached Detectron2 model (loaded once per unique weights/config path).
 
     ``weights_path`` may be None — layoutparser then downloads the PubLayNet
-    weights that go with ``config_path`` (or DETECTRON_CONFIG).
+    weights that go with ``config_path`` (or DETECTRON_CONFIG). A load that
+    fails is remembered too, and re-raised without retrying.
     """
     if config_path is None:
         config_path = DETECTRON_CONFIG
@@ -139,10 +166,13 @@ def _get_detectron_model(weights_path=None, config_path=None):
         weights_path = DETECTRON_WEIGHTS
 
     cache_key = (weights_path, config_path)
-    if cache_key in _detectron_model_cache:
-        return _detectron_model_cache[cache_key]
-    if config_path == DETECTRON_CONFIG and weights_path in _detectron_model_cache:
-        return _detectron_model_cache[weights_path]
+    cached = _detectron_model_cache.get(cache_key)
+    if cached is None and config_path == DETECTRON_CONFIG:
+        cached = _detectron_model_cache.get(weights_path)
+    if isinstance(cached, _LoadFailure):
+        raise cached.error
+    if cached is not None:
+        return cached
 
     import layoutparser as lp
 
@@ -153,38 +183,40 @@ def _get_detectron_model(weights_path=None, config_path=None):
     )
     local_config = os.path.join(PROJECT_ROOT, "publaynet_config.yaml")
     try:
-        model = lp.Detectron2LayoutModel(
-            config_path=config_path,
-            model_path=weights_path,
-            extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
-            label_map=DETECTRON_LABEL_MAP,
-        )
-    except Exception as e:
-        is_same = False
         try:
-            if os.path.exists(config_path) and os.path.exists(local_config):
-                is_same = (
-                    os.path.abspath(config_path) == os.path.abspath(local_config)
-                    or os.path.samefile(config_path, local_config)
-                )
-        except Exception:
-            pass
+            model = _build_detectron_model(lp, config_path, weights_path)
+        except Exception as e:
+            is_same = False
+            try:
+                if os.path.exists(config_path) and os.path.exists(local_config):
+                    is_same = (
+                        os.path.abspath(config_path) == os.path.abspath(local_config)
+                        or os.path.samefile(config_path, local_config)
+                    )
+            except Exception:
+                pass
 
-        if not is_same and config_path != local_config and os.path.exists(local_config):
-            logger.warning(
-                "Failed to load Detectron2 model with config %s (%s: %s); "
-                "falling back to local config %s",
-                config_path, type(e).__name__, e, local_config,
-            )
-            model = lp.Detectron2LayoutModel(
-                config_path=local_config,
-                model_path=weights_path,
-                extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
-                label_map=DETECTRON_LABEL_MAP,
-            )
-            _detectron_model_cache[(weights_path, local_config)] = model
-        else:
-            raise
+            if not is_same and config_path != local_config and os.path.exists(local_config):
+                logger.warning(
+                    "Failed to load Detectron2 model with config %s (%s: %s); "
+                    "falling back to local config %s",
+                    config_path, type(e).__name__, e, local_config,
+                )
+                model = _build_detectron_model(lp, local_config, weights_path)
+                _detectron_model_cache[(weights_path, local_config)] = model
+            else:
+                raise
+    except Exception as e:
+        # Both the requested config and the local fallback are unusable. Record
+        # it so the rest of the batch fails fast instead of re-attempting.
+        logger.error(
+            "Detectron2 model could not be loaded (config: %s) — layout detection "
+            "is unavailable for this run and every document will fall back to "
+            "text-only extraction: %s: %s",
+            config_path, type(e).__name__, e,
+        )
+        _detectron_model_cache[cache_key] = _LoadFailure(e)
+        raise
 
     _detectron_model_cache[cache_key] = model
     if config_path == DETECTRON_CONFIG:

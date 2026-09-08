@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 
 import streamlit as st
 
@@ -117,6 +118,22 @@ def _render_suggestion(result):
             st.markdown(f"- {c}")
 
     _render_passages(result.get("passages") or [])
+
+
+def _stage_upload(uploaded_file) -> str:
+    """Write an uploaded PDF somewhere the pipeline can seed from, and return it.
+
+    Agent 0 copies the paper into RAW_DIR under a key derived from its DOI,
+    arXiv id or content hash, so this staging copy is pure duplication — it
+    exists only because the graph's state carries a path, not bytes. So it goes
+    to a temp file the caller deletes once the run finishes, rather than under
+    DATA_DIR where copies would pile up and two uploads sharing a filename
+    would overwrite each other.
+    """
+    fd, path = tempfile.mkstemp(prefix="seed_upload_", suffix=".pdf")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(uploaded_file.getbuffer())
+    return path
 
 
 def _render_seed_and_downloads(query, final):
@@ -301,12 +318,7 @@ with tab_build:
             elif uploaded_pdf.size == 0:
                 st.warning("The uploaded PDF is empty (0 bytes).", icon="⚠️")
             else:
-                uploads_dir = os.path.join(config.DATA_DIR, "uploads")
-                os.makedirs(uploads_dir, exist_ok=True)
-                safe_name = os.path.basename(uploaded_pdf.name) or "uploaded_paper.pdf"
-                seed_file_path = os.path.join(uploads_dir, safe_name)
-                with open(seed_file_path, "wb") as f:
-                    f.write(uploaded_pdf.getbuffer())
+                seed_file_path = _stage_upload(uploaded_pdf)
                 q = pdf_query.strip()
     else:
         with st.form("build_form"):
@@ -369,6 +381,14 @@ with tab_build:
             except Exception as e:  # noqa: BLE001
                 status.update(label="Pipeline failed", state="error")
                 st.exception(e)
+            finally:
+                # Agent 0 has copied the paper into RAW_DIR under its own key by
+                # now, so the staging copy has served its purpose either way.
+                if seed_file_path:
+                    try:
+                        os.unlink(seed_file_path)
+                    except OSError:
+                        pass
 
         live.empty()
         effective_final_q = final.get("query") or q or final.get("seed_label", "")

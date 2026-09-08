@@ -10,6 +10,7 @@ different answers in each.
 import concurrent.futures
 import os
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -330,6 +331,35 @@ class TestDetectronModelLoading(unittest.TestCase):
     def tearDown(self):
         ing._detectron_model_cache.clear()
         ing._detectron_model_cache.update(self._orig_cache)
+
+    def test_a_failing_config_is_not_retried_for_every_document(self):
+        """A load that cannot succeed must be attempted once, not per PDF.
+
+        process_pdf swallows the failure into a text-only fallback, so nothing
+        upstream stops the next document trying again. Without remembering the
+        failure, a broken config makes every paper in the batch pay for a full
+        Detectron2 construction that is guaranteed to fail.
+        """
+        attempts = []
+
+        def boom(*a, **k):
+            attempts.append(1)
+            raise RuntimeError("bad config")
+
+        fake_lp = types.SimpleNamespace(Detectron2LayoutModel=boom)
+        with patch.dict("sys.modules", {"layoutparser": fake_lp}):
+            with self.assertRaises(RuntimeError):
+                ing._get_detectron_model("w.pth", "/nonexistent/config.yaml")
+            after_first_call = len(attempts)
+
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    ing._get_detectron_model("w.pth", "/nonexistent/config.yaml")
+
+        self.assertEqual(
+            len(attempts), after_first_call,
+            "a failed model load must be remembered, not retried for every document",
+        )
 
     def test_get_detectron_model_uses_cache(self):
         fake_model = object()

@@ -156,5 +156,51 @@ class TestAppSeedRender(unittest.TestCase):
                         self.assertTrue(any("New Uploaded Paper" in r for r in rendered))
 
 
+class TestUploadStaging(unittest.TestCase):
+    """An uploaded PDF must not accumulate a second copy under DATA_DIR.
+
+    discover_from_file already writes the paper into RAW_DIR under a
+    key-derived name, so any staging copy is pure duplication — it exists only
+    because the graph's state carries a path rather than bytes. It previously
+    landed in DATA_DIR/uploads under the user's own filename and was never
+    cleaned up, so the directory grew without bound and re-uploading a
+    different paper with the same filename silently overwrote the earlier one.
+    """
+
+    def _fake_upload(self, body: bytes, name: str = "paper.pdf"):
+        uploaded = MagicMock()
+        uploaded.getbuffer.return_value = body
+        uploaded.name = name
+        return uploaded
+
+    def _stage(self, uploaded):
+        import app
+
+        path = app._stage_upload(uploaded)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def test_staged_upload_holds_the_bytes_and_lives_outside_the_data_dir(self):
+        from research_assistant import config
+
+        path = self._stage(self._fake_upload(b"%PDF-1.4 body"))
+
+        self.assertTrue(os.path.exists(path))
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"%PDF-1.4 body")
+        self.assertFalse(
+            os.path.abspath(path).startswith(os.path.abspath(config.DATA_DIR)),
+            "a staging copy must not accumulate inside DATA_DIR",
+        )
+
+    def test_two_uploads_sharing_a_filename_do_not_overwrite_each_other(self):
+        first = self._stage(self._fake_upload(b"%PDF-1.4 first", "paper.pdf"))
+        second = self._stage(self._fake_upload(b"%PDF-1.4 second", "paper.pdf"))
+
+        self.assertNotEqual(first, second)
+        with open(first, "rb") as fh:
+            self.assertEqual(fh.read(), b"%PDF-1.4 first")
+
+
 if __name__ == "__main__":
     unittest.main()
