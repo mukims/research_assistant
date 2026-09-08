@@ -8,6 +8,7 @@ for the GROBID server (Docker, local JAR, or external service).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -87,6 +88,69 @@ class GrobidManager:
             return False, None
         except Exception:
             return False, None
+
+    def _process_cmdline(self, pid: int) -> Optional[str]:
+        """The command line of *pid*, or None when it cannot be determined.
+
+        PIDs are recycled, so the number alone does not identify a process.
+        Reading back what the process is actually running is what lets
+        stop_server() tell "the GROBID we launched" from "whatever inherited
+        that number afterwards".
+        """
+        proc_path = f"/proc/{pid}/cmdline"
+        try:
+            with open(proc_path, "rb") as fh:
+                # /proc separates argv entries with NULs.
+                return fh.read().replace(b"\x00", b" ").decode(errors="replace").strip()
+        except OSError:
+            pass
+        try:
+            res = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, timeout=6,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        line = (res.stdout or "").strip()
+        return line or None
+
+    def _read_pid_file(self) -> Optional[int]:
+        try:
+            with open(self._pid_file) as fh:
+                content = fh.read().strip()
+        except OSError:
+            return None
+        try:
+            return int(content)
+        except ValueError:
+            return None
+
+    def _clear_pid_file(self) -> None:
+        try:
+            os.remove(self._pid_file)
+        except OSError:
+            pass
+
+    def _is_our_process(self, pid: int) -> bool:
+        """True when *pid* is running the command this manager launches.
+
+        start_server() records proc.pid from a shell=True Popen, so for any
+        compound command that is the shell's PID and the shell exits at once —
+        freeing the number for reuse. Matching the most distinctive token of
+        start_command against the live command line is what distinguishes our
+        JVM from whatever later inherited the number.
+        """
+        if not self.start_command:
+            return False
+        cmdline = self._process_cmdline(pid)
+        if not cmdline:
+            return False
+        try:
+            tokens = shlex.split(self.start_command)
+        except ValueError:
+            tokens = self.start_command.split()
+        distinctive = max((t for t in tokens if len(t) > 3), key=len, default=None)
+        return bool(distinctive) and distinctive in cmdline
 
     # ─── Health Probing ───────────────────────────────────────────────────────
 
@@ -607,29 +671,26 @@ class GrobidManager:
 
     def stop_server(self, timeout: float = 10.0) -> tuple[bool, str]:
         """Stop the GROBID server container or tracked process."""
-        # Stop tracked process if PID file exists
-        if os.path.exists(self._pid_file):
-            target_pid = None
-            try:
-                with open(self._pid_file) as f:
-                    content = f.read().strip()
-                if content:
-                    target_pid = int(content)
-            except Exception:
-                target_pid = None
-
-            if target_pid is not None:
+        # A tracked process only counts if the PID still belongs to it. PIDs get
+        # recycled, and killing a recycled one terminates an unrelated process
+        # while leaving GROBID serving — reported as a successful stop. An
+        # unverifiable PID file is stale: drop it and check Docker, rather than
+        # letting it shadow a container that is genuinely running.
+        target_pid = self._read_pid_file()
+        if target_pid is not None:
+            if self._is_our_process(target_pid):
                 try:
                     os.kill(target_pid, signal.SIGTERM)
-                except Exception as exc:
-                    logger.warning("Failed to terminate tracked process: %s", exc)
-
-            if os.path.exists(self._pid_file):
-                try:
-                    os.remove(self._pid_file)
-                except OSError:
-                    pass
-            return True, f"Stopped GROBID process with PID {target_pid}."
+                except OSError as exc:
+                    return False, f"Failed to terminate GROBID process {target_pid}: {exc}"
+                self._clear_pid_file()
+                return True, f"Stopped GROBID process with PID {target_pid}."
+            logger.warning(
+                "PID file names %d, but that process is not the GROBID this "
+                "manager started — ignoring it and checking Docker instead.",
+                target_pid,
+            )
+            self._clear_pid_file()
 
         docker_ok, docker_msg = self.check_docker()
         if not docker_ok:

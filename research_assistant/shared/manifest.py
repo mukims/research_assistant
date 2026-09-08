@@ -7,14 +7,12 @@ growing without bound) and a full paginated scan of every metadata record in
 the collection. The scan is now a repair path — rebuild_from_collection() —
 rather than something ingestion pays for on every run.
 
-Writes are atomic: a temp file in the same directory, then os.replace, the same
-pattern shared/fetch.py uses for downloads. A half-written manifest would make
-the pipeline re-parse an entire corpus.
+Writes go through shared.atomic, so a half-written manifest — which would make
+the pipeline re-parse an entire corpus — never reaches disk.
 """
 
 import json
 import os
-import tempfile
 import time
 from typing import Iterable
 
@@ -23,6 +21,7 @@ from research_assistant.config import (
     INGESTED_MANIFEST_PATH,
     VECTORDB_PATH,
 )
+from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("manifest")
@@ -60,19 +59,7 @@ def load() -> dict[str, str]:
 
 
 def _write(data: dict[str, str]) -> None:
-    directory = os.path.dirname(MANIFEST_PATH) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
-        os.replace(tmp_path, MANIFEST_PATH)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    atomic_write_json(MANIFEST_PATH, data, sort_keys=True)
 
 
 def contains(pdf_key: str) -> bool:

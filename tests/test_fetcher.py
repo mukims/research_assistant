@@ -245,3 +245,117 @@ class TestFetchPapersSuccessRecord(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFailureRetryPolicy(unittest.TestCase):
+    """A failed fetch must not be a life sentence.
+
+    Every key in failed_downloads.json was excluded from the work list forever,
+    with no distinction between "this DOI is not open access" and "the network
+    dropped for ten seconds". A brief outage during a run therefore removed
+    those references from the corpus permanently, recoverable only by editing
+    the JSON by hand.
+    """
+
+    REF = {
+        "raw_reference": "Geim, A. K. Graphene: status and prospects. Science 2009.",
+        "source_file": "seed.pdf",
+        "title": "Graphene: status and prospects",
+        "doi": "10.1126/science.1158877",
+        "doi_confidence": "high",
+        "xml_id": "b3",
+    }
+
+    def _run_twice(self, first_reason):
+        """Fail the first run with *first_reason*; report whether run two retried."""
+        attempts = []
+
+        def failing_unpaywall(doi, dest_path):
+            attempts.append(doi)
+            return False, first_reason
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = [
+                patch.object(agent2_fetcher, "DOWNLOADED_JSON_PATH",
+                             os.path.join(tmp, "downloaded.json")),
+                patch.object(agent2_fetcher, "FAILED_DOWNLOADS_PATH",
+                             os.path.join(tmp, "failed.json")),
+                patch.object(agent2_fetcher, "PULLED_PDFS_DIR", os.path.join(tmp, "pdfs")),
+                patch.object(agent2_fetcher, "_load_references", return_value=[self.REF]),
+                patch.object(agent2_fetcher, "resolve_doi",
+                             return_value=("10.1126/science.1158877", "grobid")),
+                patch.object(agent2_fetcher, "try_unpaywall", side_effect=failing_unpaywall),
+                patch.object(agent2_fetcher, "try_europepmc",
+                             return_value=(False, "not in Europe PMC")),
+                patch.object(agent2_fetcher, "try_arxiv",
+                             return_value=(False, "not found on arXiv")),
+                patch.object(agent2_fetcher.time, "sleep", lambda s: None),
+            ]
+            for p in patches:
+                p.start()
+            try:
+                agent2_fetcher.fetch_papers()
+                agent2_fetcher.fetch_papers()
+            finally:
+                for p in patches:
+                    p.stop()
+
+        return len(attempts)
+
+    def test_network_error_is_retried_on_the_next_run(self):
+        self.assertEqual(
+            self._run_twice("download error: ConnectionError(...)"), 2,
+            "a transient network failure blacklisted the reference permanently",
+        )
+
+    def test_server_error_is_retried_on_the_next_run(self):
+        self.assertEqual(self._run_twice("Unpaywall lookup failed (HTTP 503)"), 2)
+
+    def test_rate_limit_is_retried_on_the_next_run(self):
+        self.assertEqual(self._run_twice("HTTP 429"), 2)
+
+    def test_paywalled_paper_is_not_retried(self):
+        """A definitive answer must stay cached — retrying it every run is waste."""
+        self.assertEqual(self._run_twice("paywalled / not open access"), 1)
+
+    def test_missing_from_every_source_is_not_retried(self):
+        self.assertEqual(self._run_twice("HTTP 404"), 1)
+
+
+class TestRetryableClassification(unittest.TestCase):
+    def test_transient_reasons(self):
+        for reason in [
+            "download error: ReadTimeout",
+            "Unpaywall error: ConnectionError",
+            "Europe PMC error: timed out",
+            "arXiv error: ConnectionResetError",
+            "HTTP 500",
+            "HTTP 502",
+            "HTTP 429",
+            "empty response",
+        ]:
+            with self.subTest(reason=reason):
+                self.assertTrue(agent2_fetcher._is_retryable(reason))
+
+    def test_definitive_reasons(self):
+        for reason in [
+            "paywalled / not open access",
+            "not in Europe PMC",
+            "not found on arXiv",
+            "no DOI resolved",
+            "HTTP 404",
+            "HTTP 403",
+            "not a PDF (content-type text/html)",
+            "arXiv match was a different paper",
+        ]:
+            with self.subTest(reason=reason):
+                self.assertFalse(agent2_fetcher._is_retryable(reason))
+
+    def test_a_ladder_with_any_transient_leg_is_retryable(self):
+        """reason is every leg's failure joined — one flaky leg means the
+        paper might still be reachable next run."""
+        self.assertTrue(
+            agent2_fetcher._is_retryable(
+                "paywalled / not open access | not in Europe PMC | arXiv error: timeout"
+            )
+        )

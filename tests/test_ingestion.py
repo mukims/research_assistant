@@ -647,3 +647,53 @@ class TestIngestReportsExtractionModes(IngestPdfsCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConcurrentIngestion(IngestPdfsCase):
+    """Two ingests must never touch the corpus at the same time.
+
+    watch.py runs the raw/ pipeline on one thread while its pulled_pdfs/
+    watcher drains on another — and Agent 2 downloads *into* pulled_pdfs/, so
+    a fetch reliably arms that second thread mid-run. Both paths reach
+    upsert_corpus(), which allocates chunk ids by reading the collection's
+    current maximum and counting up. Overlapping readers get the same maximum
+    and mint the same ids; whichever add() loses is dropped, and both then
+    race to rewrite the one BM25 pickle.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(
+            ing, "INGEST_LOCK_PATH", os.path.join(self.tmp.name, "ingest.lock")
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_second_ingest_waits_for_the_first(self):
+        import threading
+        import time
+
+        events = []
+
+        def slow_upsert(corpus):
+            events.append("enter")
+            time.sleep(0.05)
+            events.append("exit")
+            return 0
+
+        with patch.object(ing, "upsert_corpus", slow_upsert):
+            a = _touch(self.tmp.name, "a.pdf")
+            b = _touch(self.tmp.name, "b.pdf")
+            threads = [
+                threading.Thread(target=ing.ingest_pdfs, args=({p: p},))
+                for p in (a, b)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        self.assertEqual(
+            events, ["enter", "exit", "enter", "exit"],
+            "ingests overlapped — chunk-id allocation and the BM25 rebuild raced",
+        )

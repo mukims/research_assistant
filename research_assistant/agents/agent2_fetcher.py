@@ -35,6 +35,7 @@ from research_assistant.config import (
 from research_assistant.schemas import DownloadedPaper
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.source_key import source_key, normalise_doi, is_authoritative
+from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for
 
 logger = get_logger("agent2")
@@ -42,12 +43,45 @@ logger = get_logger("agent2")
 TRUSTED_CONFIDENCE = ("high", "medium")
 
 
+# ─── Retry policy ────────────────────────────────────────────────────────────
+# A failed key used to be excluded from the work list forever, which made a
+# ten-second network blip permanently drop those references from the corpus.
+# These markers separate "the answer might differ next run" from "this paper is
+# settled" — a paywall, a 404 or an absence from an index is a real answer and
+# stays cached; a dropped connection, a rate limit or a 5xx is not.
+_TRANSIENT_MARKERS = (
+    "download error:",
+    "incomplete download",
+    "unpaywall error:",
+    "europe pmc error:",
+    "arxiv error:",
+    "empty response",
+    "malformed json",
+)
+_TRANSIENT_HTTP = re.compile(r"http (?:429|5\d\d)")
+
+
+def _is_retryable(reason: str | None) -> bool:
+    """True when *reason* describes a fault that could clear on its own.
+
+    `reason` is every rung of the download ladder joined together, so one
+    transient leg is enough: the paper may well be reachable next time.
+    """
+    text = (reason or "").lower()
+    if any(marker in text for marker in _TRANSIENT_MARKERS):
+        return True
+    return bool(_TRANSIENT_HTTP.search(text))
+
+
 def _checkpoint(downloaded, failed):
-    """Write state to disk after every paper — crash-safe incremental saves."""
-    with open(DOWNLOADED_JSON_PATH, "w") as f:
-        json.dump(downloaded, f, indent=2, ensure_ascii=False)
-    with open(FAILED_DOWNLOADS_PATH, "w") as f:
-        json.dump(failed, f, indent=2, ensure_ascii=False)
+    """Write state to disk after every paper — crash-safe incremental saves.
+
+    Atomic because the checkpoint is the resume point: _load_state() treats an
+    unparseable file as empty and starts the whole fetch again, so a truncated
+    downloaded.json costs more than no checkpoint at all.
+    """
+    atomic_write_json(DOWNLOADED_JSON_PATH, downloaded, ensure_ascii=False)
+    atomic_write_json(FAILED_DOWNLOADS_PATH, failed, ensure_ascii=False)
 
 
 def _load_state(path, default):
@@ -271,9 +305,19 @@ def fetch_papers():
     if isinstance(failed, list):  # legacy shape
         failed = {}
 
-    remaining = [(k, r) for k, r in unique.items() if k not in downloaded and k not in failed]
+    retryable = {
+        k for k, record in failed.items()
+        if _is_retryable((record or {}).get("reason") if isinstance(record, dict) else None)
+    }
+    remaining = [
+        (k, r) for k, r in unique.items()
+        if k not in downloaded and (k not in failed or k in retryable)
+    ]
     if len(remaining) < len(unique):
         logger.info("Skipping %d already processed.", len(unique) - len(remaining))
+    retrying = len(retryable & {k for k, _ in remaining})
+    if retrying:
+        logger.info("Retrying %d that previously failed for a transient reason.", retrying)
 
     for i, (key, ref) in enumerate(remaining, start=1):
         label = (ref.get("title") or ref.get("raw_reference") or key)[:70]
@@ -335,6 +379,7 @@ def fetch_papers():
                 cited_by=ref.get("source_file"),
                 xml_id=ref.get("xml_id"),
             ).to_dict()
+            failed.pop(key, None)   # a retry that worked is no longer a failure
             logger.info("    saved -> %s", os.path.basename(dest))
         else:
             record = {

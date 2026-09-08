@@ -514,3 +514,56 @@ class TestOutcomeFiling(RunExtractorTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunExtractorConcurrentRawDir(RunExtractorTestCase):
+    """run_extractor() globs every PDF in RAW_DIR, not just this run's seed.
+
+    Two pipelines can therefore be filing the same directory at once — app.py
+    and watch.py, or two orchestrator runs. The loser of that race used to hit
+    an uncaught FileNotFoundError from shutil.move and take the whole run down,
+    losing the references already extracted from every other PDF in the batch.
+    """
+
+    def test_a_pdf_that_vanishes_mid_run_does_not_abort_the_batch(self):
+        first = self._touch_pdf("a.pdf")
+        self._touch_pdf("b.pdf")
+
+        def extract_and_steal(pdf_path, grobid_ok):
+            # Another process filed this PDF between the glob and the move.
+            if pdf_path == first:
+                os.remove(first)
+            return (
+                [Reference(raw_reference="r", source_file=os.path.basename(pdf_path),
+                           extraction_method="regex")],
+                "regex",
+            )
+
+        with patch.object(ex, "grobid_alive", return_value=False), \
+             patch.object(ex, "extract_references", side_effect=extract_and_steal):
+            result = ex.run_extractor()
+
+        self.assertEqual(result["reference_count"], 2)
+        self.assertTrue(
+            os.path.exists(os.path.join(self.raw_dir, "processed", "b.pdf")),
+            "the surviving PDF was never filed",
+        )
+
+    def test_a_failed_pdf_that_vanishes_mid_run_does_not_abort_the_batch(self):
+        first = self._touch_pdf("a.pdf")
+        self._touch_pdf("b.pdf")
+
+        def extract_nothing(pdf_path, grobid_ok):
+            if pdf_path == first:
+                os.remove(first)
+            return [], "none"
+
+        with patch.object(ex, "grobid_alive", return_value=False), \
+             patch.object(ex, "extract_references", side_effect=extract_nothing):
+            result = ex.run_extractor()
+
+        self.assertEqual(result["failed"], 2)
+        self.assertTrue(
+            os.path.exists(os.path.join(self.raw_dir, "failed", "b.pdf")),
+            "the surviving PDF was never filed",
+        )

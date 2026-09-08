@@ -34,17 +34,48 @@ def _is_pdf(first_bytes: bytes) -> bool:
     return first_bytes[:5] == b"%PDF-"
 
 
+def _expected_length(headers) -> int | None:
+    """Content-Length, when it can be trusted as the decoded body's size.
+
+    A transfer-encoded or content-encoded response reports the size of the
+    encoded stream while iter_content yields decoded bytes, so the two are not
+    comparable and the check is skipped rather than guessed at.
+    """
+    if headers.get("Content-Encoding") or headers.get("Transfer-Encoding"):
+        return None
+    try:
+        return int(headers.get("Content-Length"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _discard(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def download_pdf(url: str, dest_path: str) -> tuple[bool, str | None]:
     """Stream a PDF to *dest_path*, refusing anything that isn't actually a PDF.
 
     Returns ``(ok, reason)``. On success ``reason`` is ``None``; on failure
     ``dest_path`` is left untouched (the download goes to a ``.part`` file that
-    is only renamed into place once the whole body is written).
+    is only renamed into place once the whole body is written, and is removed
+    when it is not).
+
+    Two things can arrive that are not a usable PDF. A server can send an HTML
+    error page with HTTP 200 — caught by the magic-byte check. Or the body can
+    start correctly and stop early: iter_content ends without raising when a
+    connection drops mid-stream, so a short read used to be renamed into place
+    and reported as a success, surfacing much later as a paper that extracts
+    badly. Comparing the bytes written against Content-Length catches that.
 
     Network errors are caught and returned as a failure reason rather than
     raised, so a caller trying several sources in turn moves on to the next one
     instead of aborting the whole fetch.
     """
+    tmp_path = dest_path + ".part"
     try:
         with requests.get(url, headers=HEADERS, stream=True, timeout=30) as res:
             if res.status_code != 200:
@@ -60,13 +91,26 @@ def download_pdf(url: str, dest_path: str) -> tuple[bool, str | None]:
                 ctype = res.headers.get("Content-Type", "unknown")
                 return False, f"not a PDF (content-type {ctype})"
 
-            tmp_path = dest_path + ".part"
+            written = 0
             with open(tmp_path, "wb") as fh:
                 fh.write(first)
+                written += len(first)
                 for chunk in chunks:
                     fh.write(chunk)
+                    written += len(chunk)
+
+            expected = _expected_length(res.headers)
+            if expected is not None and written < expected:
+                _discard(tmp_path)
+                return False, (
+                    f"incomplete download ({written} of {expected} bytes)"
+                )
     except requests.RequestException as exc:
+        _discard(tmp_path)
         return False, f"download error: {exc}"
+    except BaseException:
+        _discard(tmp_path)
+        raise
 
     os.replace(tmp_path, dest_path)
     return True, None

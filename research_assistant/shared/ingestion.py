@@ -13,12 +13,19 @@ Provides:
     - pdf_key()         — Normalised document identity used by both stores
 """
 
+import contextlib
 import os
 import re
 import pickle
+import threading
 import time
 import warnings
 import concurrent.futures
+
+try:
+    import fcntl
+except ImportError:      # non-POSIX: fall back to the in-process lock alone
+    fcntl = None
 
 warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 
@@ -35,6 +42,7 @@ warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 # keeping them importable on their own is what makes them testable anywhere.
 
 from research_assistant.config import (
+    DATA_DIR,
     PROJECT_ROOT,
     VECTORDB_PATH,
     COLLECTION_NAME,
@@ -57,12 +65,59 @@ from research_assistant.config import (
     SUMMARY_MAX_CHARS,
 )
 from research_assistant.prompts import FIGURE_DESCRIPTION, DOCUMENT_SUMMARY
+from research_assistant.shared.atomic import atomic_write
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
 from research_assistant.shared.db import get_max_chunk_index
 from research_assistant.shared import manifest
 
 logger = get_logger("ingestion")
+
+# Serialises ingestion across threads and processes — see _ingest_lock().
+INGEST_LOCK_PATH = os.path.join(DATA_DIR, "ingest.lock")
+
+# Re-entrant so a caller already inside ingest_pdfs() does not deadlock itself.
+_ingest_thread_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def _ingest_lock():
+    """Hold exclusive access to the corpus for the duration of one ingest.
+
+    upsert_corpus() allocates chunk ids by reading the collection's current
+    maximum and counting up from it, and rebuild_bm25() rewrites a single
+    pickle. Both are read-modify-write against shared state, so two ingests
+    running at once mint colliding ids and race on the index file.
+
+    They really do run at once by default: watch.py drives the raw/ pipeline on
+    one thread while its pulled_pdfs/ watcher drains on another, and Agent 2
+    downloads *into* pulled_pdfs/ — so fetching references arms the second
+    thread every time. app.py and watch.py can also be running side by side.
+
+    The threading lock covers threads in this process; flock covers separate
+    processes sharing a DATA_DIR. On a platform without fcntl the in-process
+    lock still applies.
+    """
+    with _ingest_thread_lock:
+        if fcntl is None:
+            yield
+            return
+        os.makedirs(os.path.dirname(INGEST_LOCK_PATH) or ".", exist_ok=True)
+        with open(INGEST_LOCK_PATH, "w") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # Parsing a batch takes minutes, so say why we are stopped
+                # rather than letting the caller sit on a silent block.
+                logger.info(
+                    "Another ingest holds %s — waiting for it to finish.",
+                    INGEST_LOCK_PATH,
+                )
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 # ─── Text helpers ─────────────────────────────────────────────────────────────
@@ -587,14 +642,21 @@ def upsert_corpus(corpus: list[dict]):
     logger.info("Chunking completed in %.1fs (%d entries)", chunk_time, len(total_corpus))
 
     # ── Deduplicate against existing DB content ──────────────────────────
-    # Fetch existing document texts to skip re-ingesting identical chunks.
-    existing_docs = set()
+    # Keyed on (document, text), not text alone. Two papers legitimately share
+    # sentences — boilerplate, standard equations, common method descriptions —
+    # and a global key silently dropped the second paper's copy, leaving that
+    # passage attributed to whichever paper was ingested first. Within one
+    # document a repeat is still a duplicate and is still skipped.
+    existing_chunks = set()
     limit, offset = 5000, 0
     while True:
-        batch = collection.get(include=["documents"], limit=limit, offset=offset)
+        batch = collection.get(
+            include=["documents", "metadatas"], limit=limit, offset=offset
+        )
         if not batch or not batch["documents"]:
             break
-        existing_docs.update(batch["documents"])
+        for stored, meta in zip(batch["documents"], batch["metadatas"] or []):
+            existing_chunks.add(((meta or {}).get("document"), stored))
         offset += limit
 
     current_index = get_max_chunk_index(collection)
@@ -602,9 +664,14 @@ def upsert_corpus(corpus: list[dict]):
 
     for entry in total_corpus:
         content = entry["content"].strip()
-        if content in seen or content in existing_docs or len(content) < CHUNK_MIN_LENGTH:
+        # Compare on the same form that reaches the store: add() truncates to
+        # EMBED_MAX_CHARS, so comparing full text against stored text would
+        # never match for a long chunk and would re-insert it on every run.
+        stored_form = content[:EMBED_MAX_CHARS]
+        identity = (entry["document"], stored_form)
+        if identity in seen or identity in existing_chunks or len(content) < CHUNK_MIN_LENGTH:
             continue
-        seen.add(content)
+        seen.add(identity)
         meta = {
             "document": entry["document"],
             "page": entry["page"],
@@ -703,7 +770,10 @@ def rebuild_bm25():
     texts = [p[1] for p in paired]
     bm25 = BM25Okapi([re.findall(r'\w+', t.lower()) for t in texts])
 
-    with open(BM25_INDEX_PATH, "wb") as f:
+    # Atomic: load_search_resources() unpickles this on every query, so a
+    # partial write is not a degraded index but an exception on the next
+    # search, recoverable only by re-ingesting.
+    with atomic_write(BM25_INDEX_PATH, binary=True) as f:
         pickle.dump(bm25, f)
     elapsed = time.perf_counter() - t0
     logger.info("✓ BM25 index rebuilt (%d documents) in %.1fs.", len(texts), elapsed)
@@ -746,6 +816,12 @@ def ingest_pdfs(
         dict: ``{"processed", "skipped", "inserted", "failed"}`` — ``failed``
         is the list of paths that could not be read.
     """
+    with _ingest_lock():
+        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
+
+
+def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix) -> dict:
+    """ingest_pdfs()'s body. Call it through ingest_pdfs(), which holds the lock."""
     if not isinstance(pdfs, dict):
         pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
 

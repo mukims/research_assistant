@@ -349,7 +349,12 @@ class TestGrobidController(unittest.TestCase):
                 with open(pid_file) as f:
                     self.assertEqual(f.read(), "12345")
 
-            with patch("os.kill") as mock_kill:
+            # stop_server() now confirms the recorded PID is still running the
+            # command it launched before signalling it, so that a recycled PID
+            # is never killed. See TestStopServerPidSafety in
+            # tests/test_grobid_manager.py.
+            with patch.object(controller, "_process_cmdline", return_value="sh -c echo starting"), \
+                 patch("os.kill") as mock_kill:
                 ok, msg = controller.stop_server()
                 self.assertTrue(ok)
                 mock_kill.assert_called_once()

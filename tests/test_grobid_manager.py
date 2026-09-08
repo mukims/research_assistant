@@ -347,7 +347,12 @@ class TestGrobidManager(unittest.TestCase):
                 with open(pid_file) as f:
                     self.assertEqual(f.read(), "54321")
 
-            with patch("os.kill") as mock_kill:
+            # stop_server() now confirms the PID still belongs to the process it
+            # launched before signalling it — PIDs are recycled, and this test
+            # previously asserted the unsafe behaviour of killing the recorded
+            # number unconditionally. See TestStopServerPidSafety.
+            with patch.object(manager, "_process_cmdline", return_value="sh -c echo launching"), \
+                 patch("os.kill") as mock_kill:
                 ok, msg = manager.stop_server()
                 self.assertTrue(ok)
                 mock_kill.assert_called_once()
@@ -548,3 +553,82 @@ class TestGrobidManager(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStopServerPidSafety(unittest.TestCase):
+    """stop_server() must never SIGTERM a process it did not start.
+
+    The PID file records a bare number, and start_server() launches through a
+    shell — so the recorded PID is the shell's, and the shell exits immediately
+    for any compound command. The OS then recycles that number. Killing it
+    blind terminates an unrelated process and reports "Stopped GROBID process
+    with PID N", while the real GROBID keeps serving.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.manager = GrobidManager(
+            server_url="http://localhost:8070",
+            container_name="test-grobid",
+            start_command="java -Xmx4g -jar /opt/grobid/grobid-service.jar",
+        )
+        self.manager._pid_file = os.path.join(self.tmp.name, "grobid_process.pid")
+        with open(self.manager._pid_file, "w") as fh:
+            fh.write("54321")
+
+    def test_recycled_pid_is_not_killed(self):
+        """The PID is alive, but it belongs to something else entirely."""
+        with patch.object(self.manager, "_process_cmdline", return_value="/usr/bin/firefox"), \
+             patch.object(self.manager, "check_docker", return_value=(False, "no docker")), \
+             patch.object(self.manager, "is_alive", return_value=False), \
+             patch("os.kill") as mock_kill:
+            self.manager.stop_server()
+            for call in mock_kill.call_args_list:
+                self.assertEqual(
+                    call.args[1], 0,
+                    "sent a real signal to a process GROBID did not start",
+                )
+
+    def test_recycled_pid_does_not_report_a_successful_stop(self):
+        with patch.object(self.manager, "_process_cmdline", return_value="/usr/bin/firefox"), \
+             patch.object(self.manager, "check_docker", return_value=(False, "no docker")), \
+             patch.object(self.manager, "is_alive", return_value=True), \
+             patch("os.kill"):
+            ok, msg = self.manager.stop_server()
+            self.assertFalse(ok, "claimed to have stopped GROBID without stopping it")
+
+    def test_process_we_started_is_killed(self):
+        with patch.object(
+            self.manager, "_process_cmdline",
+            return_value="java -Xmx4g -jar /opt/grobid/grobid-service.jar",
+        ), patch("os.kill") as mock_kill:
+            ok, msg = self.manager.stop_server()
+            self.assertTrue(ok)
+            self.assertIn(54321, [c.args[0] for c in mock_kill.call_args_list])
+            self.assertFalse(os.path.exists(self.manager._pid_file))
+
+    def test_stale_pid_file_falls_through_to_the_container(self):
+        """A leftover PID file from an old JAR run must not shadow Docker.
+
+        stop_server() checked the PID file first and returned success on it, so
+        a stale file made stopping a container-based GROBID a silent no-op.
+        """
+        stopped = []
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["docker", "stop"]:
+                stopped.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(self.manager, "_process_cmdline", return_value=None), \
+             patch.object(self.manager, "check_docker", return_value=(True, "ok")), \
+             patch.object(self.manager, "get_container_info",
+                          return_value={"exists": True, "status": "running",
+                                        "name": "test-grobid", "image": "grobid/grobid:0.8.1"}), \
+             patch("subprocess.run", side_effect=fake_run), \
+             patch("os.kill"):
+            ok, msg = self.manager.stop_server()
+
+        self.assertTrue(ok)
+        self.assertTrue(stopped, "the running container was never stopped")

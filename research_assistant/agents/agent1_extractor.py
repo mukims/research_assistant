@@ -27,7 +27,6 @@ Provides:
 
 import copy
 import glob
-import json
 import os
 import re
 import shutil
@@ -44,6 +43,7 @@ from research_assistant.config import (
     RAW_DIR,
 )
 from research_assistant.schemas import Reference
+from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("agent1")
@@ -500,6 +500,26 @@ def _unique_destination(directory: str, filename: str) -> str:
 # ─── Strategy selection ──────────────────────────────────────────────────────
 
 
+def _file_away(pdf_path: str, directory: str, name: str) -> None:
+    """Move a finished PDF out of RAW_DIR, tolerating a concurrent filer.
+
+    run_extractor() globs the whole of RAW_DIR, so two pipelines — app.py and
+    watch.py, or two orchestrator runs — can be filing the same directory at
+    once. Losing that race is not a reason to abandon the batch: the references
+    are already extracted by this point, and an uncaught error here would
+    discard every other PDF's results along with this one's.
+    """
+    os.makedirs(directory, exist_ok=True)
+    try:
+        shutil.move(pdf_path, _unique_destination(directory, name))
+    except (FileNotFoundError, shutil.Error) as exc:
+        logger.warning(
+            "%s could not be filed under %s (%s) — another run likely moved it "
+            "first. Its references were still extracted.",
+            name, os.path.basename(directory), exc,
+        )
+
+
 def grobid_alive() -> bool:
     """Probe the GROBID server once per run."""
     try:
@@ -599,14 +619,13 @@ def run_extractor() -> dict:
         if references:
             all_references.extend(references)
             logger.info("%s: %d reference(s) via %s.", name, len(references), method)
-            shutil.move(pdf, _unique_destination(processed_dir, name))
+            _file_away(pdf, processed_dir, name)
         else:
             # Nothing came out: a scan with no text layer, an unrecognised
             # reference format, or no reference list at all. Filing it under
             # processed/ would claim a success it did not have.
             logger.warning("%s: no references extracted — filing under failed/.", name)
-            os.makedirs(failed_dir, exist_ok=True)
-            shutil.move(pdf, _unique_destination(failed_dir, name))
+            _file_away(pdf, failed_dir, name)
 
     reference_dicts = [r.to_dict() for r in all_references]
     payload = {
@@ -618,8 +637,9 @@ def run_extractor() -> dict:
         "summary": summarise(reference_dicts),
         "extraction": by_method,
     }
-    with open(EXTRACTED_CITATIONS_PATH, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False)
+    # Atomic: Agent 2 reads this back as its work list, and a truncated write
+    # would strand the whole reference chain behind a JSONDecodeError.
+    atomic_write_json(EXTRACTED_CITATIONS_PATH, payload, ensure_ascii=False)
 
     logger.info(
         "Wrote %d reference(s) from %d PDF(s) (%d via GROBID, %d via patterns, "

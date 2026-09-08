@@ -36,6 +36,7 @@ from research_assistant.config import (
     S2_SEARCH_URL,
 )
 from research_assistant.schemas import SeedPaper
+from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for, _is_pdf
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.source_key import source_key, normalise_doi
@@ -230,8 +231,9 @@ def _load_seeds():
 
 
 def _save_seeds(seeds):
-    with open(SEED_PAPERS_PATH, "w") as f:
-        json.dump(seeds, f, indent=2, ensure_ascii=False)
+    """Atomic: _load_seeds() treats an unparseable manifest as empty, so a
+    truncated write silently forgets every paper already seeded."""
+    atomic_write_json(SEED_PAPERS_PATH, seeds, ensure_ascii=False)
 
 
 def get_seed(query):
