@@ -13,7 +13,10 @@ let the LLM drop the off-topic ones, then run the detailed chunk search only
 over what survives — so it stays fast as the corpus grows.
 
 How to drive the app is in [HOW_TO_USE.md](HOW_TO_USE.md) (also shown in the
-app's *How to use* tab). Design rationale for every major choice is in
+app's *How to use* tab). Setting up GROBID, which Agent 1 needs for good
+reference extraction, is in
+[Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
+Design rationale for every major choice is in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Models run locally through [Ollama](https://ollama.com) by default, or against
@@ -28,7 +31,7 @@ Crossref, Unpaywall, Europe PMC, arXiv) always go out to those services.
 |-------|--------|--------------|
 | **Agent 0 — Discoverer** | [agent0_discoverer.py](research_assistant/agents/agent0_discoverer.py) | Takes a free-text research idea and searches relevance-ranked indexes in turn — arXiv, then OpenAlex, then Semantic Scholar — downloading the first result whose PDF actually fetches (paywalled publisher links are skipped, not fatal). Saves it into `data/raw/` under a `source_key`-derived name and records the query → paper in `seed_papers.json`. If nothing downloads, `--url` / `discover_from_url()` takes an arXiv or direct-PDF link instead, and `--seed-file` / `discover_from_file()` seeds from a PDF you already have — validating the magic bytes, reading a title / DOI / arXiv id out of it, and filing it under the same `source_key` scheme (falling back to a content hash). With that path the research query is optional: left blank, it is inferred from the paper's title or filename. From here the rest of the pipeline runs unchanged. |
 | **Agent 1 — Extractor** | [agent1_extractor.py](research_assistant/agents/agent1_extractor.py) | Sends every PDF in `data/raw/` to a GROBID server and parses the TEI output into each paper's own metadata plus its full reference list (title, authors, year, DOI, raw string), scoring each consolidated DOI against the printed reference so grey-literature mismatches can be flagged. **When GROBID is unreachable — or returns no reference list for a particular paper — it falls back** to pattern-matching a numbered reference list (`[1]`, `1.`, `(1)`) out of that PDF's `pdftotext` output instead. The fallback is weaker (a raw string per reference, no DOIs, no authors/year), but it keeps the pipeline moving instead of dead-ending on a single external Java service. The path taken — `grobid`, `regex`, or `none` — is recorded per PDF, and a per-run count sits under `"extraction"` in `extracted_citations.json`. |
-| **Agent 2 — Fetcher** | [agent2_fetcher.py](research_assistant/agents/agent2_fetcher.py) | Collapses the references to distinct sources, resolves a DOI per source (trusting Agent 1 when it was confident, otherwise asking Crossref), and tries to download an open-access PDF from Unpaywall → Europe PMC → arXiv. Writes `downloaded.json` / `failed_downloads.json` incrementally so a crashed run resumes. |
+| **Agent 2 — Fetcher** | [agent2_fetcher.py](research_assistant/agents/agent2_fetcher.py) | Collapses the references to distinct sources, resolves a DOI per source (trusting Agent 1 when it was confident, otherwise asking Crossref), and tries to download an open-access PDF from Unpaywall → Europe PMC → arXiv. Writes `downloaded.json` / `failed_downloads.json` atomically after every paper, so a crashed run resumes where it stopped. A recorded failure is skipped next run only when it was definitive (paywalled, not indexed, 404); a transient one (dropped connection, rate limit, 5xx, truncated body) is retried. |
 | **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: semantic chunking of the text, embedding into ChromaDB, a rebuild of the BM25 index, and **one LLM summary per paper** into a separate `physics_summaries` collection. With layout detection on, it also crops figures/tables and keeps their captions (a VLM description of each is opt-in, `CITATION_FIGURE_VLM=1`). Tracks what's ingested in `data/ingested.json` so re-runs are cheap. |
 | **Two-stage retrieval** | [shared/retrieve.py](research_assistant/shared/retrieve.py) | Stage 1: rank papers by summary similarity → LLM gate ("relevant prior work? Y/N") → shortlist. Stage 2: hybrid chunk search restricted to the shortlist. `research_answer()` then synthesises a related-work overview. |
 | **Agent 4 — Assistant** | [agent4_assistant.py](research_assistant/agents/agent4_assistant.py) | Given a single sentence of draft text, runs hybrid search over the corpus and asks the LLM to rewrite the sentence with the correct `\cite{key}` inserted, plus an explanation of why that source supports the claim. |
@@ -117,6 +120,7 @@ research_assistant/                the checkout root
 │       ├── retrieve.py     two-stage retrieval (summary shortlist → deep chunk search)
 │       ├── fetch.py        stream-a-PDF-to-disk-with-validation
 │       ├── source_key.py   deterministic identity for a reference / document
+│       ├── atomic.py       write-temp-then-replace, for every manifest on disk
 │       └── db.py  log.py  retry.py
 │
 ├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
@@ -129,7 +133,8 @@ research_assistant/                the checkout root
     ├── logs/
     ├── physics_vectordb/           persistent ChromaDB store
     ├── seed_papers.json  extracted_citations.json  downloaded.json
-    └── failed_downloads.json  ingested.json  bm25_index.pkl
+    ├── failed_downloads.json  ingested.json  bm25_index.pkl
+    └── ingest.lock                 held while a batch is ingesting
 ```
 
 Three runnable entry points sit at the root because they are the things a user
@@ -161,11 +166,19 @@ such as `/data` on a read-only or ephemeral host.
   - `openai` — any OpenAI-compatible endpoint (`OPENAI_BASE_URL`,
     `OPENAI_API_KEY`); `huggingface` for embeddings via `huggingface_hub`.
 - **GROBID** for Agent 1 — `GROBID_SERVER` defaults to
-  `http://localhost:8070` (`curl localhost:8070/api/isalive`). Point it at a
-  hosted GROBID instance if you don't want to run one locally. Either way, a
-  server that is down or returns no reference list for a paper no longer
-  stops the pipeline — Agent 1 falls back to the weaker regex extraction for
-  that paper (see the Agent 1 row above).
+  `http://localhost:8070` (`curl localhost:8070/api/isalive`). The expected
+  setup is a local container:
+  `docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1` —
+  [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md)
+  covers installing Docker and troubleshooting it. You can point the env var
+  at a hosted instance instead.
+
+  A server that is down, or that returns no reference list for a paper, does
+  not stop the pipeline — Agent 1 falls back to the weaker regex extraction
+  for that paper (see the Agent 1 row above). Note that this degrades
+  **silently**: references then carry no DOIs, authors or years, and Agent 2
+  fetches noticeably less. Check the GROBID indicator before concluding the
+  pipeline is performing badly.
 - **Layout detection is optional** (`CITATION_LAYOUT_DETECTION=1`). It needs
   `pip install -r requirements-layout.txt` plus detectron2 from source, and a
   torch build. With it off, ingestion is text-only (PyMuPDF).

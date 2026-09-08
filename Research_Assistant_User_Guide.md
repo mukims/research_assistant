@@ -80,6 +80,26 @@ ollama pull gemma4:e2b-mlx
 ```
 *(This is a one-time download of the embedding model and the local language model).*
 
+### Step 5: Install Docker and Start GROBID
+
+**GROBID** is the component that reads each paper's reference list properly. Without it the app still runs, but it finds references with no authors, years or DOIs — and it will not warn you that this has happened. Everyone on the project should have it running.
+
+It needs **Docker**. The full walkthrough — installing Docker on your operating system, starting the server, and every error message it can produce — is in the companion handbook:
+
+> **Research Assistant: GROBID Setup Guide** (`Research_Assistant_GROBID_Guide.pdf`)
+
+Once Docker is installed, this is the whole of it:
+```bash
+docker pull grobid/grobid:0.8.1
+docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
+```
+
+Wait about 30 seconds, then confirm it is awake:
+```bash
+curl http://localhost:8070/api/isalive
+```
+*(You want to see the word `true`. If you see anything else, check the GROBID guide.)*
+
 ---
 
 # Part 2: Starting the Web App (Recommended)
@@ -188,7 +208,7 @@ python watch.py
 
 # Part 4: Everyday Quickstart (Using the App Again)
 
-Whenever you open a fresh Terminal window in the future, follow this simple 2-step process:
+Whenever you open a fresh Terminal window in the future, follow this simple 3-step process:
 
 ### Step 1: Navigate to the folder and turn on `.venv` (MANDATORY)
 
@@ -199,7 +219,15 @@ source .venv/bin/activate
 ```
 *(Always verify that `(.venv)` appears at the start of your line before proceeding).*
 
-### Step 2: Run the App
+### Step 2: Start GROBID
+
+Docker does not restart GROBID for you after a reboot, so start it again:
+```bash
+docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
+```
+*(Already running? `docker ps` will list it, and you can skip this.)*
+
+### Step 3: Run the App
 
 Now simply start whichever mode you need:
 
@@ -226,7 +254,9 @@ Now simply start whichever mode you need:
 | Red error mentioning `lxml` during install | You are using Python 3.13. | Delete `.venv` folder and recreate it using `python3.12 -m venv .venv`. |
 | `command not found: streamlit` | The workspace environment is inactive. | Run `source .venv/bin/activate` first. |
 | The app opens but every answer errors | Ollama is not running or model missing. | Open the Ollama app, then run `ollama list` in Terminal to check models. |
-| Red **GROBID** dot in the sidebar | GROBID extraction server is stopped. | Click **Start GROBID** in the sidebar, or ignore it (the app will use text regex). |
+| Red **GROBID** dot in the sidebar | GROBID extraction server is stopped. | Start it: `docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1`, or click **Start GROBID** in the sidebar. Do not skip this — the app carries on with much weaker references and does not warn you. |
+| `docker: command not found` | Docker is not installed. | See the **GROBID Setup Guide** — Part 1. |
+| `curl` on port 8070 says `Connection refused` | GROBID is still starting, or is not running. | Wait 30 seconds and retry, then check `docker ps`. |
 | `Address already in use` | The app is already running in another window. | Find that Terminal window and press `Ctrl + C`, or close it. |
 
 \vspace{1em}

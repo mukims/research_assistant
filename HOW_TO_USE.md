@@ -110,6 +110,27 @@ citations. Leave it off unless you specifically want figure crops.
 
 Like Step 2, these three lines have to be re-run in each new Terminal window.
 
+### Step 5b — Start GROBID
+
+Agent 1 uses GROBID to read reference lists properly. It runs as a container:
+
+```bash
+docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
+```
+
+Give it about 30 seconds, then check it answers:
+
+```bash
+curl http://localhost:8070/api/isalive
+```
+
+You want `true`. If you do not have Docker yet, or that command fails,
+[Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md) walks
+through installing it and every error it can produce.
+
+The app runs without GROBID, but it runs *worse* and it does not tell you —
+see **If GROBID is red** below. Start it before the app.
+
 ### Step 6 — Start it
 
 ```bash
@@ -127,11 +148,15 @@ Once set up, you only need this:
 ```bash
 cd ~/Downloads/research_assistant
 source .venv/bin/activate
+docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
 export UNPAYWALL_EMAIL="your.name@example.com"
 export CITATION_LLM_MODEL="gemma4:e2b-mlx"
 export CITATION_LAYOUT_DETECTION=0
 streamlit run app.py
 ```
+
+(The GROBID line is only needed if it is not already running. `docker ps` tells
+you.)
 
 ### When something goes wrong
 
@@ -142,7 +167,7 @@ streamlit run app.py
 | `command not found: pip` or `streamlit` | You skipped `source .venv/bin/activate`. Run it and try again. |
 | `No module named 'research_assistant'` | The `pip install -e .` in Step 3 didn't finish. Run it again. |
 | The app opens but every answer errors | Ollama isn't running, or the model name is wrong. Open the Ollama app, then run `ollama list` and make sure `gemma4:e2b-mlx` is in it. |
-| Red **GROBID** dot in the sidebar | Expected, and fine — see the next section. The app works without it. |
+| Red **GROBID** dot in the sidebar | GROBID is not running. Start it (Step 5b). The app works without it, but with visibly weaker references — see the next section. |
 | `Address already in use` | The app is already running in another Terminal window. |
 
 ---
@@ -188,7 +213,8 @@ things there decide whether a run can succeed at all.
 | **Layout** | `text-only` is the fast path, and what the packaged and Docker builds use. `on` means layout detection is enabled — it needs detectron2 and costs roughly 15s per figure. Set `CITATION_LAYOUT_DETECTION=0` unless you need figure crops. |
 | **GROBID** | Green: reference extraction (Agent 1) is using the richer GROBID path. Red: GROBID isn't responding for this app instance. |
 
-**If GROBID is red, the run still works — just with weaker references.** Agent
+**If GROBID is red, start it before you go further** (Step 5b, or the sidebar
+button). The run will complete without it, but with weaker references. Agent
 1 automatically falls back to pulling a numbered reference list straight out
 of each PDF's text when GROBID is unreachable (or comes back empty for a
 particular paper). That fallback has no authors, years or DOIs, so Agent 2
@@ -206,8 +232,12 @@ and verify health. Alternatively, launch it manually from your terminal:
 docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
 ```
 
-then set `GROBID_SERVER=http://localhost:8070` (the app's own default) and
-restart it, or point `GROBID_SERVER` at a hosted instance you trust.
+`http://localhost:8070` is already the app's own default, so there is nothing
+further to set when GROBID runs on the same machine. Point `GROBID_SERVER` at a
+hosted instance only if you are using someone else's server.
+
+Installing Docker, starting the container and reading its errors are covered in
+[Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
 
 ---
 
@@ -373,10 +403,14 @@ is caught here. Re-export it as a real PDF and try again.
 **References look thin — no authors, no years, no DOIs.** GROBID was down (or
 returned nothing for that paper) and Agent 1 fell back to pattern-matching a
 plain reference list. Check the sidebar's GROBID indicator; the run itself
-still completed.
+still completed. Start GROBID and re-run to get the full metadata —
+[Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
 
 **Most downloads fail.** Expected outside physics. arXiv coverage is excellent;
-biomedical and chemistry much less so. Failures are recorded, not fatal.
+biomedical and chemistry much less so. Failures are recorded, not fatal. A
+paper that failed for a settled reason (paywalled, not indexed, 404) is not
+tried again; one that failed because the network dropped, or the server was
+busy, is retried on your next run.
 
 **Citations look plausible but wrong** (Tabs 2 and 3). Check the retrieved
 passages. A small or off-topic corpus produces confident, badly-grounded

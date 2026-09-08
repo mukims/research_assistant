@@ -38,8 +38,9 @@ shapes (`agent2` still accepts a flat list of citation strings).
 ### 1.2 Crash-safe incremental state
 
 `agent2` rewrites `downloaded.json` / `failed_downloads.json` after **every**
-paper. `agent3` marks a PDF ingested the moment it is processed, before the
-batch finishes.
+paper. `ingest_pdfs()` marks every PDF it attempted — excluding any a worker
+crashed on — once that batch's chunks are committed, so a crash partway through
+re-parses the batch instead of recording work that never landed.
 
 **Why.** Fetching 60 references takes minutes and hits flaky external servers;
 ingestion runs layout detection and embedding per page. A process killed at 80%
@@ -47,21 +48,61 @@ must resume at 80%, not 0%. Processing is by far the most expensive step, so a
 PDF that is processed but not marked would be re-processed on every subsequent
 run forever.
 
-**Trade-off.** More disk writes; a torn write on power loss could corrupt one
-JSON file (mitigated by writing whole files, and readers falling back to empty
-on `JSONDecodeError`).
+**Every one of those writes is atomic.** They go through `shared/atomic.py` —
+temp file in the same directory, `fsync`, then `os.replace` — so a reader sees
+either the previous file or the new one, never a half-written one. That matters
+more than it sounds: every reader of these files treats unparseable JSON as
+"start from scratch", so a single torn write during a power cut would silently
+discard a run's entire download history and fetch all of it again. The BM25
+pickle goes through the same path, where a partial write is worse still —
+`load_search_resources()` unpickles it on every query, so a torn one takes down
+every search path at once.
+
+**Resuming skips what is settled, not what merely failed.** A key in
+`failed_downloads.json` is excluded from the next run only when its recorded
+reason is a definitive one — paywalled, not indexed, 404. A transient reason (a
+dropped connection, a rate limit, a 5xx, a truncated body) is retried, because
+otherwise a ten-second network blip drops those references from the corpus
+permanently, recoverable only by editing JSON by hand.
+
+**Trade-off.** More disk writes, and a temp file alongside each one while it is
+being written.
 
 ### 1.3 One implementation per capability, in `shared/`
 
 PDF processing, chunking, ChromaDB upsert, hybrid search, source-key derivation,
-logging, retry — each lives once under `shared/` and is imported by every agent
-that needs it.
+durable file replacement, logging, retry — each lives once under `shared/` and
+is imported by every agent that needs it.
 
 **Why.** The check/mark bookkeeping in ingestion has to agree across Agent 3,
 the orchestrator's startup sync, and any manual-ingest path. Two copies drift.
 The citation-suggestion prompt was once duplicated between Agent 4 and the RAG
 evaluator and the two silently diverged — the evaluation ended up scoring a
 prompt the agent no longer used.
+
+### 1.4 One ingest at a time
+
+`ingest_pdfs()` holds a lock for the whole of its work: a re-entrant
+`threading.RLock` against other threads in the process, and an `flock` on
+`data/ingest.lock` against other processes sharing a `DATA_DIR`.
+
+**Why.** Two ingests running at once corrupt the corpus rather than merely
+slowing each other down. `upsert_corpus()` allocates chunk ids by reading the
+collection's current maximum and counting up from it, so overlapping writers
+mint the same ids and one set of chunks is dropped. `rebuild_bm25()` rewrites a
+single pickle, so overlapping writers can leave an index that will not load at
+all. The ingestion manifest is a read-modify-write, so overlapping readers lose
+each other's updates.
+
+This is not a hypothetical race. `watch.py` drives the `raw/` pipeline on one
+thread while its `pulled_pdfs/` watcher drains on another — and Agent 2 writes
+its downloads *into* `pulled_pdfs/`, so fetching a seed's references arms that
+second thread on every run. `app.py` and `watch.py` can also be pointed at one
+`DATA_DIR` simultaneously.
+
+**Trade-off.** A second ingest waits rather than failing, and parsing a batch
+can take minutes. It logs that it is waiting on the lock rather than blocking
+silently.
 
 ---
 
@@ -219,8 +260,10 @@ deleted. The integer doubles as the row's position in the BM25 corpus and the
 makes the mapping O(1) with no side table.
 
 **Trade-off.** The invariant (contiguous from zero, no deletes) is load-bearing
-but not enforced. `hybrid_search` drops any id outside the loaded range and logs
-a warning rather than silently indexing the wrong chunk.
+but only partly enforced. Serialising ingestion (§1.4) closes the way two
+concurrent writers could mint the same id; nothing stops a manually deleted row
+from opening a gap. `hybrid_search` drops any id outside the loaded range and
+logs a warning rather than silently indexing the wrong chunk.
 
 ### 4.5 Per-document summary, written to a separate collection
 
@@ -231,6 +274,25 @@ One LLM call per paper produces a 120–180-word summary, stored in
 queryable independently of the chunks, and there is exactly one per paper, so a
 separate collection is the natural shape. Cost is one call per paper, once, at
 ingest — not per chunk, not per query.
+
+### 4.6 A chunk's identity is `(document, text)`, not `text`
+
+Re-ingesting a paper must not double its chunks, so `upsert_corpus()` skips text
+it has already stored. That check is keyed on the document *and* the text, and
+compares the text in the truncated form that actually reaches ChromaDB.
+
+**Why both halves.** Keyed on text alone, the second of two papers sharing a
+sentence loses it — and boilerplate makes that common: shared method
+descriptions, standard equations, "the remainder of this paper is organized as
+follows". The passage then survives only under the first paper's
+`citation_source`, so retrieving it cites the wrong work. For a tool whose
+output is citations, silently attributing a passage to the wrong paper is the
+worst failure it can have.
+
+**Why the truncated form.** `collection.add()` stores `text[:EMBED_MAX_CHARS]`.
+Comparing the full in-memory text against that stored prefix never matches for a
+long chunk, so every chunk over the limit was re-inserted on each run and the
+corpus grew a fresh copy of it every time.
 
 ---
 
@@ -353,7 +415,9 @@ the deployment configures everything through env vars without touching code.
 `GROBID_SERVER` defaults to `http://localhost:8070` — a local server is the
 expectation, not a convenience fallback. Point it at a hosted instance (a
 public Space, or the Cloud Run deployment's own GROBID service) by setting the
-env var instead.
+env var instead. Running one locally via Docker is the standard route, and is
+walked through step by step in
+[Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
 
 **Why not bundle it.** GROBID is a ~700 MB Java server with deep-learning
 models, needs 4 GB RAM, and takes 30–60 s to start. Baking it into the app image
