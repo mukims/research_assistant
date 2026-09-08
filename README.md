@@ -26,7 +26,7 @@ Crossref, Unpaywall, Europe PMC, arXiv) always go out to those services.
 
 | Stage | Script | What it does |
 |-------|--------|--------------|
-| **Agent 0 — Discoverer** | [agent0_discoverer.py](research_assistant/agents/agent0_discoverer.py) | Takes a free-text research idea and searches relevance-ranked indexes in turn — arXiv, then OpenAlex, then Semantic Scholar — downloading the first result whose PDF actually fetches (paywalled publisher links are skipped, not fatal). Saves it into `data/raw/` under a `source_key`-derived name and records the query → paper in `seed_papers.json`. If nothing downloads, `--url` / `discover_from_url()` takes an arXiv or direct-PDF link instead. From here the rest of the pipeline runs unchanged. |
+| **Agent 0 — Discoverer** | [agent0_discoverer.py](research_assistant/agents/agent0_discoverer.py) | Takes a free-text research idea and searches relevance-ranked indexes in turn — arXiv, then OpenAlex, then Semantic Scholar — downloading the first result whose PDF actually fetches (paywalled publisher links are skipped, not fatal). Saves it into `data/raw/` under a `source_key`-derived name and records the query → paper in `seed_papers.json`. If nothing downloads, `--url` / `discover_from_url()` takes an arXiv or direct-PDF link instead, and `--seed-file` / `discover_from_file()` seeds from a PDF you already have — validating the magic bytes, reading a title / DOI / arXiv id out of it, and filing it under the same `source_key` scheme (falling back to a content hash). With that path the research query is optional: left blank, it is inferred from the paper's title or filename. From here the rest of the pipeline runs unchanged. |
 | **Agent 1 — Extractor** | [agent1_extractor.py](research_assistant/agents/agent1_extractor.py) | Sends every PDF in `data/raw/` to a GROBID server and parses the TEI output into each paper's own metadata plus its full reference list (title, authors, year, DOI, raw string), scoring each consolidated DOI against the printed reference so grey-literature mismatches can be flagged. **When GROBID is unreachable — or returns no reference list for a particular paper — it falls back** to pattern-matching a numbered reference list (`[1]`, `1.`, `(1)`) out of that PDF's `pdftotext` output instead. The fallback is weaker (a raw string per reference, no DOIs, no authors/year), but it keeps the pipeline moving instead of dead-ending on a single external Java service. The path taken — `grobid`, `regex`, or `none` — is recorded per PDF, and a per-run count sits under `"extraction"` in `extracted_citations.json`. |
 | **Agent 2 — Fetcher** | [agent2_fetcher.py](research_assistant/agents/agent2_fetcher.py) | Collapses the references to distinct sources, resolves a DOI per source (trusting Agent 1 when it was confident, otherwise asking Crossref), and tries to download an open-access PDF from Unpaywall → Europe PMC → arXiv. Writes `downloaded.json` / `failed_downloads.json` incrementally so a crashed run resumes. |
 | **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: semantic chunking of the text, embedding into ChromaDB, a rebuild of the BM25 index, and **one LLM summary per paper** into a separate `physics_summaries` collection. With layout detection on, it also crops figures/tables and keeps their captions (a VLM description of each is opt-in, `CITATION_FIGURE_VLM=1`). Tracks what's ingested in `data/ingested.json` so re-runs are cheap. |
@@ -143,12 +143,21 @@ such as `/data` on a read-only or ephemeral host.
 
 ## Prerequisites
 
+> **Not a developer?** [HOW_TO_USE.md](HOW_TO_USE.md) opens with a
+> step-by-step setup walkthrough — every command verified on a clean machine,
+> with a table of what each failure message means. Start there instead.
+
 - Python 3.10–3.12 (CI runs 3.10 and 3.12; **not 3.13+** — `lxml==4.9.4` has
   no 3.13 wheel and fails to build from source against it):
   `pip install -e .` then `pip install -r requirements.txt`.
 - **An LLM + embedding backend** (`LLM_BACKEND`, `EMBED_BACKEND`):
   - `ollama` (default) — a local [Ollama](https://ollama.com) daemon with the
     models in `config.py` pulled.
+
+    Note that `LLM_MODEL` defaults to `gemma4:31b-cloud`, which runs on
+    Ollama's servers rather than yours: it needs `ollama signin` and sends
+    text off the machine. For a fully local setup, pull `gemma4:e2b-mlx` and
+    `nomic-embed-text` and set `CITATION_LLM_MODEL=gemma4:e2b-mlx`.
   - `openai` — any OpenAI-compatible endpoint (`OPENAI_BASE_URL`,
     `OPENAI_API_KEY`); `huggingface` for embeddings via `huggingface_hub`.
 - **GROBID** for Agent 1 — `GROBID_SERVER` defaults to
@@ -184,6 +193,8 @@ Or run the stages by hand:
 python -m research_assistant.agents.agent0_discoverer --query "topological protection in disordered quantum wires"
 #    no open-access hit? give it a link:
 python -m research_assistant.agents.agent0_discoverer --query "..." --url https://arxiv.org/abs/2401.12345
+#    or seed from a PDF you already have — query optional, inferred from the paper:
+python orchestrate.py --seed-file path/to/paper.pdf --ask
 #    (or skip Agent 0 and drop your own PDF(s) into data/raw/ by hand)
 
 # 1. Mine the reference list of everything in data/raw/

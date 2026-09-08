@@ -510,3 +510,61 @@ ingest pays for.
 This was only free to do *now*, before the corpus exists — a manifest
 introduced against an already-populated collection would need a migration
 step to seed itself from that collection's metadata first.
+
+### 10.3 Seeding from an uploaded PDF, and why the query stopped being an identity
+
+Agent 0's original job was "turn a research idea into a paper". Uploading
+inverts that: you already have the paper, and the idea is optional. That is a
+real entry point — you often start from something a colleague sent you, or from
+a paper the automatic search cannot reach because it is not open access.
+
+`discover_from_file()` handles it and deliberately joins the *existing* path
+rather than paralleling it: it validates the magic bytes (`%PDF-`), reads a
+title / DOI / arXiv id out of the file, derives the same kind of `source_key`
+the rest of the system uses — `arxiv:` → `doi:` → a `file:<sha1>` content hash
+when neither is present — writes the paper into `RAW_DIR` under the key-derived
+name, and records a `SeedPaper`. Nothing downstream knows an upload happened;
+Agent 1 finds a PDF in `RAW_DIR` exactly as it otherwise would.
+
+**The subtlety this exposed.** `seed_papers.json` is keyed by query, which was
+sound while the query was always something the caller typed — `discover()` and
+`discover_from_url()` both rely on `seeds[query]` to answer "have I already
+seeded this?". But on an upload with no query, the key is *inferred* from the
+paper's title or filename stem, and two different papers can infer the same
+string. The query then stops being an identity and becomes a label that happens
+to collide, so a second upload silently overwrote the first's record — leaving
+that paper in `RAW_DIR`, still extracted and ingested, but with no seed record
+pointing at it.
+
+Inferred queries are therefore disambiguated with the paper's own key; supplied
+ones are left alone, because their stability is what the resume behaviour
+depends on. The general lesson is one this codebase keeps relearning: a key
+meaning "the request" and a key meaning "the thing" can look identical right up
+until they diverge.
+
+### 10.4 Ingestion reports how it extracted, for the same reason Agent 1 does
+
+Layout detection is the most install-fragile part of the system, and
+`process_pdf()` is deliberately forgiving of it — any failure degrades to
+text-only extraction rather than aborting the run. That forgiveness has a cost:
+the fallback is per-PDF and only logs a warning, so an entire corpus can come
+out with no figures or tables and nothing in the return value says so.
+
+That is the same shape of problem §10.1 solved for Agent 1, and it gets the
+same answer. `process_pdf()` tags every entry with the mode that produced it
+(`layout` or `text_only`) at the single point where the choice is made, and
+`ingest_pdfs()` returns `{"extraction": {"layout": n, "text_only": n}}` counted
+per document — mirroring the `"extraction"` block Agent 1 already writes into
+`extracted_citations.json`. An unexpected fallback also logs one batch-level
+summary, instead of leaving the evidence scattered across per-PDF warnings.
+
+The tag rides on the corpus entries rather than the return type because
+`process_pdf()` runs inside a `ProcessPoolExecutor`, where only the return value
+crosses back from the worker. `upsert_corpus()` reads named keys, so the extra
+one is inert.
+
+A failed model load is remembered too. Because the failure is swallowed into a
+text-only fallback, nothing upstream stopped the *next* document attempting the
+same construction — a config that cannot load made every paper in a batch pay
+for a full Detectron2 build that was guaranteed to fail. The failure is now
+cached alongside successful models and re-raised without retrying.

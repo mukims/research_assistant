@@ -7,15 +7,23 @@ what follows is the closing state rather than a resume guide.
 
 ## Status
 
-The merge is complete. All 14 planned tasks landed on `build/merged-pipeline`, each one
-reviewed and each ending in a commit. **131 tests pass**, and CI's full sequence —
-`pip install -r requirements-test.txt`, `pip install -e .`, pytest, then a 24-module
-import sweep — was reproduced end to end in a clean Python 3.12 environment.
+The merge is complete and merged to `main`. All 14 planned tasks landed, each reviewed
+and each ending in a commit; a PDF-upload seeding path was added afterwards, along with
+fixes for four findings against it. **176 tests pass.**
+
+Verified in a clean Python 3.12 environment, from an empty virtualenv: `pip install -r
+requirements.txt`, `pip install -e .`, every module imports, the CLI runs, the full suite
+passes, and `streamlit run app.py` serves.
+
+**New since the merge:** Tab 1 can now be seeded from a PDF you upload rather than a
+search query, and `orchestrate.py` takes `--seed-file` for the same thing. When the
+research question is left blank on that path it is inferred from the paper.
 
 ## Where to look
 
 | For | Read |
 |---|---|
+| **Setting it up if you don't write code** | **[HOW_TO_USE.md](HOW_TO_USE.md)** — opens with a verified, copy-paste setup walkthrough |
 | What the project is and how to run it | [README.md](README.md) |
 | How to drive the app | [HOW_TO_USE.md](HOW_TO_USE.md) — also rendered in the app's fifth tab |
 | Why the design is what it is | [ARCHITECTURE.md](ARCHITECTURE.md) |

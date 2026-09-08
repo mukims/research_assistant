@@ -1,6 +1,7 @@
 # Decisions and open items
 
-*Recorded 2026-09-07, at the end of the merge.*
+*Recorded 2026-09-07 at the end of the merge; updated 2026-09-08 after the
+PDF-upload feature.*
 
 The [spec](specs/2026-09-07-merged-research-assistant-design.md) describes the design as
 it was drafted. Reading the code closely changed several parts of it. This file records
@@ -22,13 +23,25 @@ knowingly left undone.
 | 9 | `schemas.py` rejects a bare string for `authors`, and non-`str` for `str | None` fields | `"Smith, J."` was becoming a 9-tuple of characters (and therefore a different `source_key`), and an operator-precedence slip put a tuple into `doi_source` with nothing to catch it. |
 | 10 | Logs live under `DATA_DIR`, not the repo root | Spec §4.2 required it; the code didn't. `CITATION_DATA_DIR` couldn't redirect logs, and the unguarded `makedirs` would break a read-only host. |
 
+## Added after the merge: seeding from an uploaded PDF
+
+| # | Decision | Why |
+|---|---|---|
+| 11 | Uploads join Agent 0's existing path rather than paralleling it | `discover_from_file()` derives the same `source_key` (`arxiv:` → `doi:` → `file:<sha1>`) and writes into `RAW_DIR`, so nothing downstream knows an upload happened. |
+| 12 | An *inferred* seed query is disambiguated by the paper's key; a *supplied* one is not | `seed_papers.json` is query-keyed, which is an identity only while the caller types it. Inferred from a title or filename, two papers can collide — and the second silently overwrote the first's record. Supplied queries keep their slot because `discover()` and `discover_from_url()` depend on that for resume. |
+| 13 | `ingest_pdfs()` reports `{"extraction": {"layout": n, "text_only": n}}` | Layout detection failing degrades the whole corpus to text-only with only per-PDF warnings. Agent 1 already records its GROBID-vs-regex fallback for exactly this reason; ingestion now matches it. |
+| 14 | A failed Detectron2 load is cached and re-raised, not retried | `process_pdf()` swallows the failure into a text-only fallback, so nothing stopped the next document retrying. A broken config made every paper in a batch pay for a build guaranteed to fail — measured at 8 attempts across 4 calls where 2 was correct. |
+| 15 | Uploads are staged to a temp file, deleted after the run | Agent 0 copies the paper into `RAW_DIR` under its own key, so the staging copy is pure duplication. It previously lived in `DATA_DIR/uploads` under the user's filename, grew without bound, and let two uploads sharing a name overwrite each other. The intermediate cannot be removed entirely — the graph's state carries a path, not bytes. |
+
 ## The recurring bug class
 
-Five instances of **silent data loss at a boundary** were found and fixed: a field
+Six instances of **silent data loss at a boundary** were found and fixed: a field
 dropped because a schema didn't declare it (#2), a payload key deleted in a rewrite (#5),
 a manifest key meaning two different things across modules, an outcome recorded as
-success when the model had declined, and `xml_id` reading `None` forever because
-BeautifulSoup stores `xml:id` under a literal key rather than Clark notation.
+success when the model had declined, `xml_id` reading `None` forever because
+BeautifulSoup stores `xml:id` under a literal key rather than Clark notation, and — after
+the merge — a seed record overwritten because an inferred query was treated as an
+identity (#12).
 
 Two more were caught as *tests that couldn't fail*: one asserted on a hand-built object
 while claiming to guard a pipeline function; another used a fixture the old buggy code

@@ -1,10 +1,149 @@
 # How to use the Research Assistant
 
-This is the guide to *driving* the app. For installing and running it from a
-checkout see the Prerequisites/Usage sections of [README.md](README.md); for
-what each stage does and why, [ARCHITECTURE.md](ARCHITECTURE.md).
+This is the guide to *driving* the app. For what each stage does and why, see
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-The app renders this file itself, under the **How to use** tab.
+The app renders this file itself, under the **How to use** tab — so if you are
+reading this inside the app, it is already running and you can skip straight to
+[Before you start](#before-you-start-read-the-sidebar).
+
+---
+
+## Setting it up from scratch
+
+Written for someone who does not write code. You will be typing commands into
+**Terminal** — on a Mac, press `Cmd + Space`, type `Terminal`, press Enter. Copy
+each block below, paste it in, press Enter, and wait for it to finish before
+moving to the next one.
+
+Every command here was run on a clean machine before being written down.
+
+### Step 0 — Check you have the right Python
+
+```bash
+python3.12 --version
+```
+
+You should see `Python 3.12.something`. If you get "command not found", install
+Python 3.12 from [python.org/downloads](https://www.python.org/downloads/) and
+run it again.
+
+**Python 3.13 will not work.** One of the components (`lxml`) has no 3.13 build
+and the install fails partway through with a wall of red text. Use 3.10, 3.11 or
+3.12. This is the single most common way to get stuck.
+
+### Step 1 — Go to the project folder
+
+```bash
+cd ~/Downloads/research_assistant
+```
+
+If you put the project somewhere else, use that path instead. You can drag the
+folder onto the Terminal window and it will paste the path for you.
+
+### Step 2 — Create a private space for the project's components
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+```
+
+Your prompt should now start with `(.venv)`. That means it worked. **You need to
+run that second line again every time you open a new Terminal window** — it is
+how Terminal knows to use this project's components rather than your system's.
+
+### Step 3 — Install everything
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+```
+
+This downloads a few hundred megabytes and takes several minutes. Some yellow
+warning text is normal; red `ERROR` lines are not.
+
+Check it worked:
+
+```bash
+python -c "import app; print('install OK')"
+```
+
+You want to see `install OK`. Warnings about "missing ScriptRunContext" are
+expected here and harmless.
+
+### Step 4 — Install the AI models
+
+The assistant needs a language model to read and write with. Install
+[Ollama](https://ollama.com/download), open it once so it is running, then:
+
+```bash
+ollama pull nomic-embed-text
+ollama pull gemma4:e2b-mlx
+```
+
+That is roughly 8 GB and will take a while on a normal connection.
+
+### Step 5 — Set your options
+
+```bash
+export UNPAYWALL_EMAIL="your.name@example.com"
+export CITATION_LLM_MODEL="gemma4:e2b-mlx"
+export CITATION_LAYOUT_DETECTION=0
+```
+
+Put your real email address in the first line. It is not used for marketing —
+the free services that supply the papers (Unpaywall, Crossref, arXiv) ask
+who is calling, and sending them the built-in placeholder is rude and can get
+you rate-limited.
+
+The second line matters: the built-in default is `gemma4:31b-cloud`, which runs
+on **Ollama's servers**, not yours — it needs an Ollama account (`ollama signin`)
+and sends your text off your machine. Setting it to `gemma4:e2b-mlx` uses the
+model you just downloaded and keeps everything local. It is smaller, so answers
+are less polished; if you would rather have the bigger cloud model, run
+`ollama signin` and leave this line out.
+
+The third line turns off figure and table extraction, which needs a large
+scientific-imaging component that is difficult to install and is not needed for
+citations. Leave it off unless you specifically want figure crops.
+
+Like Step 2, these three lines have to be re-run in each new Terminal window.
+
+### Step 6 — Start it
+
+```bash
+streamlit run app.py
+```
+
+Your browser opens at `http://localhost:8501`. That is the app.
+
+To stop it, click the Terminal window and press `Ctrl + C`.
+
+### Starting it again next time
+
+Once set up, you only need this:
+
+```bash
+cd ~/Downloads/research_assistant
+source .venv/bin/activate
+export UNPAYWALL_EMAIL="your.name@example.com"
+export CITATION_LLM_MODEL="gemma4:e2b-mlx"
+export CITATION_LAYOUT_DETECTION=0
+streamlit run app.py
+```
+
+### When something goes wrong
+
+| What you see | What it means |
+|---|---|
+| `command not found: python3.12` | Python 3.12 isn't installed — see Step 0. |
+| A wall of red text mentioning `lxml` during Step 3 | You are on Python 3.13. Delete the `.venv` folder and redo Step 2 with `python3.12`. |
+| `command not found: pip` or `streamlit` | You skipped `source .venv/bin/activate`. Run it and try again. |
+| `No module named 'research_assistant'` | The `pip install -e .` in Step 3 didn't finish. Run it again. |
+| The app opens but every answer errors | Ollama isn't running, or the model name is wrong. Open the Ollama app, then run `ollama list` and make sure `gemma4:e2b-mlx` is in it. |
+| Red **GROBID** dot in the sidebar | Expected, and fine — see the next section. The app works without it. |
+| `Address already in use` | The app is already running in another Terminal window. |
 
 ---
 
@@ -217,9 +356,14 @@ under `data/` by default.
 ## Things that go wrong
 
 **"No open-access PDF found for that query."** The search found candidates but
-every one was paywalled. Paste an arXiv or direct-PDF link into *Seed paper URL*
-and run again. The app will still answer from the model's own knowledge, but
-that answer is ungrounded — it is not backed by any corpus.
+every one was paywalled. Either switch Tab 1 to **Upload a seed PDF** and give
+it a paper you already have, or paste an arXiv or direct-PDF link into *Seed
+paper URL*, and run again. The app will still answer from the model's own
+knowledge, but that answer is ungrounded — it is not backed by any corpus.
+
+**"Could not load seed PDF."** The file you uploaded isn't a PDF — the app
+checks the file's actual contents, not its name, so something renamed to `.pdf`
+is caught here. Re-export it as a real PDF and try again.
 
 **References look thin — no authors, no years, no DOIs.** GROBID was down (or
 returned nothing for that paper) and Agent 1 fell back to pattern-matching a
@@ -247,8 +391,11 @@ you roughly 15 seconds per figure.
 
 1. Check the sidebar — GROBID green (or accept the regex fallback), models
    listed.
-2. Tab 1: enter `topological protection in disordered quantum wires`, leave the
-   URL blank, leave both toggles as they are, **Build corpus**.
+2. Tab 1: pick **Search for a paper**, enter
+   `topological protection in disordered quantum wires`, leave the URL blank,
+   leave both toggles as they are, **Build corpus**. (Or pick **Upload a seed
+   PDF** and give it a paper of your own — the topic is then inferred from the
+   paper if you leave the question blank.)
 3. Wait. Watch the papers count in the sidebar climb.
 4. Read the related-work synthesis at the end.
 5. Tab 2: paste `Anderson localization suppresses diffusion in 1D.` and
