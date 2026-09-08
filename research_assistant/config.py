@@ -199,6 +199,10 @@ S2_SEARCH_URL     = "https://api.semanticscholar.org/graph/v1/paper/search"
 # when running your own GROBID (faster, private, no shared rate limit).
 GROBID_SERVER            = os.environ.get("GROBID_SERVER","http://localhost:8070")
 GROBID_BATCH_CONCURRENCY = _env_int("GROBID_BATCH_CONCURRENCY", 2)
+GROBID_DOCKER_IMAGE      = os.environ.get("GROBID_DOCKER_IMAGE", "grobid/grobid:0.8.1")
+GROBID_CONTAINER_NAME    = os.environ.get("GROBID_CONTAINER_NAME", "grobid")
+GROBID_START_COMMAND     = os.environ.get("GROBID_START_COMMAND", "")
+GROBID_JAR_PATH          = os.environ.get("GROBID_JAR_PATH", "")
 
 # ─── Agent 2 — Fetcher ───────────────────────────────────────────────────────
 MAX_CITATION_LEN   = 500   # Skip citations longer than this (likely malformed)

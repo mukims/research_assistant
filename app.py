@@ -58,15 +58,115 @@ def _corpus_stats():
     return chunks, papers
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def _grobid_ok():
-    import requests
-
     try:
-        r = requests.get(f"{config.GROBID_SERVER}/api/isalive", timeout=8)
-        return r.ok and "true" in r.text.lower()
+        from research_assistant.shared.grobid_manager import GrobidManager
+
+        return GrobidManager().is_alive(timeout=3.0)
     except Exception:
         return False
+
+
+def _clear_grobid_cache():
+    if hasattr(_grobid_ok, "clear"):
+        _grobid_ok.clear()
+
+
+def _render_grobid_controls():
+    try:
+        from research_assistant.shared.grobid_manager import GrobidManager
+
+        manager = GrobidManager()
+
+        if "grobid_feedback" in st.session_state:
+            fb_type, fb_msg = st.session_state.pop("grobid_feedback")
+            if fb_type == "success":
+                st.success(fb_msg, icon="✅")
+            elif fb_type == "error":
+                st.error(fb_msg, icon="🚫")
+            elif fb_type == "warning":
+                st.warning(fb_msg, icon="⚠️")
+            else:
+                st.info(fb_msg, icon="ℹ️")
+
+        status = manager.check_status()
+        st.session_state["grobid_server_state"] = status.state
+
+        if status.state == "RUNNING":
+            st.success(f"🟢 **GROBID Status: Running**\n\n`{status.server_url}`")
+        elif status.state == "STARTING":
+            st.warning(f"🟡 **GROBID Status: Starting...**\n\n`{status.server_url}`")
+            if status.message:
+                st.caption(status.message)
+        elif status.state == "ERROR":
+            st.error(f"⚠️ **GROBID Status: Error**\n\n`{status.server_url}`")
+            if status.details:
+                st.caption(status.details)
+        else:
+            st.error(f"🔴 **GROBID Status: Stopped**\n\n`{status.server_url}`")
+            st.caption(
+                "Reference extraction falls back to regex without metadata (authors, years, DOIs)."
+            )
+
+        if status.is_alive:
+            c_stop, c_restart, c_chk = st.columns([3, 3, 2])
+            if c_stop.button("⏹️ Stop", key="btn_stop_grobid", use_container_width=True, help="Stop GROBID server"):
+                with st.spinner("Stopping GROBID server..."):
+                    ok, msg = manager.stop_server()
+                    _clear_grobid_cache()
+                    st.session_state["grobid_feedback"] = ("info" if ok else "error", msg)
+                    st.session_state["grobid_server_state"] = manager.check_status().state
+                    st.rerun()
+            if c_restart.button("🔄 Restart", key="btn_restart_grobid", use_container_width=True, help="Restart GROBID server"):
+                with st.spinner("Restarting GROBID server..."):
+                    ok, msg = manager.restart_server()
+                    _clear_grobid_cache()
+                    st.session_state["grobid_feedback"] = ("success" if ok else "error", msg)
+                    st.session_state["grobid_server_state"] = manager.check_status().state
+                    st.rerun()
+            if c_chk.button("🩺 Status", key="btn_check_grobid", use_container_width=True, help="Check server health"):
+                _clear_grobid_cache()
+                st.session_state["grobid_server_state"] = status.state
+                st.session_state["grobid_feedback"] = ("success", f"GROBID is active at {status.server_url}.")
+                st.rerun()
+        else:
+            c_start, c_chk = st.columns([3, 2])
+            if c_start.button("▶️ Start GROBID", key="btn_start_grobid", use_container_width=True, help="Launch GROBID server agent"):
+                with st.spinner("Launching GROBID agent & checking health..."):
+                    ok, msg = manager.start_server()
+                    _clear_grobid_cache()
+                    st.session_state["grobid_feedback"] = ("success" if ok else "error", msg)
+                    st.session_state["grobid_server_state"] = manager.check_status().state
+                    st.rerun()
+            if c_chk.button("🩺 Check Status", key="btn_check_grobid", use_container_width=True, help="Probe server health"):
+                _clear_grobid_cache()
+                new_status = manager.check_status()
+                st.session_state["grobid_server_state"] = new_status.state
+                if new_status.is_alive:
+                    st.session_state["grobid_feedback"] = ("success", f"GROBID is active at {new_status.server_url}.")
+                else:
+                    st.session_state["grobid_feedback"] = (
+                        "warning" if new_status.state == "STARTING" else "error",
+                        new_status.message or f"GROBID server is {new_status.state.lower()}."
+                    )
+                st.rerun()
+
+        with st.expander("🛠️ GROBID Diagnostics"):
+            st.markdown(f"**Endpoint:** `{status.server_url}`")
+            st.markdown(f"**Container / Target:** `{status.container_name}`")
+            docker_ok, docker_msg = manager.check_docker()
+            st.markdown(f"**Docker Status:** {'🟢 Available' if docker_ok else '🔴 Unavailable'}")
+            if not docker_ok:
+                st.warning(docker_msg)
+            if status.container_status:
+                st.markdown(f"**Container Status:** `{status.container_status}`")
+            if status.image:
+                st.markdown(f"**Docker Image:** `{status.image}`")
+            st.markdown("**Manual launch command:**")
+            st.code(status.manual_command or manager.get_manual_command(), language="bash")
+    except Exception as exc:
+        st.error(f"GROBID Agent encountered an error: {exc}")
 
 
 def _manifest(path):
@@ -252,14 +352,8 @@ with st.sidebar:
         f"**Layout** — {'on' if config.LAYOUT_DETECTION else 'text-only'}"
     )
 
-    grobid_up = _grobid_ok()
-    st.caption(("🟢" if grobid_up else "🔴") + f" **GROBID** — {config.GROBID_SERVER}")
-    if not grobid_up:
-        st.warning(
-            "GROBID isn't responding — Agent 1 will fall back to weaker, "
-            "unstructured reference extraction (no DOIs, no authors).",
-            icon="⚠️",
-        )
+    st.subheader("Server & Services")
+    _render_grobid_controls()
     if config.LLM_BACKEND == "openai" and not config.OPENAI_API_KEY:
         st.error("No OPENAI_API_KEY / HF_TOKEN set.", icon="🚫")
 
@@ -529,32 +623,39 @@ with tab_chat:
         if "chat_agent" not in st.session_state:
             from research_assistant.agents.agent7_research_chat import ResearchChat
 
-            st.session_state["chat_agent"] = ResearchChat(top_k=5)
-        agent = st.session_state["chat_agent"]
+            try:
+                st.session_state["chat_agent"] = ResearchChat(top_k=5)
+            except Exception as e:
+                st.warning(f"Could not load search index: {e}")
+                st.session_state["chat_agent"] = None
+        agent = st.session_state.get("chat_agent")
+        if agent is None:
+            st.info("Ingest papers to enable research chat.", icon="📭")
+        else:
+            c1, c2 = st.columns([1, 4])
+            if c1.button("Clear"):
+                agent.clear_history()
+                st.rerun()
+            if c2.button("Export conversation"):
+                st.success(f"Saved to {agent.export_conversation()}")
 
-        c1, c2 = st.columns([1, 4])
-        if c1.button("Clear"):
-            agent.clear_history()
-            st.rerun()
-        if c2.button("Export conversation"):
-            st.success(f"Saved to {agent.export_conversation()}")
+            for msg in agent.history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-        for msg in agent.history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            if question := st.chat_input("Ask about the literature…"):
+                with st.chat_message("user"):
+                    st.markdown(question)
+                with st.chat_message("assistant"):
+                    try:
+                        st.write_stream(agent.stream_turn(question))
+                    except Exception as e:  # noqa: BLE001
+                        st.exception(e)
+                if agent.last_sources:
+                    with st.expander(f"Sources · {len(agent.last_sources)}"):
+                        for s in agent.last_sources:
+                            st.caption(f"**{s['document']}** — {s['citation']}")
 
-        if question := st.chat_input("Ask about the literature…"):
-            with st.chat_message("user"):
-                st.markdown(question)
-            with st.chat_message("assistant"):
-                try:
-                    st.write_stream(agent.stream_turn(question))
-                except Exception as e:  # noqa: BLE001
-                    st.exception(e)
-            if agent.last_sources:
-                with st.expander(f"Sources · {len(agent.last_sources)}"):
-                    for s in agent.last_sources:
-                        st.caption(f"**{s['document']}** — {s['citation']}")
 
 
 # ─── Tab 5: how to use ─────────────────────────────────────────────────────

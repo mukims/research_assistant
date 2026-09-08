@@ -195,10 +195,15 @@ particular paper). That fallback has no authors, years or DOIs, so Agent 2
 has less to work with when deciding what to fetch, and some references that
 GROBID would have resolved confidently may not download at all — but the
 pipeline itself does not stop. If Agent 1 or Agent 2 seem to be doing
-noticeably worse than usual, check GROBID before anything else:
+noticeably worse than usual, check GROBID before anything else.
+
+You can manage GROBID directly from the app's sidebar under **Server & Services**
+using the **▶️ Start GROBID**, **⏹️ Stop**, **🔄 Restart**, and **🩺 Status**
+buttons, which run the GROBID manager agent to inspect Docker, launch the container,
+and verify health. Alternatively, launch it manually from your terminal:
 
 ```bash
-docker run -p 8070:8070 lfoppiano/grobid:0.8.0
+docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
 ```
 
 then set `GROBID_SERVER=http://localhost:8070` (the app's own default) and
