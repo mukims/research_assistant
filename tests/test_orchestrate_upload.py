@@ -16,9 +16,21 @@ for mod in [
         m.END = "END"
         sys.modules[mod] = m
 
-if "streamlit" not in sys.modules:
+try:
+    import streamlit
+except ImportError:
     st_mock = MagicMock()
-    st_mock.columns.return_value = [MagicMock(), MagicMock()]
+
+    def _mock_cols(spec):
+        n = len(spec) if isinstance(spec, (list, tuple)) else int(spec)
+        cols = []
+        for _ in range(n):
+            c = MagicMock()
+            c.button.return_value = False
+            cols.append(c)
+        return cols
+
+    st_mock.columns.side_effect = _mock_cols
     st_mock.tabs.return_value = [MagicMock()] * 5
     st_mock.sidebar = MagicMock()
     st_mock.session_state = {}

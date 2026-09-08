@@ -359,8 +359,10 @@ class TestGrobidController(unittest.TestCase):
 
     def test_render_grobid_controls_in_app(self):
         import app
+        import streamlit as st
+        st.session_state.clear()
         # Call _render_grobid_controls directly to ensure it does not raise
-        with patch.object(self.controller, "check_status", return_value=GrobidStatus(
+        with patch.object(GrobidController, "check_status", return_value=GrobidStatus(
             is_alive=False,
             state="STOPPED",
             message="stopped",
@@ -368,10 +370,8 @@ class TestGrobidController(unittest.TestCase):
             docker_available=True,
             container_name="grobid",
         )):
-            try:
-                app._render_grobid_controls()
-            except Exception as e:
-                self.fail(f"_render_grobid_controls crashed with: {e}")
+            app._render_grobid_controls()
+            self.assertEqual(st.session_state.get("grobid_server_state"), "STOPPED")
 
 
 if __name__ == "__main__":

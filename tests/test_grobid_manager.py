@@ -387,6 +387,7 @@ class TestGrobidManager(unittest.TestCase):
     def test_ui_render_running_state(self):
         import streamlit as st
         import app
+        st.session_state.clear()
         st.session_state["grobid_feedback"] = ("success", "GROBID started successfully!")
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
             is_alive=True,
@@ -396,15 +397,13 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            try:
-                app._render_grobid_controls()
-                self.assertEqual(st.session_state.get("grobid_server_state"), "RUNNING")
-            except Exception as exc:
-                self.fail(f"UI render crashed in running state: {exc}")
+            app._render_grobid_controls()
+            self.assertEqual(st.session_state.get("grobid_server_state"), "RUNNING")
 
     def test_ui_render_stopped_state(self):
         import streamlit as st
         import app
+        st.session_state.clear()
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
             is_alive=False,
             state="STOPPED",
@@ -413,15 +412,13 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            try:
-                app._render_grobid_controls()
-                self.assertEqual(st.session_state.get("grobid_server_state"), "STOPPED")
-            except Exception as exc:
-                self.fail(f"UI render crashed in stopped state: {exc}")
+            app._render_grobid_controls()
+            self.assertEqual(st.session_state.get("grobid_server_state"), "STOPPED")
 
     def test_ui_render_starting_state(self):
         import streamlit as st
         import app
+        st.session_state.clear()
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
             is_alive=False,
             state="STARTING",
@@ -430,17 +427,123 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            try:
-                app._render_grobid_controls()
-                self.assertEqual(st.session_state.get("grobid_server_state"), "STARTING")
-            except Exception as exc:
-                self.fail(f"UI render crashed in starting state: {exc}")
+            app._render_grobid_controls()
+            self.assertEqual(st.session_state.get("grobid_server_state"), "STARTING")
 
     def test_grobid_ok_cache_function(self):
         import app
         with patch.object(GrobidManager, "is_alive", return_value=True):
             app._clear_grobid_cache()
             self.assertTrue(app._grobid_ok())
+
+    # ─── Robustness & Edge Cases ──────────────────────────────────────────────
+
+    def test_check_status_port_conflict_non_grobid(self):
+        with patch.object(self.manager, "is_alive", return_value=False), \
+             patch.object(self.manager, "check_docker", return_value=(True, "ok")), \
+             patch.object(self.manager, "get_container_info", return_value={
+                 "exists": True,
+                 "status": "running",
+                 "name": "my-nginx",
+                 "image": "nginx:alpine",
+                 "is_grobid": False,
+                 "port_conflict": True,
+             }):
+            status = self.manager.check_status()
+            self.assertEqual(status.state, "ERROR")
+            self.assertFalse(status.is_alive)
+            self.assertIn("Port 8070 is occupied by non-GROBID container", status.message)
+
+    def test_start_server_port_conflict_refusal(self):
+        with patch.object(self.manager, "is_alive", return_value=False), \
+             patch.object(self.manager, "check_docker", return_value=(True, "ok")), \
+             patch.object(self.manager, "get_container_info", return_value={
+                 "exists": True,
+                 "status": "running",
+                 "name": "my-nginx",
+                 "image": "nginx:alpine",
+                 "is_grobid": False,
+                 "port_conflict": True,
+             }):
+            ok, msg = self.manager.start_server()
+            self.assertFalse(ok)
+            self.assertIn("occupied by conflicting non-GROBID container", msg)
+
+    def test_check_status_detects_running_process(self):
+        with patch.object(self.manager, "is_alive", return_value=False), \
+             patch.object(self.manager, "check_docker", return_value=(False, "no docker")), \
+             patch.object(self.manager, "_is_process_running", return_value=(True, 4242)):
+            status = self.manager.check_status()
+            self.assertEqual(status.state, "STARTING")
+            self.assertIn("PID 4242", status.message)
+
+    def test_is_process_running_stale_pid_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = os.path.join(tmpdir, "stale.pid")
+            with open(pid_file, "w") as f:
+                f.write("9999999")
+            self.manager._pid_file = pid_file
+
+            with patch("os.kill", side_effect=ProcessLookupError):
+                running, pid = self.manager._is_process_running()
+                self.assertFalse(running)
+                self.assertIsNone(pid)
+                self.assertFalse(os.path.exists(pid_file))
+
+    def test_agent_run_action(self):
+        with patch.object(self.manager, "start_server", return_value=(True, "started")), \
+             patch.object(self.manager, "stop_server", return_value=(True, "stopped")), \
+             patch.object(self.manager, "restart_server", return_value=(True, "restarted")), \
+             patch.object(self.manager, "check_status", return_value=GrobidStatus(
+                 is_alive=True, state="RUNNING", message="ok", server_url="http://localhost:8070", docker_available=True, container_name="grobid"
+             )):
+            ok, msg, st = self.manager.run_action("start")
+            self.assertTrue(ok)
+            self.assertEqual(msg, "started")
+
+            ok, msg, st = self.manager.run_action("stop")
+            self.assertTrue(ok)
+            self.assertEqual(msg, "stopped")
+
+            ok, msg, st = self.manager.run_action("restart")
+            self.assertTrue(ok)
+            self.assertEqual(msg, "restarted")
+
+            ok, msg, st = self.manager.run_action("status")
+            self.assertTrue(ok)
+            self.assertEqual(msg, "ok")
+
+            ok, msg, st = self.manager.run_action("unknown_xyz")
+            self.assertFalse(ok)
+            self.assertIn("Unknown action", msg)
+
+    def test_cached_image_tag_preference(self):
+        # Default is grobid/grobid:0.8.1; available images has both 0.8.0 and 0.8.1
+        with patch.object(self.manager, "is_alive", side_effect=[False, True]), \
+             patch.object(self.manager, "check_docker", return_value=(True, "ok")), \
+             patch.object(self.manager, "get_container_info", return_value={"exists": False, "status": "not_found", "name": "test-grobid"}), \
+             patch.object(self.manager, "get_available_grobid_images", return_value=["lfoppiano/grobid:0.8.0", "lfoppiano/grobid:0.8.1"]), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_sub:
+            ok, msg = self.manager.start_server(timeout=1.0, poll_interval=0.01)
+            self.assertTrue(ok)
+            args = mock_sub.call_args[0][0]
+            self.assertIn("lfoppiano/grobid:0.8.1", args)
+
+    def test_ui_render_error_state(self):
+        import streamlit as st
+        import app
+        st.session_state.clear()
+        with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
+            is_alive=False,
+            state="ERROR",
+            message="Port conflict",
+            details="Port 8070 is occupied by nginx",
+            server_url="http://localhost:8070",
+            docker_available=True,
+            container_name="test-grobid",
+        )):
+            app._render_grobid_controls()
+            self.assertEqual(st.session_state.get("grobid_server_state"), "ERROR")
 
 
 if __name__ == "__main__":

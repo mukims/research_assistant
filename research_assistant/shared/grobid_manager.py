@@ -65,6 +65,29 @@ class GrobidManager:
 
         self._pid_file = os.path.join(config.DATA_DIR, "grobid_process.pid")
 
+    def _is_process_running(self) -> tuple[bool, Optional[int]]:
+        """Check if a tracked background process is still alive."""
+        if not os.path.exists(self._pid_file):
+            return False, None
+        try:
+            with open(self._pid_file) as f:
+                content = f.read().strip()
+            if not content:
+                return False, None
+            pid = int(content)
+            # Signal 0 checks if process exists without killing it
+            os.kill(pid, 0)
+            return True, pid
+        except (ValueError, ProcessLookupError, PermissionError) as exc:
+            if isinstance(exc, ProcessLookupError) or (isinstance(exc, OSError) and getattr(exc, "errno", None) == 3):
+                try:
+                    os.remove(self._pid_file)
+                except OSError:
+                    pass
+            return False, None
+        except Exception:
+            return False, None
+
     # ─── Health Probing ───────────────────────────────────────────────────────
 
     def is_alive(self, timeout: float = 3.0, use_extractor_probe: bool = False) -> bool:
@@ -183,11 +206,26 @@ class GrobidManager:
                     cimage = parts[3] if len(parts) > 3 else ""
                     cports = parts[4] if len(parts) > 4 else ""
 
-                    if f":{port}->" in cports or f":{port}/" in cports or "grobid" in cimage.lower():
-                        if "running" in cstate:
-                            return {"id": cid, "name": cnames, "status": "running", "image": cimage}
+                    is_port_bound = f":{port}->" in cports or f":{port}/" in cports
+                    is_grobid = "grobid" in cimage.lower() or "grobid" in cnames.lower() or cnames == self.container_name
 
-                # Second pass: Exited / stopped container running grobid
+                    if "running" in cstate:
+                        if is_port_bound and is_grobid:
+                            return {"id": cid, "name": cnames, "status": "running", "image": cimage, "is_grobid": True}
+                        elif is_port_bound and not is_grobid:
+                            # Port conflict: Container is bound to target port but is not GROBID
+                            return {
+                                "id": cid,
+                                "name": cnames,
+                                "status": "running",
+                                "image": cimage,
+                                "is_grobid": False,
+                                "port_conflict": True,
+                            }
+                        elif is_grobid:
+                            return {"id": cid, "name": cnames, "status": "running", "image": cimage, "is_grobid": True}
+
+                # Second pass: Exited / stopped container matching container_name or grobid
                 for line in lines:
                     parts = line.split("\t")
                     cid = parts[0]
@@ -195,9 +233,9 @@ class GrobidManager:
                     cstate = parts[2].lower() if len(parts) > 2 else ""
                     cimage = parts[3] if len(parts) > 3 else ""
 
-                    if "grobid" in cimage.lower() or "grobid" in cnames.lower():
+                    if cnames == self.container_name or ("grobid" in cimage.lower() and "grobid" in cnames.lower()):
                         state = "running" if "running" in cstate else "exited"
-                        return {"id": cid, "name": cnames, "status": state, "image": cimage}
+                        return {"id": cid, "name": cnames, "status": state, "image": cimage, "is_grobid": True}
         except Exception:
             pass
 
@@ -212,17 +250,22 @@ class GrobidManager:
         # Check self.container_name
         try:
             res = subprocess.run(
-                ["docker", "inspect", "--format", "{{.State.Status}}", self.container_name],
+                ["docker", "inspect", "--format", "{{.State.Status}}\t{{.Config.Image}}", self.container_name],
                 capture_output=True,
                 text=True,
                 timeout=6,
             )
             if res.returncode == 0:
-                status = res.stdout.strip().lower()
+                parts = res.stdout.strip().split("\t")
+                status = parts[0].lower()
+                image = parts[1] if len(parts) > 1 else self.docker_image
+                is_grobid = "grobid" in image.lower() or "grobid" in self.container_name.lower()
                 return {
                     "exists": True,
                     "status": status,
                     "name": self.container_name,
+                    "image": image,
+                    "is_grobid": is_grobid,
                     "detail": f"Container '{self.container_name}' status: {status}",
                 }
         except Exception as exc:
@@ -236,7 +279,13 @@ class GrobidManager:
                 "status": active["status"],
                 "name": active["name"],
                 "image": active.get("image", ""),
-                "detail": f"Discovered container '{active['name']}' status: {active['status']}",
+                "is_grobid": active.get("is_grobid", True),
+                "port_conflict": active.get("port_conflict", False),
+                "detail": (
+                    f"Port {self.get_port()} occupied by non-GROBID container '{active['name']}' ({active.get('image', '')})"
+                    if active.get("port_conflict")
+                    else f"Discovered container '{active['name']}' status: {active['status']}"
+                ),
             }
 
         return {
@@ -333,6 +382,36 @@ class GrobidManager:
                 manual_command=manual_cmd,
             )
 
+        # Check port conflict first
+        if c_info.get("port_conflict"):
+            return GrobidStatus(
+                is_alive=False,
+                state="ERROR",
+                message=f"Port {self.get_port()} is occupied by non-GROBID container '{resolved_name}' ({c_info.get('image', '')}).",
+                server_url=self.server_url,
+                docker_available=docker_ok,
+                container_name=resolved_name,
+                container_status=c_status,
+                image=c_info.get("image"),
+                details="A non-GROBID container is bound to this port. Stop that container or configure GROBID_SERVER with another port.",
+                manual_command=manual_cmd,
+            )
+
+        # Check background process tracking
+        proc_running, pid = self._is_process_running()
+        if proc_running:
+            return GrobidStatus(
+                is_alive=False,
+                state="STARTING",
+                message=f"GROBID background process (PID {pid}) is running, waiting for service to initialize...",
+                server_url=self.server_url,
+                docker_available=docker_ok,
+                container_name=resolved_name,
+                container_status="running_process",
+                image=c_info.get("image") or self.docker_image,
+                manual_command=manual_cmd,
+            )
+
         if not docker_ok and not self.start_command:
             return GrobidStatus(
                 is_alive=False,
@@ -346,17 +425,32 @@ class GrobidManager:
             )
 
         if c_status == "running":
-            return GrobidStatus(
-                is_alive=False,
-                state="STARTING",
-                message="Container is running, waiting for GROBID service to finish initializing JVM...",
-                server_url=self.server_url,
-                docker_available=True,
-                container_name=resolved_name,
-                container_status=c_status,
-                image=c_info.get("image") or self.docker_image,
-                manual_command=manual_cmd,
-            )
+            is_grobid = c_info.get("is_grobid", True)
+            if is_grobid:
+                return GrobidStatus(
+                    is_alive=False,
+                    state="STARTING",
+                    message="Container is running, waiting for GROBID service to finish initializing JVM...",
+                    server_url=self.server_url,
+                    docker_available=True,
+                    container_name=resolved_name,
+                    container_status=c_status,
+                    image=c_info.get("image") or self.docker_image,
+                    manual_command=manual_cmd,
+                )
+            else:
+                return GrobidStatus(
+                    is_alive=False,
+                    state="ERROR",
+                    message=f"Container '{resolved_name}' is running on port {self.get_port()}, but is not a recognized GROBID server.",
+                    server_url=self.server_url,
+                    docker_available=True,
+                    container_name=resolved_name,
+                    container_status=c_status,
+                    image=c_info.get("image"),
+                    details="The running container does not match GROBID image signatures.",
+                    manual_command=manual_cmd,
+                )
 
         return GrobidStatus(
             is_alive=False,
@@ -413,6 +507,12 @@ class GrobidManager:
         c_status = c_info.get("status")
         port = self.get_port()
 
+        if c_info.get("port_conflict"):
+            return (
+                False,
+                f"Port {port} is occupied by conflicting non-GROBID container '{target_name}' ({c_info.get('image', '')}). Please stop that container or configure GROBID_SERVER with a different port.",
+            )
+
         if c_info.get("exists"):
             if c_status == "running":
                 logger.info("GROBID container '%s' is already running; waiting for health probe.", target_name)
@@ -433,7 +533,12 @@ class GrobidManager:
             available_images = self.get_available_grobid_images()
             image_to_use = self.docker_image
             if image_to_use not in available_images and available_images:
-                image_to_use = available_images[0]
+                tag = image_to_use.split(":")[-1] if ":" in image_to_use else ""
+                matching_tag_images = [img for img in available_images if tag and img.endswith(f":{tag}")]
+                if matching_tag_images:
+                    image_to_use = matching_tag_images[0]
+                else:
+                    image_to_use = sorted(available_images, reverse=True)[0]
                 logger.info("Default image '%s' not cached; using local cached image: %s", self.docker_image, image_to_use)
 
             cmd = [
@@ -490,7 +595,8 @@ class GrobidManager:
 
         # Check if container or process is still running even if JVM is initializing
         c_info = self.get_container_info()
-        if c_info.get("status") == "running" or (os.path.exists(self._pid_file)):
+        proc_running, _ = self._is_process_running()
+        if (c_info.get("exists") and c_info.get("status") == "running") or proc_running:
             return (
                 True,
                 "GROBID container is running and initializing its JVM. It will become active shortly (click Check Status).",
@@ -503,16 +609,27 @@ class GrobidManager:
         """Stop the GROBID server container or tracked process."""
         # Stop tracked process if PID file exists
         if os.path.exists(self._pid_file):
+            target_pid = None
             try:
                 with open(self._pid_file) as f:
-                    pid = int(f.read().strip())
-                os.kill(pid, signal.SIGTERM)
-                os.remove(self._pid_file)
-                return True, f"Stopped GROBID process with PID {pid}."
-            except Exception as exc:
-                if os.path.exists(self._pid_file):
+                    content = f.read().strip()
+                if content:
+                    target_pid = int(content)
+            except Exception:
+                target_pid = None
+
+            if target_pid is not None:
+                try:
+                    os.kill(target_pid, signal.SIGTERM)
+                except Exception as exc:
+                    logger.warning("Failed to terminate tracked process: %s", exc)
+
+            if os.path.exists(self._pid_file):
+                try:
                     os.remove(self._pid_file)
-                logger.warning("Failed to terminate tracked process: %s", exc)
+                except OSError:
+                    pass
+            return True, f"Stopped GROBID process with PID {target_pid}."
 
         docker_ok, docker_msg = self.check_docker()
         if not docker_ok:
@@ -556,6 +673,22 @@ class GrobidManager:
         self.stop_server()
         time.sleep(1.0)
         return self.start_server(timeout=timeout)
+
+    def run_action(self, action: str, **kwargs) -> tuple[bool, str, GrobidStatus]:
+        """Execute a lifecycle action: 'status', 'start', 'stop', 'restart'."""
+        act = (action or "").lower().strip()
+        if act == "start":
+            ok, msg = self.start_server(**kwargs)
+        elif act == "stop":
+            ok, msg = self.stop_server(**kwargs)
+        elif act == "restart":
+            ok, msg = self.restart_server(**kwargs)
+        elif act in ("status", "check"):
+            st = self.check_status()
+            return True, st.message, st
+        else:
+            return False, f"Unknown action: '{action}'.", self.check_status()
+        return ok, msg, self.check_status()
 
 
 # Aliases
