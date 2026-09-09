@@ -25,6 +25,10 @@ any OpenAI-compatible API (`LLM_BACKEND=openai`). A Streamlit UI
 bibliographic lookups (Agent 0: arXiv / OpenAlex / Semantic Scholar; Agent 2:
 Crossref, Unpaywall, Europe PMC, arXiv) always go out to those services.
 
+Deploying to Google Cloud is scripted in [deploy/](deploy/) — one VM running the
+app and GROBID under Compose, with the corpus on a persistent disk. See
+[deploy/README.md](deploy/README.md).
+
 ## Pipeline
 
 | Stage | Script | What it does |

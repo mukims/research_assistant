@@ -414,7 +414,7 @@ the deployment configures everything through env vars without touching code.
 
 `GROBID_SERVER` defaults to `http://localhost:8070` — a local server is the
 expectation, not a convenience fallback. Point it at a hosted instance (a
-public Space, or the Cloud Run deployment's own GROBID service) by setting the
+public Space, or the GCE deployment's own GROBID service) by setting the
 env var instead. Running one locally via Docker is the standard route, and is
 walked through step by step in
 [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
@@ -422,7 +422,7 @@ walked through step by step in
 **Why not bundle it.** GROBID is a ~700 MB Java server with deep-learning
 models, needs 4 GB RAM, and takes 30–60 s to start. Baking it into the app image
 would bloat the image and slow every cold start, and running two servers in one
-container is awkward on a scale-to-zero platform.
+container is awkward on a single-container host.
 
 **Why a dead or unreachable server no longer stops the pipeline.** See §11.1 —
 Agent 1 falls back to regex-based extraction per PDF whenever GROBID cannot be
@@ -433,10 +433,9 @@ degrades reference quality instead of ending the run.
 
 The GROBID client no longer pings `/api/isalive` on construction.
 
-**Why.** A serverless GROBID (Cloud Run) may be cold-starting when the first
-request arrives; the platform holds the request while it boots. A pre-check
-would fail during that window. Real failures still surface per-file in the batch
-result.
+**Why.** A containerized GROBID may be initializing when the first
+request arrives. A pre-check would fail during that window. Real failures still surface
+per-file in the batch result.
 
 ---
 
@@ -445,37 +444,63 @@ result.
 ### 8.1 One container image, env-configured per target
 
 `Dockerfile` builds a single image (Streamlit app, honours `$PORT`). Local test
-runs it with Ollama env vars; Cloud Run runs the same image with hosted-API env
+runs it with Ollama env vars; the GCE deployment runs the same image with hosted-API env
 vars.
 
 **Why.** "Test what you deploy." A green local run of the image means the image
 is good; only the backend wiring differs, and that is just environment.
 
-### 8.2 Cloud Run, not Hugging Face Spaces
+### 8.2 A GCE VM, not Cloud Run
 
-The initial target was an HF Space. It didn't work out:
+The initial target was a Hugging Face Space, then Cloud Run. Neither survived
+contact with the corpus.
 
-- The free CPU Space tier was withdrawn.
-- New Spaces default to ZeroGPU hardware, which only supports the Gradio SDK —
-  incompatible with a Streamlit/Docker app, and the app needs no GPU anyway.
+- The free CPU Space tier was withdrawn, and new Spaces default to ZeroGPU
+  hardware, which only supports the Gradio SDK.
+- **Cloud Run cannot hold this corpus.** It has no persistent disk; the only
+  durable option is a GCS FUSE mount, and the corpus is `chroma.sqlite3` plus
+  mmap'd HNSW `.bin` files. GCS FUSE has no POSIX file locking and turns small
+  random writes into whole-object rewrites. SQLite and a memory-mapped vector
+  index on that substrate is corruption, not slowness.
 
-Cloud Run fits: it runs any container, honours `$PORT`, scales to zero (so an
-idle demo costs nothing), and hosts GROBID as a second service the same way.
+A GCE VM with a persistent disk is an ordinary filesystem, so ChromaDB, the
+BM25 pickle and the ingestion lock all work untouched — **no application code
+changes are needed for persistence**. `e2-custom-4-12288` (4 vCPU, 12 GB):
+GROBID takes two cores during extraction at `GROBID_BATCH_CONCURRENCY = 2`, and
+four cores keep the UI responsive while it does.
 
-**Trade-off.** Requires a GCP project with billing enabled (free-tier limits
-still apply). Cold starts (~seconds for the app, ~40 s for GROBID). The
-container filesystem is in-memory, so the corpus is lost on scale-to-zero unless
-a GCS volume is mounted at `CITATION_DATA_DIR`.
+**Trade-off.** Always-on cost (≈$95/mo) instead of scale-to-zero, and a machine
+to patch. Accepted: a scale-to-zero design that corrupts its corpus is not
+cheaper, it is broken.
 
-### 8.3 File logging off in the container
+**Rejected.** Filestore gives real NFS locking but starts at 1 TiB ≈ $200/mo.
+Cloud SQL + pgvector removes Chroma but rewrites `db.py`, `retrieve.py` and
+`ingestion.py`, and leaves the BM25 pickle homeless.
+
+### 8.3 Access: one firewall rule, not IAP
+
+`tcp:8080` from a single `/32`. IAP and Google-managed certificates both require
+a domain, which is not available. An unauthenticated app nobody can route to is
+not an exposed app — and the app spends an OpenAI key, so this is a billing
+control as much as a privacy one.
+
+**Why this needs a script.** Pinning to one IP means presenting from an
+unfamiliar network silently locks you out: the app is up, healthy, and
+unreachable. `deploy/allow-ip.sh` takes no arguments and repoints the rule at
+your current address.
+
+**Trade-off.** Plain HTTP: the firewall protects the key's effects, but the
+session is unencrypted in transit. Acceptable for one user on one address. With
+a domain, the upgrade is IAP + a managed cert on an HTTPS load balancer
+(~$18/mo) and nothing else changes.
+
+### 8.4 File logging off in the container
 
 `CITATION_LOG_FILE=0` in the image.
 
-**Why.** The app directory is read-only on Cloud Run, so creating `logs/` fails.
-Container stdout is already captured by the platform's logging — a log file adds
-nothing.
+**Why.** Container stdout is captured by Docker and the platform's logging — an internal log file adds nothing and clutters the volume.
 
-### 8.4 Streamlit, not Gradio or a custom frontend
+### 8.5 Streamlit, not Gradio or a custom frontend
 
 **Why.** The app is form-in / structured-result-out with a long-running job that
 needs progress streaming. `st.form` submits inputs atomically, `st.status`
@@ -538,8 +563,8 @@ suite (`RUN_LLM_TESTS=1`) before shipping any prompt edit.
 
 - **No database migrations.** Schema changes (adding the summaries collection)
   mean re-ingesting. Acceptable for a research tool with rebuildable corpora.
-- **No auth / multi-tenant.** Single-user tool. The Cloud Run service is
-  `--allow-unauthenticated` behind an obscure URL.
+- **No auth / multi-tenant.** Single-user tool. The VM is firewalled to
+  the operator's single /32 IP address.
 - **No async / job queue.** Ingestion runs synchronously in the request. Fine
   for one user; a shared deployment would need a queue.
 - **`model_final.pth` (the layout checkpoint) is gitignored.** layoutparser

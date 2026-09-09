@@ -407,7 +407,7 @@ under `data/` by default.
 |---|---|
 | From a checkout | `<project>/data/` |
 | Docker | Whatever you mounted at `/home/user/data` — **mount something, or it is lost** |
-| Cloud Run | In memory, **lost when the instance scales to zero** unless a volume is mounted |
+| GCE VM (`deploy/`) | A 50 GB persistent disk mounted at `/mnt/disks/data` — survives reboots, stops and redeploys |
 
 `CITATION_DATA_DIR` overrides this everywhere.
 
