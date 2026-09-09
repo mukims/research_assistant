@@ -1,0 +1,18 @@
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Never upload: 1.2 GB corpus and an 856 MB checkpoint
+data/
+model_final.pth
+
+# Scratch
+.superpowers/
+.worktrees/
+.pytest_cache/
+
+# Local secrets
+.env
