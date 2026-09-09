@@ -1,0 +1,37 @@
+# Two containers on one VM. The app image carries its own backend config (see
+# Dockerfile); only the secret and the GROBID address are supplied here.
+#
+# GROBID is a separate service rather than a second process in the app image:
+# it is a ~700 MB Java server that takes 30-60s to start, and running two
+# servers in one container is awkward to supervise. Compose's restart policy
+# replaces the app's own Start/Stop buttons, which cannot work without the
+# Docker socket — deliberately not mounted (it would grant the app
+# root-equivalent control of the VM).
+
+services:
+  app:
+    image: ${APP_IMAGE:-research-assistant:local}
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Supplied at boot from Secret Manager via /etc/app.env.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set}
+      # Compose service name, not localhost: the app talks to grobid over the
+      # compose network.
+      GROBID_SERVER: http://grobid:8070
+      UNPAYWALL_EMAIL: ${UNPAYWALL_EMAIL:-}
+    volumes:
+      # The persistent disk. CITATION_DATA_DIR is /home/user/data in the image.
+      - /mnt/disks/data:/home/user/data
+    depends_on:
+      - grobid
+
+  grobid:
+    image: grobid/grobid:0.8.1
+    restart: unless-stopped
+    environment:
+      # Explicit, not default: 12 GB total on the VM, and the app needs ~3 GB.
+      JAVA_OPTS: "-Xmx3g"
+    expose:
+      - "8070"

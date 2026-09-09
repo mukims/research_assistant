@@ -19,3 +19,6 @@ model_final.pth
 
 # Git worktrees
 .worktrees/
+
+# Local secrets — never commit
+.env
