@@ -909,7 +909,9 @@ Outcome vocabulary — every pair ends with exactly one, and every one appears i
 | `orphaned` | The cite key is not in `_citations.json`. Agent 5's "model invented a key" case. |
 | `unresolved` | The source resolves to no documents — the corpus changed since the draft was cited. |
 | `no_evidence` | Retrieval returned nothing from that source for this claim. |
+| `retrieval_failed` | `hybrid_search` raised — embedding backends make a network call. `error_type` and `raw` carry the exception. |
 | `parse_failed` | Two attempts both produced an unusable reply. `raw` carries the last one. |
+| `call_failed` | The judging call raised something other than `JudgementParseError` — a transport, timeout or HTTP error. `error_type` and `raw` carry the exception. |
 
 - [ ] **Step 1: Write the failing tests**
 

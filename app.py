@@ -685,16 +685,27 @@ with tab_batch:
                 for j in ("Contradicts", "Does not support",
                           "Unclear / insufficient evidence")
             )
-            cols = st.columns(4)
+            # Without this tile the four verdict counts do not add up to
+            # "Checked", and the difference — orphaned keys, sources no longer
+            # in the corpus, failed retrieval, failed or unusable model calls —
+            # is invisible. A corpus re-ingested since the draft was cited
+            # returns every citation `unresolved`, which would otherwise read
+            # as "120 checked, nothing flagged".
+            not_judged = totals["total"] - totals["judged"]
+            cols = st.columns(5)
             cols[0].metric("Checked", totals["total"])
             cols[1].metric("Supports", totals.get("Supports", 0))
             cols[2].metric("Partially", totals.get("Partially supports", 0))
             cols[3].metric("Need review", needs_review)
+            cols[4].metric("Not judged", not_judged)
 
             md_path = written.replace(".txt", "_verification.md")
             if os.path.exists(md_path):
                 with open(md_path, encoding="utf-8") as fh:
-                    with st.expander("Full verification report", expanded=needs_review > 0):
+                    # Open the report whenever anything is wrong — a run that
+                    # judged nothing is exactly when the reader needs it.
+                    with st.expander("Full verification report",
+                                     expanded=needs_review > 0 or not_judged > 0):
                         st.markdown(fh.read())
 
 

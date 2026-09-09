@@ -514,8 +514,16 @@ citation is not recoverable from Agent 5's output, and Agent 8 re-runs
 evidence for this claim support it?" If even the best chunk fails, the citation
 is wrong regardless of what Agent 5 saw. The failure runs in the safe
 direction: re-retrieval cannot manufacture support the source does not
-contain. The report names the chunk that was judged, so the reader can see
-which text the verdict rests on.
+contain. The report quotes the chunk that was judged under **Evidence
+judged** on every flagged citation (truncated to 400 characters), and the JSON
+record carries it in full for every citation, so the reader can always see
+which text the verdict rests on — including for `Does not support`, where
+`supporting_span` is legitimately `null` and the quoted chunk is the only
+evidence text there is.
+
+The record's `sentence_index`, `claim` and `evidence` are the pipeline's own,
+never the model's: only the rubric's six fields are merged out of a reply, so
+an echoed key in the model's JSON cannot rewrite what was actually judged.
 
 ### 9.3 The prompt is code
 
