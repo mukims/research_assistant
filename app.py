@@ -17,6 +17,7 @@ import tempfile
 import streamlit as st
 
 from research_assistant import config
+from research_assistant.agents.agent8_verifier import verify_draft
 
 st.set_page_config(page_title="Research assistant", page_icon="📚", layout="centered")
 os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -647,6 +648,47 @@ with tab_batch:
                 report = fh.read()
             with st.expander("Per-sentence decisions"):
                 st.markdown(report)
+
+        st.divider()
+        st.caption(
+            "Verification re-checks every inserted citation against the source "
+            "it cites — one model call per citation, so a long draft is not free."
+        )
+        if st.button("Verify citations", key="verify_citations"):
+            with st.status("Judging each citation…", expanded=True) as status:
+                try:
+                    verification = verify_draft(written)
+                except FileNotFoundError as exc:
+                    status.update(label="Verification failed", state="error")
+                    st.error(str(exc))
+                except Exception as exc:
+                    status.update(label="Verification failed", state="error")
+                    st.error(f"Verification failed: {exc}")
+                else:
+                    status.update(label="Verification complete", state="complete")
+                    st.session_state["verification"] = verification
+
+        # Named `verification`, not `report`: a few lines above, `report` is
+        # already bound to the text of agent 5's _report.md in this same block.
+        verification = st.session_state.get("verification")
+        if verification:
+            totals = verification["totals"]
+            needs_review = sum(
+                totals.get(j, 0)
+                for j in ("Contradicts", "Does not support",
+                          "Unclear / insufficient evidence")
+            )
+            cols = st.columns(4)
+            cols[0].metric("Checked", totals["total"])
+            cols[1].metric("Supports", totals.get("Supports", 0))
+            cols[2].metric("Partially", totals.get("Partially supports", 0))
+            cols[3].metric("Need review", needs_review)
+
+            md_path = written.replace(".txt", "_verification.md")
+            if os.path.exists(md_path):
+                with open(md_path, encoding="utf-8") as fh:
+                    with st.expander("Full verification report", expanded=needs_review > 0):
+                        st.markdown(fh.read())
 
 
 # ─── Tab 4: research chat ──────────────────────────────────────────────────
