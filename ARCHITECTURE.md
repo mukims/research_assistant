@@ -401,7 +401,7 @@ delete `physics_vectordb` and re-ingest.
 Every model name, path, threshold, rate limit, and RRF constant is in
 `config.py`, most overridable by environment variable. Paths anchor to
 `CITATION_DATA_DIR` (default: `<project>/data`, separate from the source tree
-— see §10.2).
+— see §11.2).
 
 **Why.** Changing a model or relocating the data store is a one-file edit, and
 the deployment configures everything through env vars without touching code.
@@ -424,7 +424,7 @@ models, needs 4 GB RAM, and takes 30–60 s to start. Baking it into the app ima
 would bloat the image and slow every cold start, and running two servers in one
 container is awkward on a scale-to-zero platform.
 
-**Why a dead or unreachable server no longer stops the pipeline.** See §10.1 —
+**Why a dead or unreachable server no longer stops the pipeline.** See §11.1 —
 Agent 1 falls back to regex-based extraction per PDF whenever GROBID cannot be
 reached or returns nothing usable, so an external Java service being down
 degrades reference quality instead of ending the run.
@@ -485,7 +485,48 @@ pipeline, not the UI.
 
 ---
 
-## 9. Things deliberately not done
+## 9. Verification (Agent 8)
+
+### 9.1 An audit pass, not an inline gate
+
+Agent 8 runs after Agent 5, over its output. Agents 4 and 5 are unchanged.
+
+**Why.** Judgement is one claim–evidence pair at a time; the slot
+decomposition is what makes it accurate and it cannot be batched without
+losing that. Agent 5 already batches its citation-need check
+(`CITATION_CHECK_BATCH_SIZE = 20`) because per-sentence calls were too
+expensive, and putting judgement inline on every retrieved candidate roughly
+triples a batch run's call count — acceptable against a hosted API,
+impractical against a local CPU model.
+
+**The trade-off.** A wrong citation is inserted and then flagged rather than
+blocked, and the draft is not corrected automatically. Making judgement a gate
+is a coherent future change; it is not this one.
+
+### 9.2 Evidence is re-retrieved, not replayed
+
+Agent 5 does not persist the chunk text it cited — `citation_entries` records
+only source metadata, and `_report.md` is prose. So the evidence behind a
+citation is not recoverable from Agent 5's output, and Agent 8 re-runs
+`hybrid_search` restricted to the cited source.
+
+**Why that is acceptable.** The question becomes "does this source's strongest
+evidence for this claim support it?" If even the best chunk fails, the citation
+is wrong regardless of what Agent 5 saw. The failure runs in the safe
+direction: re-retrieval cannot manufacture support the source does not
+contain. The report names the chunk that was judged, so the reader can see
+which text the verdict rests on.
+
+### 9.3 The prompt is code
+
+`judgement/prompt.md` is a 259-line rubric whose aggregation order and
+scope-versus-contradiction distinction are load-bearing, and no unit test
+covers them. `judgement/cases/cases.jsonl` is the only guard. Run the live
+suite (`RUN_LLM_TESTS=1`) before shipping any prompt edit.
+
+---
+
+## 10. Things deliberately not done
 
 - **No database migrations.** Schema changes (adding the summaries collection)
   mean re-ingesting. Acceptable for a research tool with rebuildable corpora.
@@ -498,19 +539,19 @@ pipeline, not the UI.
   this checkout it is a symlink to the copy already sitting in `tech_ireland`,
   not a duplicated 830 MB file.
 - **No Ragas evaluation harness yet.** `evaluate_rag.py` and
-  `requirements-eval.txt` were deferred out of this merge (§10 below), not
+  `requirements-eval.txt` were deferred out of this merge (§11 below), not
   rejected — the prompts it would share with Agent 4 already live in
   `prompts.py`.
 
 ---
 
-## 10. This merge's decisions
+## 11. This merge's decisions
 
 Two decisions made while combining `tech_ireland` (infrastructure) and
 `citation_builder` (agents 5–7, tests) that neither source repo documents,
 because neither source repo faced the question on its own.
 
-### 10.1 Why Agent 1 keeps both extraction strategies
+### 11.1 Why Agent 1 keeps both extraction strategies
 
 `tech_ireland` and `citation_builder` extract references two incompatible
 ways, and each has the other's weakness. `tech_ireland` posts every PDF to
@@ -544,7 +585,7 @@ treat a raw-string reference the same as a fully structured one — a consumer
 that cares can weigh them differently, and a reader of the JSON can see at a
 glance how much of a given run leaned on the weaker path.
 
-### 10.2 Why the ingestion manifest is a JSON file, not a collection scan
+### 11.2 Why the ingestion manifest is a JSON file, not a collection scan
 
 Before this merge, "has this PDF already been ingested?" had two sources of
 truth, unioned on every call: an append-only, newline-delimited text file
@@ -575,7 +616,7 @@ This was only free to do *now*, before the corpus exists — a manifest
 introduced against an already-populated collection would need a migration
 step to seed itself from that collection's metadata first.
 
-### 10.3 Seeding from an uploaded PDF, and why the query stopped being an identity
+### 11.3 Seeding from an uploaded PDF, and why the query stopped being an identity
 
 Agent 0's original job was "turn a research idea into a paper". Uploading
 inverts that: you already have the paper, and the idea is optional. That is a
@@ -606,7 +647,7 @@ depends on. The general lesson is one this codebase keeps relearning: a key
 meaning "the request" and a key meaning "the thing" can look identical right up
 until they diverge.
 
-### 10.4 Ingestion reports how it extracted, for the same reason Agent 1 does
+### 11.4 Ingestion reports how it extracted, for the same reason Agent 1 does
 
 Layout detection is the most install-fragile part of the system, and
 `process_pdf()` is deliberately forgiving of it — any failure degrades to
@@ -614,7 +655,7 @@ text-only extraction rather than aborting the run. That forgiveness has a cost:
 the fallback is per-PDF and only logs a warning, so an entire corpus can come
 out with no figures or tables and nothing in the return value says so.
 
-That is the same shape of problem §10.1 solved for Agent 1, and it gets the
+That is the same shape of problem §11.1 solved for Agent 1, and it gets the
 same answer. `process_pdf()` tags every entry with the mode that produced it
 (`layout` or `text_only`) at the single point where the choice is made, and
 `ingest_pdfs()` returns `{"extraction": {"layout": n, "text_only": n}}` counted

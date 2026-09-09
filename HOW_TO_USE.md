@@ -347,6 +347,31 @@ unattended; spot-check a few before using the output.
 
 ---
 
+## Verifying the citations
+
+**Verify citations** in the batch tab re-checks every citation the pipeline
+inserted. It costs one model call per citation, so a long draft is not free.
+
+Each citation gets a verdict:
+
+| Verdict | What it means |
+|---|---|
+| Supports | The source reports what the sentence claims, under the conditions the sentence names. |
+| Partially supports | Close, but overstated — a hedged mechanism stated as a cause, or one system generalised to a class. |
+| Contradicts | The source reports the opposite result, *inside* the conditions the claim covers. |
+| Does not support | The source examined none of what the claim covers. An opposite result under different conditions lands here, not in Contradicts. |
+| Unclear / insufficient evidence | The retrieved text cannot decide the question either way. |
+
+**`evidence_sufficiency` is a separate axis, and it is the one to read first.**
+It describes the *retrieved text*, not the claim. `insufficient` means
+retrieval did not return enough to judge — often because the result lives in a
+supplementary table or a figure that was never ingested. That is a retrieval
+gap to fix, not a citation to delete. A verdict of "Unclear" with
+`evidence_sufficiency: insufficient` means "ingest more of this paper", while
+"Does not support" with `sufficient` means "this citation is wrong".
+
+---
+
 ## Tab 4 — Research chat
 
 **This also needs a corpus.** Unlike Tabs 2 and 3, this is a genuine back-and-
