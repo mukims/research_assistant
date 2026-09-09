@@ -37,7 +37,7 @@ else
   gcloud compute instances create "$VM_NAME" \
     --zone "$ZONE" --machine-type "$MACHINE_TYPE" \
     --image-family=debian-12 --image-project=debian-cloud \
-    --boot-disk-size=20GB --boot-disk-type=pd-balanced \
+    --boot-disk-size=50GB --boot-disk-type=pd-balanced \
     --disk="name=${DISK_NAME},device-name=appdata,mode=rw,auto-delete=no" \
     --service-account "$SA_EMAIL" \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
