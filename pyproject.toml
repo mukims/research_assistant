@@ -11,6 +11,13 @@ requires-python = ">=3.10,<3.13"
 [tool.setuptools.packages.find]
 include = ["research_assistant*"]
 
+# judge.py reads prompt.md at module scope, and app.py imports the verifier at
+# module scope — so a wheel without these files fails at app startup, not at
+# first use. cases/ has no __init__.py, so packages.find never sees it; this is
+# the only mechanism that ships them.
+[tool.setuptools.package-data]
+"research_assistant.judgement" = ["prompt.md", "cases/*.jsonl"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
