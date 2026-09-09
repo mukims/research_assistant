@@ -207,7 +207,7 @@ def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
 - [ ] **Step 4: Run the new tests**
 
 Run: `CITATION_LOG_FILE=0 python -m pytest tests/test_llm.py -v -k "Temperature"`
-Expected: PASS (8 tests)
+Expected: PASS (7 tests)
 
 - [ ] **Step 5: Run the whole suite — the change must be invisible to existing callers**
 
