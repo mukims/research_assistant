@@ -666,11 +666,18 @@ with tab_batch:
                     st.error(f"Verification failed: {exc}")
                 else:
                     status.update(label="Verification complete", state="complete")
-                    st.session_state["verification"] = verification
+                    st.session_state[f"verification:{written}"] = verification
 
         # Named `verification`, not `report`: a few lines above, `report` is
         # already bound to the text of agent 5's _report.md in this same block.
-        verification = st.session_state.get("verification")
+        #
+        # Keyed by `written` (the current draft's path) rather than a bare
+        # "verification" key: a fresh draft gets a fresh tempfile path every
+        # run (see the NamedTemporaryFile above), so a result cached under
+        # another draft's key is never looked up here, and a failed run for
+        # this draft simply never populates this draft's key. Either way,
+        # nothing renders that wasn't computed for this exact draft.
+        verification = st.session_state.get(f"verification:{written}")
         if verification:
             totals = verification["totals"]
             needs_review = sum(
