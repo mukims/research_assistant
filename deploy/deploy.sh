@@ -26,7 +26,7 @@ gcloud compute ssh "$VM_NAME" --zone "$ZONE" --project "$PROJECT" --command "
   cd /opt/research-assistant
   sudo docker compose --env-file /etc/app.env pull
   sudo docker compose --env-file /etc/app.env up -d
-  sudo docker compose ps
+  sudo docker compose --env-file /etc/app.env ps
 "
 
 EXT_IP="$(gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --project "$PROJECT" \
