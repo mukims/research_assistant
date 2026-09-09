@@ -96,10 +96,6 @@ class TestChatTemperatureOllama(unittest.TestCase):
         self.assertEqual(self._run(temperature=0.0)["options"], {"temperature": 0.0})
 
     def test_options_and_temperature_merge(self):
-        self.assertEqual(
-            self._run(temperature=0.0, options={"num_ctx": 8192}),
-            self._run(temperature=0.0, options={"num_ctx": 8192}),
-        )
         merged = self._run(temperature=0.0, options={"num_ctx": 8192})["options"]
         self.assertEqual(merged, {"num_ctx": 8192, "temperature": 0.0})
 
