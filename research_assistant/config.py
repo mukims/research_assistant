@@ -146,6 +146,20 @@ SUMMARY_MAX_CHARS        = _env_int("CITATION_SUMMARY_MAX_CHARS", 8000)
 # to the batch. Too small wastes calls, since each one re-sends the framing.
 CITATION_CHECK_BATCH_SIZE = 20
 
+# ─── Agent 8 — Verifier (judgement) ──────────────────────────────────────────
+# None → LLM_MODEL, matching SUMMARY_MODEL's pattern above.
+JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL", "") or None
+# The judgement prompt is a rubric, not a generation task, and its regression
+# cases assert exact verdicts — sampling makes both meaningless.
+JUDGEMENT_TEMPERATURE = 0.0
+# Chunks judged per cited source. 1 = judge the single best-matching chunk.
+JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 1)
+# The prompt is ~3,760 tokens. _ollama_chat sends no options, so a local run
+# would otherwise use the model default (commonly 4096, sometimes 2048) and
+# Ollama would truncate — silently, from the tail, which is exactly where the
+# worked examples live. Ignored by the openai backend.
+JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": 8192}
+
 # ─── Search Tunables ──────────────────────────────────────────────────────────
 RRF_K            = 60               # Reciprocal Rank Fusion constant
 DEFAULT_TOP_K    = 3                # Default number of results to return
