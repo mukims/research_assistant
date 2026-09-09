@@ -25,25 +25,30 @@ COPY --chown=user . .
 # thin package pointer, not a rebuild of anything already installed above.
 RUN pip install --no-cache-dir --user -e .
 
-# Baked-in backend config. Corpus + downloads land in CITATION_DATA_DIR, kept
-# outside the app's own directory tree (config.py's default is
-# <project>/data, i.e. inside /home/user/app — that would sit under whatever
-# read-only layer the image is deployed with) so a read-only image still
-# runs. On Cloud Run that directory is in-memory and lost on scale-to-zero —
-# mount a volume there (GCS FUSE) and it persists. Secrets (HF_TOKEN) and
-# model ids come in at deploy time.
+# Baked-in backend config. Corpus + downloads land in CITATION_DATA_DIR, which
+# sits outside the app's own directory tree so a read-only image still runs; on
+# the GCE deployment a persistent disk is bind-mounted there. Chat and
+# embeddings both go to OpenAI — no Ollama package is imported at runtime under
+# these settings, since every ollama import in shared/llm.py is function-local
+# and behind a backend branch. OPENAI_API_KEY is NOT baked in; it arrives from
+# Secret Manager at container start.
 ENV CITATION_DATA_DIR=/home/user/data \
     CITATION_LAYOUT_DETECTION=0 \
     CITATION_LOG_FILE=0 \
     LLM_BACKEND=openai \
-    CITATION_EMBED_BACKEND=huggingface \
-    PORT=7860
+    CITATION_EMBED_BACKEND=openai \
+    OPENAI_BASE_URL=https://api.openai.com/v1 \
+    CITATION_LLM_MODEL=gpt-4.1-mini \
+    CITATION_EMBED_MODEL=text-embedding-3-small \
+    PORT=8080
 RUN mkdir -p /home/user/data
 
-EXPOSE 7860
+EXPOSE 8080
 HEALTHCHECK CMD curl -f "http://localhost:${PORT}/_stcore/health" || exit 1
 
-# Shell form so ${PORT} expands — Cloud Run sets it to 8080.
+# Shell form so ${PORT} expands. Disable CORS and XSRF so remote browser access
+# over IP or tunnel doesn't drop WebSocket connections.
 CMD streamlit run app.py \
       --server.port=${PORT} --server.address=0.0.0.0 \
-      --server.headless=true --browser.gatherUsageStats=false
+      --server.headless=true --browser.gatherUsageStats=false \
+      --server.enableCORS=false --server.enableXsrfProtection=false
