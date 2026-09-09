@@ -13,3 +13,9 @@ data/
 
 # Layout-detection checkpoint (symlinked, ~830MB)
 model_final.pth
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
+
+# Git worktrees
+.worktrees/
