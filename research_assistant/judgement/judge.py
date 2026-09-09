@@ -102,6 +102,20 @@ def _validate(result, raw):
             f"slots must be exactly {sorted(REQUIRED_SLOTS)}, got {got}", raw=raw
         )
 
+    for name, slot in slots.items():
+        if not isinstance(slot, dict) or "assertion" not in slot or "verdict" not in slot:
+            raise JudgementParseError(
+                f"slots[{name!r}] must be an object with 'assertion' and "
+                f"'verdict', got {slot!r}",
+                raw=raw,
+            )
+        if not isinstance(slot["verdict"], str):
+            raise JudgementParseError(
+                f"slots[{name!r}]['verdict'] must be a string, "
+                f"got {type(slot['verdict']).__name__}",
+                raw=raw,
+            )
+
     return result
 
 

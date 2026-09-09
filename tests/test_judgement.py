@@ -124,6 +124,24 @@ class TestParseJudgement(unittest.TestCase):
         with self.assertRaises(JudgementParseError):
             parse_judgement(json.dumps(payload))
 
+    def test_slot_value_as_string_is_rejected(self):
+        payload = _good()
+        payload["slots"]["finding"] = "oops"
+        with self.assertRaises(JudgementParseError):
+            parse_judgement(json.dumps(payload))
+
+    def test_slot_missing_assertion_is_rejected(self):
+        payload = _good()
+        del payload["slots"]["scope"]["assertion"]
+        with self.assertRaises(JudgementParseError):
+            parse_judgement(json.dumps(payload))
+
+    def test_slot_missing_verdict_is_rejected(self):
+        payload = _good()
+        del payload["slots"]["strength"]["verdict"]
+        with self.assertRaises(JudgementParseError):
+            parse_judgement(json.dumps(payload))
+
     def test_json_array_is_rejected(self):
         with self.assertRaises(JudgementParseError):
             parse_judgement("[1, 2, 3]")
