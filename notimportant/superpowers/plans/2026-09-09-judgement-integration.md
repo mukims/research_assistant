@@ -1320,7 +1320,7 @@ def _write_markdown(path, report) -> None:
             lines.append(
                 f"- Sentence {entry['sentence_index'] + 1} — `{entry['cite_key']}` "
                 f"({entry['confidence']} confidence, evidence "
-                f"{entry['evidence_sufficiency']})"
+                f"{entry['evidence_sufficiency']}): {entry['sentence']}"
             )
         lines.append("")
 
