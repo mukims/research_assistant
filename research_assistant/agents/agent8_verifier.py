@@ -28,8 +28,17 @@ from research_assistant.agents.agent5_batch_citer import (
     _cite_keys,
     split_into_sentences,
 )
-from research_assistant.config import JUDGEMENT_TOP_K, LLM_BACKEND, LLM_MODEL
-from research_assistant.judgement.judge import JudgementParseError, judge
+from research_assistant.config import (
+    JUDGEMENT_MODEL,
+    JUDGEMENT_TOP_K,
+    LLM_BACKEND,
+    LLM_MODEL,
+)
+from research_assistant.judgement.judge import (
+    REQUIRED_FIELDS,
+    JudgementParseError,
+    judge,
+)
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
@@ -134,6 +143,19 @@ def _judge_once(claim, evidence):
     return judge(claim, evidence)
 
 
+def _judgement_model() -> str:
+    """The model that actually produces the verdicts.
+
+    ``judge()`` hands ``JUDGEMENT_MODEL`` to ``chat()``, which falls back to
+    ``LLM_MODEL`` only when it is unset. Naming ``LLM_MODEL`` unconditionally
+    would attribute every verdict to a model that produced none of them the
+    moment ``CITATION_JUDGEMENT_MODEL`` is set — which is the entire point of
+    that override, since the audit is meant to be able to run on a stronger
+    model than the one that drafted.
+    """
+    return JUDGEMENT_MODEL or LLM_MODEL
+
+
 def _warn_if_context_is_tight():
     """A local model with a small context truncates the prompt silently."""
     if LLM_BACKEND != "ollama":
@@ -147,7 +169,7 @@ def _warn_if_context_is_tight():
         "num_ctx is set to %s — if the model cannot honour that, Ollama "
         "truncates the prompt tail (where the worked examples are) without "
         "raising, and verdicts degrade silently.",
-        LLM_MODEL, approx_tokens, JUDGEMENT_OLLAMA_OPTIONS.get("num_ctx"),
+        _judgement_model(), approx_tokens, JUDGEMENT_OLLAMA_OPTIONS.get("num_ctx"),
     )
 
 
@@ -210,10 +232,24 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             results.append(entry)
             continue
 
-        hits = hybrid_search(
-            entry["claim"], collection, bm25, texts, metadatas,
-            top_k=top_k, doc_filter=documents,
-        )
+        # Retrieval is guarded like everything else in this loop: nothing is
+        # persisted until the report is written, so an exception at citation 50
+        # of 120 would throw away fifty paid model calls and leave no artefact.
+        # hybrid_search embeds the query, which is a network call under
+        # EMBED_BACKEND=openai|huggingface.
+        try:
+            hits = hybrid_search(
+                entry["claim"], collection, bm25, texts, metadatas,
+                top_k=top_k, doc_filter=documents,
+            )
+        except Exception as exc:
+            entry["outcome"] = "retrieval_failed"
+            entry["error_type"] = type(exc).__name__
+            entry["raw"] = str(exc)
+            logger.warning(" -> retrieval failed: %s: %s", type(exc).__name__, exc)
+            results.append(entry)
+            continue
+
         if not hits:
             entry["outcome"] = "no_evidence"
             logger.info(" -> nothing retrieved from that source for this claim.")
@@ -230,14 +266,24 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             results.append(entry)
             continue
         except Exception as exc:
-            entry["outcome"] = "parse_failed"
+            # Connection errors, timeouts and HTTP 4xx/5xx are not "unusable
+            # model reply" — filing them as parse_failed sends the reader to
+            # prompt.md when the endpoint was simply down.
+            entry["outcome"] = "call_failed"
+            entry["error_type"] = type(exc).__name__
             entry["raw"] = str(exc)
-            logger.warning(" -> judging failed: %s", exc)
+            logger.warning(" -> judging call failed: %s: %s", type(exc).__name__, exc)
             results.append(entry)
             continue
 
         entry["outcome"] = "judged"
-        entry.update(verdict)
+        # Only the rubric's own fields are merged. _validate permits extra
+        # top-level keys in a model reply — harmless in themselves, but a
+        # blanket update() lets an echoed `sentence_index`, `claim`, `evidence`
+        # or `outcome` overwrite the pipeline's own record of what was judged,
+        # which is exactly the provenance §9.2 leans on to justify
+        # re-retrieval.
+        entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
         logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
         results.append(entry)
 
@@ -245,7 +291,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         "draft": os.path.abspath(draft_path),
         "citations": os.path.abspath(citations_path),
         "generated": datetime.now().isoformat(timespec="seconds"),
-        "model": LLM_MODEL,
+        "model": _judgement_model(),
         "top_k": top_k,
         "results": results,
         "totals": _totals(results),
@@ -266,7 +312,8 @@ def _totals(results) -> dict:
     totals = {
         "total": len(results),
         "judged": 0, "orphaned": 0, "unresolved": 0,
-        "no_evidence": 0, "parse_failed": 0,
+        "no_evidence": 0, "retrieval_failed": 0,
+        "parse_failed": 0, "call_failed": 0,
     }
     for judgement in _SEVERITY:
         totals[judgement] = 0
@@ -295,7 +342,9 @@ def _write_markdown(path, report) -> None:
         f"| Key not in mapping | {totals['orphaned']} |",
         f"| Source not in corpus | {totals['unresolved']} |",
         f"| No evidence retrieved | {totals['no_evidence']} |",
+        f"| Retrieval failed | {totals['retrieval_failed']} |",
         f"| Unusable model reply | {totals['parse_failed']} |",
+        f"| Model call failed | {totals['call_failed']} |",
         "",
         "---\n",
     ]
@@ -320,8 +369,17 @@ def _write_markdown(path, report) -> None:
             lines.append(f"Key `{entry['cite_key']}`"
                          + (f" → {entry['citation_source']}" if entry["citation_source"] else "")
                          + "\n")
+            # retrieval_failed and call_failed carry an exception type; naming
+            # it is the difference between "fix the prompt" and "the endpoint
+            # was down".
+            if entry.get("error_type"):
+                lines.append(f"**Error:** `{entry['error_type']}`\n")
             if entry.get("raw"):
-                lines.append("<details><summary>Raw reply</summary>\n")
+                # Only parse_failed's `raw` is an actual model reply; the
+                # failure outcomes carry an exception message.
+                label = ("Raw reply" if entry["outcome"] == "parse_failed"
+                         else "Error detail")
+                lines.append(f"<details><summary>{label}</summary>\n")
                 lines.append(f"```\n{entry['raw'][:2000]}\n```\n")
                 lines.append("</details>\n")
             lines.append("---\n")
@@ -338,6 +396,23 @@ def _write_markdown(path, report) -> None:
 
     with atomic_write(path) as fh:
         fh.write("\n".join(lines))
+
+
+# Long enough to judge the verdict against, short enough that a page of
+# flagged citations stays readable.
+_EVIDENCE_CHARS = 400
+
+
+def _blockquote(text, limit) -> str:
+    """*text* as a single-line Markdown blockquote, truncated to *limit*.
+
+    A retrieved chunk carries newlines, and a bare ``> `` prefix would leave
+    every line after the first outside the quote.
+    """
+    flat = _MULTI_SPACE_RE.sub(" ", str(text)).strip()
+    if len(flat) > limit:
+        flat = flat[:limit].rstrip() + "…"
+    return f"> {flat}"
 
 
 def _entry_block(entry) -> list:
@@ -357,8 +432,16 @@ def _entry_block(entry) -> list:
             f"| `{name}` | {slot.get('assertion', '—')} | {slot.get('verdict', '—')} |"
         )
     block.append("")
+    # The chunk the verdict rests on. §9.2 promises the report names it, and
+    # for "Does not support" — the most actionable verdict — supporting_span
+    # is legitimately null, so without this the reader gets three assertions
+    # and no evidence text at all.
+    if entry.get("evidence"):
+        block.append("**Evidence judged:**\n"
+                     + _blockquote(entry["evidence"], _EVIDENCE_CHARS) + "\n")
     if entry.get("supporting_span"):
-        block.append(f"**Supporting span:**\n> {entry['supporting_span']}\n")
+        block.append("**Supporting span:**\n"
+                     + _blockquote(entry["supporting_span"], _EVIDENCE_CHARS) + "\n")
     block.append(f"**Reason:** {entry['reason']}\n")
     block.append("---\n")
     return block
@@ -382,8 +465,9 @@ def main():
         for j in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
     )
     logger.info(
-        "Checked %d citation(s): %d judged, %d need review.",
+        "Checked %d citation(s): %d judged, %d need review, %d not judged.",
         totals["total"], totals["judged"], flagged,
+        totals["total"] - totals["judged"],
     )
 
 

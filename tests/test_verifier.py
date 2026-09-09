@@ -189,14 +189,27 @@ class VerifyDraftTestCase(unittest.TestCase):
             json.dump(mapping, fh)
         return draft_path
 
-    def _run(self, draft, mapping, rows, hits, judge_side_effect=None):
+    def _run(self, draft, mapping, rows, hits, judge_side_effect=None,
+             search_side_effect=None):
         draft_path = self._write(draft, mapping)
         res = _Resources(rows, hits)
+        # A side effect lets a test make retrieval raise; the default is the
+        # same fixed hit list for every call.
+        search_patch = ({"side_effect": search_side_effect} if search_side_effect
+                        else {"return_value": hits})
         with patch("research_assistant.agents.agent8_verifier.hybrid_search",
-                   return_value=hits), \
+                   **search_patch), \
              patch("research_assistant.agents.agent8_verifier.judge",
                    side_effect=judge_side_effect or (lambda c, e, **k: _verdict())):
             return draft_path, verify_draft(draft_path, search_resources=res.as_tuple())
+
+    def _markdown(self, draft_path):
+        with open(draft_path.replace(".txt", "_verification.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def _json(self, draft_path):
+        with open(draft_path.replace(".txt", "_verification.json"), encoding="utf-8") as fh:
+            return json.load(fh)
 
 
 class TestVerifyDraft(VerifyDraftTestCase):
@@ -298,3 +311,269 @@ class TestVerifyDraft(VerifyDraftTestCase):
         # the word "Contradicts" instead would pass trivially — it is also a
         # row label in the summary table at the top.
         self.assertLess(markdown.index("Wrong"), markdown.index("Fine"))
+
+
+class TestModelReplyCannotOverwriteTheRecord(VerifyDraftTestCase):
+    """The record's provenance is the pipeline's, never the model's.
+
+    `_validate` requires the six rubric fields but permits extra top-level
+    keys, so a reply is free to echo `sentence_index`, `claim`, `evidence` or
+    `outcome`. Merging the whole reply let those win, which destroyed exactly
+    the provenance ARCHITECTURE §9.2 leans on to justify re-retrieval — and,
+    when the echoed `sentence_index` was a string, raised TypeError in the
+    Markdown writer after the JSON had already landed.
+    """
+
+    def _polluted(self, judgement="Contradicts"):
+        verdict = _verdict(judgement)
+        verdict.update({
+            "sentence_index": "1",
+            "sentence": "a sentence the model invented",
+            "claim": "a claim the model invented",
+            "evidence": "evidence the model invented",
+            "cite_key": "cite_99",
+            "citation_source": "Nobody 1999",
+            "outcome": "looks_fine_to_me",
+        })
+        return verdict
+
+    def _run_polluted(self):
+        return self._run(
+            "Graphene conducts well \\cite{cite_1}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=lambda c, e, **k: self._polluted(),
+        )
+
+    def test_pipeline_fields_survive_colliding_keys_in_the_reply(self):
+        _, report = self._run_polluted()
+        entry = report["results"][0]
+        self.assertEqual(entry["sentence_index"], 0)
+        self.assertEqual(entry["sentence"], "Graphene conducts well \\cite{cite_1}.")
+        self.assertEqual(entry["claim"], "Graphene conducts well.")
+        self.assertEqual(entry["evidence"], "Graphene is highly conductive.")
+        self.assertEqual(entry["cite_key"], "cite_1")
+        self.assertEqual(entry["citation_source"], "Smith 2020")
+        self.assertEqual(entry["outcome"], "judged")
+
+    def test_the_rubric_fields_still_land(self):
+        """Guarding the record must not drop the verdict it is recording."""
+        _, report = self._run_polluted()
+        entry = report["results"][0]
+        self.assertEqual(entry["judgement"], "Contradicts")
+        self.assertEqual(entry["confidence"], "High")
+        self.assertEqual(entry["evidence_sufficiency"], "sufficient")
+        self.assertEqual(entry["supporting_span"], "span")
+        self.assertEqual(entry["reason"], "because")
+        self.assertEqual(set(entry["slots"]), {"finding", "scope", "strength"})
+
+    def test_an_echoed_outcome_cannot_misbucket_the_totals(self):
+        _, report = self._run_polluted()
+        self.assertEqual(report["totals"]["judged"], 1)
+        self.assertEqual(report["totals"]["Contradicts"], 1)
+        self.assertNotIn("looks_fine_to_me", report["totals"])
+
+    def test_both_artefacts_are_written_and_agree(self):
+        """A string sentence_index used to raise in the Markdown writer after
+        the JSON had already been written — one artefact, silently."""
+        draft_path, report = self._run_polluted()
+        self.assertTrue(os.path.exists(draft_path.replace(".txt", "_verification.md")))
+        on_disk = self._json(draft_path)["results"][0]
+        self.assertEqual(on_disk["sentence_index"], 0)
+        self.assertEqual(on_disk["claim"], "Graphene conducts well.")
+        self.assertIn("Sentence 1", self._markdown(draft_path))
+
+
+class TestRetrievalFailure(VerifyDraftTestCase):
+    """hybrid_search embeds the query — a network call under the hosted
+    embedding backends — so it can raise, and spec §7 says nothing but a
+    missing mapping aborts the run."""
+
+    def _flaky_search(self, claim, *args, **kwargs):
+        if "first" in claim:
+            raise RuntimeError("chroma is unreachable")
+        return [{"text": "evidence", "metadata": {"document": "a.pdf"}}]
+
+    def _run_flaky(self):
+        return self._run(
+            "The first claim \\cite{cite_1}. The second claim \\cite{cite_1}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+            search_side_effect=self._flaky_search,
+        )
+
+    def test_a_raising_search_is_recorded_and_does_not_abort(self):
+        _, report = self._run_flaky()
+        self.assertEqual([r["outcome"] for r in report["results"]],
+                         ["retrieval_failed", "judged"])
+
+    def test_the_exception_type_is_recorded(self):
+        """'RuntimeError: chroma is unreachable' and 'the model replied with
+        garbage' are different bugs; the report has to tell them apart."""
+        _, report = self._run_flaky()
+        entry = report["results"][0]
+        self.assertEqual(entry["error_type"], "RuntimeError")
+        self.assertIn("chroma is unreachable", entry["raw"])
+
+    def test_totals_seed_and_count_the_new_outcome(self):
+        _, report = self._run_flaky()
+        self.assertEqual(report["totals"]["retrieval_failed"], 1)
+
+    def test_totals_seed_retrieval_failed_even_when_none_occurred(self):
+        _, report = self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+        )
+        self.assertEqual(report["totals"]["retrieval_failed"], 0)
+
+    def test_both_artefacts_still_land(self):
+        draft_path, _ = self._run_flaky()
+        self.assertTrue(os.path.exists(draft_path.replace(".txt", "_verification.json")))
+        self.assertTrue(os.path.exists(draft_path.replace(".txt", "_verification.md")))
+
+    def test_the_report_shows_it_in_the_table_and_the_not_judged_section(self):
+        draft_path, _ = self._run_flaky()
+        markdown = self._markdown(draft_path)
+        self.assertIn("| Retrieval failed | 1 |", markdown)
+        self.assertIn("retrieval_failed", markdown.split("## Not judged")[1])
+        self.assertIn("`RuntimeError`", markdown)
+
+
+class TestJudgingCallFailure(VerifyDraftTestCase):
+    """A dead endpoint is not an unusable model reply."""
+
+    def setUp(self):
+        super().setUp()
+        # @retry sleeps a second between attempts; the failure mode under test
+        # is which bucket the exception lands in, not the backoff.
+        patcher = patch("research_assistant.shared.retry.time.sleep")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run_down(self):
+        def endpoint_is_down(claim, evidence, **kwargs):
+            raise ConnectionError("connection refused")
+
+        return self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=endpoint_is_down,
+        )
+
+    def test_a_transport_error_is_call_failed_not_parse_failed(self):
+        _, report = self._run_down()
+        self.assertEqual(report["results"][0]["outcome"], "call_failed")
+        self.assertEqual(report["totals"]["call_failed"], 1)
+        self.assertEqual(report["totals"]["parse_failed"], 0)
+
+    def test_the_exception_type_is_recorded(self):
+        _, report = self._run_down()
+        entry = report["results"][0]
+        self.assertEqual(entry["error_type"], "ConnectionError")
+        self.assertIn("connection refused", entry["raw"])
+
+    def test_a_parse_error_is_still_parse_failed(self):
+        """The split must not reclassify the case it was split away from."""
+        def unusable(claim, evidence, **kwargs):
+            raise JudgementParseError("bad", raw="garbage")
+
+        _, report = self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=unusable,
+        )
+        self.assertEqual(report["results"][0]["outcome"], "parse_failed")
+        self.assertEqual(report["totals"]["call_failed"], 0)
+
+    def test_the_report_shows_it_in_the_table_and_the_not_judged_section(self):
+        draft_path, _ = self._run_down()
+        markdown = self._markdown(draft_path)
+        self.assertIn("| Model call failed | 1 |", markdown)
+        self.assertIn("call_failed", markdown.split("## Not judged")[1])
+        self.assertIn("`ConnectionError`", markdown)
+
+
+class TestReportedModel(VerifyDraftTestCase):
+    """The record must name the model that produced the verdicts.
+
+    judge() passes JUDGEMENT_MODEL to chat(), which falls back to LLM_MODEL —
+    so naming LLM_MODEL unconditionally misattributes every verdict whenever
+    CITATION_JUDGEMENT_MODEL is set, which is precisely when someone is
+    auditing on a model other than the drafting one.
+    """
+
+    def _run_simple(self):
+        return self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+        )
+
+    def test_judgement_model_wins_when_set(self):
+        with patch("research_assistant.agents.agent8_verifier.JUDGEMENT_MODEL",
+                   "auditor-model"):
+            draft_path, report = self._run_simple()
+        self.assertEqual(report["model"], "auditor-model")
+        self.assertIn("auditor-model", self._markdown(draft_path))
+
+    def test_falls_back_to_the_pipeline_model_when_unset(self):
+        from research_assistant.config import LLM_MODEL
+
+        with patch("research_assistant.agents.agent8_verifier.JUDGEMENT_MODEL", None):
+            _, report = self._run_simple()
+        self.assertEqual(report["model"], LLM_MODEL)
+
+
+class TestEvidenceIsQuotedInTheReport(VerifyDraftTestCase):
+    """ARCHITECTURE §9.2 promises the report names the judged chunk."""
+
+    def _run_flagged(self, evidence, supporting_span=None):
+        verdict = _verdict("Does not support")
+        verdict["supporting_span"] = supporting_span
+        return self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": evidence, "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=lambda c, e, **k: verdict,
+        )
+
+    def test_a_flagged_entry_quotes_the_chunk_that_was_judged(self):
+        """'Does not support' is the most actionable verdict and the one where
+        supporting_span is legitimately null — without the chunk the reader
+        gets three assertions and no evidence text at all."""
+        draft_path, _ = self._run_flagged("The chunk\nthat was judged.")
+        markdown = self._markdown(draft_path)
+        self.assertIn("**Evidence judged:**", markdown)
+        # Flattened: a bare '> ' prefix would leave line two outside the quote.
+        self.assertIn("> The chunk that was judged.", markdown)
+
+    def test_long_evidence_is_truncated(self):
+        draft_path, _ = self._run_flagged("x" * 900)
+        markdown = self._markdown(draft_path)
+        self.assertIn("x" * 400 + "…", markdown)
+        self.assertNotIn("x" * 401, markdown)
+
+
+class TestNotJudgedIsFullyAccountedFor(VerifyDraftTestCase):
+    """The UI's 'Not judged' tile is `total - judged`; that number is only
+    honest if every non-judged entry lands in a named bucket."""
+
+    def test_every_outcome_has_a_seeded_bucket(self):
+        _, report = self._run(
+            "A \\cite{cite_1}. B \\cite{cite_9}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+        )
+        totals = report["totals"]
+        buckets = ("orphaned", "unresolved", "no_evidence",
+                   "retrieval_failed", "parse_failed", "call_failed")
+        for name in buckets:
+            self.assertIn(name, totals, f"{name} must be seeded even at zero")
+        self.assertEqual(totals["total"] - totals["judged"],
+                         sum(totals[name] for name in buckets))
