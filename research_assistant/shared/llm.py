@@ -43,7 +43,7 @@ class ChatResult:
 # ─── Chat ────────────────────────────────────────────────────────────────────
 
 
-def chat(messages, model=None, images=None) -> ChatResult:
+def chat(messages, model=None, images=None, temperature=None, options=None) -> ChatResult:
     """Run a chat completion.
 
     Args:
@@ -51,22 +51,36 @@ def chat(messages, model=None, images=None) -> ChatResult:
         model:    model id; defaults to config.LLM_MODEL.
         images:   optional list of local image paths for a vision request
                   (attached to the last user message).
+        temperature: sampling temperature. None leaves the provider's own
+                  default in place, so existing callers are unaffected.
+        options:  ollama runtime options (e.g. JUDGEMENT_OLLAMA_OPTIONS).
+                  The openai backend has no equivalent and ignores it.
     """
     model = model or LLM_MODEL
     if LLM_BACKEND == "openai":
-        return _openai_chat(messages, model, images)
+        return _openai_chat(messages, model, images, temperature)
     if LLM_BACKEND == "ollama":
-        return _ollama_chat(messages, model, images)
+        return _ollama_chat(messages, model, images, temperature, options)
     raise ValueError(f"Unknown LLM_BACKEND {LLM_BACKEND!r} (expected 'ollama' or 'openai')")
 
 
-def _ollama_chat(messages, model, images) -> ChatResult:
+def _ollama_chat(messages, model, images, temperature=None, options=None) -> ChatResult:
     import ollama
 
     if images:
         messages = list(messages)
         messages[-1] = {**messages[-1], "images": list(images)}
-    resp = ollama.chat(model=model, messages=messages, stream=False)
+
+    # Copied, not mutated: callers pass a module-level config dict.
+    opts = dict(options) if options else {}
+    if temperature is not None:
+        opts["temperature"] = temperature
+
+    kwargs = {"model": model, "messages": messages, "stream": False}
+    if opts:
+        kwargs["options"] = opts
+
+    resp = ollama.chat(**kwargs)
     try:
         content = resp.message.content
     except AttributeError:
@@ -87,7 +101,7 @@ def _b64_data_url(path):
         return f"data:{mime};base64,{base64.b64encode(fh.read()).decode()}"
 
 
-def _openai_chat(messages, model, images) -> ChatResult:
+def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
     from openai import OpenAI
 
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
@@ -101,7 +115,11 @@ def _openai_chat(messages, model, images) -> ChatResult:
         ]
         messages[-1] = {**last, "content": parts}
 
-    resp = client.chat.completions.create(model=model, messages=messages, stream=False)
+    kwargs = {"model": model, "messages": messages, "stream": False}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    resp = client.chat.completions.create(**kwargs)
     usage = getattr(resp, "usage", None)
     return ChatResult(
         content=resp.choices[0].message.content,

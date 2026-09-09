@@ -89,5 +89,73 @@ class TestUnknownBackend(unittest.TestCase):
                 llm.chat_stream([{"role": "user", "content": "hi"}])
 
 
+def _openai_reply(text):
+    msg = types.SimpleNamespace(content=text)
+    return types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg)],
+        usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+
+
+def _ollama_reply(text):
+    return types.SimpleNamespace(
+        message=types.SimpleNamespace(content=text),
+        prompt_eval_count=1,
+        eval_count=1,
+    )
+
+
+class TestChatTemperatureOpenAI(unittest.TestCase):
+    def _run(self, **kwargs):
+        client = MagicMock()
+        client.chat.completions.create.return_value = _openai_reply("ok")
+        module = types.SimpleNamespace(OpenAI=MagicMock(return_value=client))
+        with patch.dict("sys.modules", {"openai": module}), \
+             patch.object(llm, "LLM_BACKEND", "openai"):
+            llm.chat([{"role": "user", "content": "hi"}], **kwargs)
+        return client.chat.completions.create.call_args.kwargs
+
+    def test_temperature_absent_when_not_given(self):
+        """The default call must stay byte-for-byte what it is today."""
+        self.assertNotIn("temperature", self._run())
+
+    def test_temperature_forwarded(self):
+        self.assertEqual(self._run(temperature=0.0)["temperature"], 0.0)
+
+    def test_options_are_ignored_by_openai(self):
+        """ollama runtime options have no OpenAI equivalent."""
+        self.assertNotIn("options", self._run(options={"num_ctx": 8192}))
+
+
+class TestChatTemperatureOllama(unittest.TestCase):
+    def _run(self, **kwargs):
+        fake = MagicMock()
+        fake.chat.return_value = _ollama_reply("ok")
+        with patch.dict("sys.modules", {"ollama": fake}), \
+             patch.object(llm, "LLM_BACKEND", "ollama"):
+            llm.chat([{"role": "user", "content": "hi"}], **kwargs)
+        return fake.chat.call_args.kwargs
+
+    def test_options_absent_when_not_given(self):
+        self.assertNotIn("options", self._run())
+
+    def test_temperature_lands_inside_options(self):
+        self.assertEqual(self._run(temperature=0.0)["options"], {"temperature": 0.0})
+
+    def test_options_and_temperature_merge(self):
+        merged = self._run(temperature=0.0, options={"num_ctx": 8192})["options"]
+        self.assertEqual(merged, {"num_ctx": 8192, "temperature": 0.0})
+
+    def test_caller_options_dict_is_not_mutated(self):
+        """A module-level config constant must not grow a temperature key."""
+        opts = {"num_ctx": 8192}
+        fake = MagicMock()
+        fake.chat.return_value = _ollama_reply("ok")
+        with patch.dict("sys.modules", {"ollama": fake}), \
+             patch.object(llm, "LLM_BACKEND", "ollama"):
+            llm.chat([{"role": "user", "content": "hi"}], temperature=0.0, options=opts)
+        self.assertEqual(opts, {"num_ctx": 8192})
+
+
 if __name__ == "__main__":
     unittest.main()
