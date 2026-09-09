@@ -138,3 +138,163 @@ class TestCitationPairs(unittest.TestCase):
 
     def test_no_citations_yields_nothing(self):
         self.assertEqual(citation_pairs(["Plain text."], {"cite_1": "Smith 2020"}), [])
+
+
+import json
+import os
+import tempfile
+from unittest.mock import patch
+
+from research_assistant.agents.agent8_verifier import verify_draft
+from research_assistant.judgement.judge import JudgementParseError
+
+
+def _verdict(judgement="Supports"):
+    return {
+        "slots": {
+            "finding": {"assertion": "a", "verdict": "Supports"},
+            "scope": {"assertion": "b", "verdict": "Supports"},
+            "strength": {"assertion": "c", "verdict": "Not applicable"},
+        },
+        "judgement": judgement,
+        "evidence_sufficiency": "sufficient",
+        "confidence": "High",
+        "supporting_span": "span",
+        "reason": "because",
+    }
+
+
+class _Resources:
+    """The (collection, bm25, texts, metadatas) tuple load_search_resources returns."""
+
+    def __init__(self, rows, hits):
+        self.collection = FakeCollection(rows)
+        self.hits = hits
+
+    def as_tuple(self):
+        return (self.collection, None, [], [])
+
+
+class VerifyDraftTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, draft, mapping):
+        draft_path = os.path.join(self.tmp.name, "cited_draft.txt")
+        with open(draft_path, "w", encoding="utf-8") as fh:
+            fh.write(draft)
+        with open(os.path.join(self.tmp.name, "cited_draft_citations.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump(mapping, fh)
+        return draft_path
+
+    def _run(self, draft, mapping, rows, hits, judge_side_effect=None):
+        draft_path = self._write(draft, mapping)
+        res = _Resources(rows, hits)
+        with patch("research_assistant.agents.agent8_verifier.hybrid_search",
+                   return_value=hits), \
+             patch("research_assistant.agents.agent8_verifier.judge",
+                   side_effect=judge_side_effect or (lambda c, e, **k: _verdict())):
+            return draft_path, verify_draft(draft_path, search_resources=res.as_tuple())
+
+
+class TestVerifyDraft(VerifyDraftTestCase):
+    def test_happy_path_judges_the_citation(self):
+        _, report = self._run(
+            "Graphene conducts well \\cite{cite_1}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}}],
+        )
+        self.assertEqual(len(report["results"]), 1)
+        entry = report["results"][0]
+        self.assertEqual(entry["outcome"], "judged")
+        self.assertEqual(entry["judgement"], "Supports")
+        self.assertEqual(entry["evidence"], "Graphene is highly conductive.")
+
+    def test_missing_citations_file_raises(self):
+        draft_path = os.path.join(self.tmp.name, "cited_draft.txt")
+        with open(draft_path, "w", encoding="utf-8") as fh:
+            fh.write("Text \\cite{cite_1}.")
+        with self.assertRaises(FileNotFoundError):
+            verify_draft(draft_path, search_resources=(FakeCollection([]), None, [], []))
+
+    def test_orphaned_key_is_not_judged(self):
+        _, report = self._run(
+            "Invented \\cite{cite_9}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")], [],
+        )
+        self.assertEqual(report["results"][0]["outcome"], "orphaned")
+        self.assertEqual(report["totals"]["orphaned"], 1)
+
+    def test_source_with_no_documents_is_unresolved(self):
+        _, report = self._run(
+            "Claim \\cite{cite_1}.", {"Ghost 1999": "cite_1"}, [], [],
+        )
+        self.assertEqual(report["results"][0]["outcome"], "unresolved")
+
+    def test_empty_retrieval_is_no_evidence(self):
+        _, report = self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")], [],
+        )
+        self.assertEqual(report["results"][0]["outcome"], "no_evidence")
+
+    def test_parse_failure_is_recorded_and_does_not_abort(self):
+        """One malformed reply must not cost a 120-citation run."""
+        calls = {"n": 0}
+
+        def flaky(claim, evidence, **kwargs):
+            calls["n"] += 1
+            if "first" in claim:
+                raise JudgementParseError("bad", raw="garbage")
+            return _verdict()
+
+        _, report = self._run(
+            "The first claim \\cite{cite_1}. The second claim \\cite{cite_1}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=flaky,
+        )
+        outcomes = [r["outcome"] for r in report["results"]]
+        self.assertEqual(outcomes, ["parse_failed", "judged"])
+        self.assertEqual(report["results"][0]["raw"], "garbage")
+
+    def test_both_output_files_are_written(self):
+        draft_path, _ = self._run(
+            "Claim \\cite{cite_1}.", {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+        )
+        base = draft_path.replace(".txt", "")
+        self.assertTrue(os.path.exists(base + "_verification.json"))
+        self.assertTrue(os.path.exists(base + "_verification.md"))
+
+    def test_totals_count_every_category(self):
+        _, report = self._run(
+            "A \\cite{cite_1}. B \\cite{cite_9}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+        )
+        self.assertEqual(report["totals"]["judged"], 1)
+        self.assertEqual(report["totals"]["orphaned"], 1)
+        self.assertEqual(report["totals"]["total"], 2)
+
+    def test_report_lists_worst_verdicts_first(self):
+        verdicts = iter([_verdict("Supports"), _verdict("Contradicts")])
+        draft_path, _ = self._run(
+            "Fine \\cite{cite_1}. Wrong \\cite{cite_2}.",
+            {"Smith 2020": "cite_1", "Jones 2019": "cite_2"},
+            [("Smith 2020", "a.pdf"), ("Jones 2019", "b.pdf")],
+            [{"text": "evidence", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=lambda c, e, **k: next(verdicts),
+        )
+        markdown = open(draft_path.replace(".txt", "_verification.md"),
+                        encoding="utf-8").read()
+        # The flagged sentence must appear before the clean one. Asserting on
+        # the word "Contradicts" instead would pass trivially — it is also a
+        # row label in the summary table at the top.
+        self.assertLess(markdown.index("Wrong"), markdown.index("Fine"))

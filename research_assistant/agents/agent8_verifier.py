@@ -18,13 +18,22 @@ it?", which fails in the safe direction: it cannot manufacture support the
 source does not contain.
 """
 
+import argparse
+import json
+import os
 import re
+from datetime import datetime
 
 from research_assistant.agents.agent5_batch_citer import (
     _cite_keys,
     split_into_sentences,
 )
+from research_assistant.config import JUDGEMENT_TOP_K, LLM_BACKEND, LLM_MODEL
+from research_assistant.judgement.judge import JudgementParseError, judge
+from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.retry import retry
+from research_assistant.shared.search import hybrid_search
 
 logger = get_logger("agent8")
 
@@ -104,3 +113,279 @@ def citation_pairs(sentences: list, key_to_source: dict) -> list:
                 "outcome": None if source else "orphaned",
             })
     return pairs
+
+
+# Worst first: the reader is looking for citations to fix, and a report that
+# opens with 90 lines of "Supports" buries them.
+_SEVERITY = {
+    "Contradicts": 0,
+    "Does not support": 1,
+    "Unclear / insufficient evidence": 2,
+    "Partially supports": 3,
+    "Supports": 4,
+}
+
+# Two attempts: shared.retry counts attempts, not retries.
+_JUDGE_ATTEMPTS = 2
+
+
+@retry(max_retries=_JUDGE_ATTEMPTS, backoff=1.0)
+def _judge_once(claim, evidence):
+    return judge(claim, evidence)
+
+
+def _warn_if_context_is_tight():
+    """A local model with a small context truncates the prompt silently."""
+    if LLM_BACKEND != "ollama":
+        return
+    from research_assistant.config import JUDGEMENT_OLLAMA_OPTIONS
+    from research_assistant.judgement.judge import PROMPT_TEMPLATE
+
+    approx_tokens = len(PROMPT_TEMPLATE) // 4
+    logger.warning(
+        "Judging with local model %s. The prompt alone is ~%d tokens and "
+        "num_ctx is set to %s — if the model cannot honour that, Ollama "
+        "truncates the prompt tail (where the worked examples are) without "
+        "raising, and verdicts degrade silently.",
+        LLM_MODEL, approx_tokens, JUDGEMENT_OLLAMA_OPTIONS.get("num_ctx"),
+    )
+
+
+def verify_draft(draft_path, citations_path=None, top_k=None,
+                 search_resources=None) -> dict:
+    """Judge every citation in *draft_path* against its cited source.
+
+    Writes ``<draft>_verification.json`` and ``<draft>_verification.md``
+    alongside the draft, matching agent 5's output naming.
+
+    Returns:
+        dict: the same record written to the JSON file.
+    """
+    if citations_path is None:
+        citations_path = draft_path.replace(".txt", "_citations.json")
+
+    if not os.path.exists(citations_path):
+        raise FileNotFoundError(
+            f"No citation mapping at {citations_path}. Agent 8 needs it to "
+            "resolve \\cite keys back to sources — run Agent 5 first."
+        )
+
+    with open(draft_path, encoding="utf-8") as fh:
+        draft_text = fh.read()
+    with open(citations_path, encoding="utf-8") as fh:
+        mapping = json.load(fh)
+
+    if search_resources is None:
+        from research_assistant.shared.db import load_search_resources
+        search_resources = load_search_resources()
+    collection, bm25, texts, metadatas = search_resources
+
+    top_k = top_k or JUDGEMENT_TOP_K
+    sentences = split_into_sentences(draft_text)
+    pairs = citation_pairs(sentences, invert_citation_mapping(mapping))
+
+    if pairs:
+        logger.info(
+            "Verifying %d citation(s) across %d sentence(s) — one model call each.",
+            len(pairs), len(sentences),
+        )
+        _warn_if_context_is_tight()
+
+    doc_cache = {}
+    results = []
+
+    for i, pair in enumerate(pairs, 1):
+        entry = dict(pair)
+        logger.info("[%d/%d] %s", i, len(pairs), entry["claim"][:80])
+
+        if entry["outcome"] == "orphaned":
+            logger.info(" -> key %s is not in the mapping.", entry["cite_key"])
+            results.append(entry)
+            continue
+
+        documents = resolve_documents(collection, entry["citation_source"], doc_cache)
+        if not documents:
+            entry["outcome"] = "unresolved"
+            logger.info(" -> source resolves to no documents in the corpus.")
+            results.append(entry)
+            continue
+
+        hits = hybrid_search(
+            entry["claim"], collection, bm25, texts, metadatas,
+            top_k=top_k, doc_filter=documents,
+        )
+        if not hits:
+            entry["outcome"] = "no_evidence"
+            logger.info(" -> nothing retrieved from that source for this claim.")
+            results.append(entry)
+            continue
+
+        entry["evidence"] = hits[0]["text"]
+        try:
+            verdict = _judge_once(entry["claim"], entry["evidence"])
+        except JudgementParseError as exc:
+            entry["outcome"] = "parse_failed"
+            entry["raw"] = exc.raw
+            logger.warning(" -> unusable reply after %d attempts.", _JUDGE_ATTEMPTS)
+            results.append(entry)
+            continue
+        except Exception as exc:
+            entry["outcome"] = "parse_failed"
+            entry["raw"] = str(exc)
+            logger.warning(" -> judging failed: %s", exc)
+            results.append(entry)
+            continue
+
+        entry["outcome"] = "judged"
+        entry.update(verdict)
+        logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
+        results.append(entry)
+
+    report = {
+        "draft": os.path.abspath(draft_path),
+        "citations": os.path.abspath(citations_path),
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "model": LLM_MODEL,
+        "top_k": top_k,
+        "results": results,
+        "totals": _totals(results),
+    }
+
+    json_path = draft_path.replace(".txt", "_verification.json")
+    atomic_write_json(json_path, report)
+    logger.info("Saved verification record to %s", json_path)
+
+    md_path = draft_path.replace(".txt", "_verification.md")
+    _write_markdown(md_path, report)
+    logger.info("Saved verification report to %s", md_path)
+
+    return report
+
+
+def _totals(results) -> dict:
+    totals = {
+        "total": len(results),
+        "judged": 0, "orphaned": 0, "unresolved": 0,
+        "no_evidence": 0, "parse_failed": 0,
+    }
+    for judgement in _SEVERITY:
+        totals[judgement] = 0
+    for entry in results:
+        totals[entry["outcome"]] = totals.get(entry["outcome"], 0) + 1
+        if entry["outcome"] == "judged":
+            totals[entry["judgement"]] = totals.get(entry["judgement"], 0) + 1
+    return totals
+
+
+def _write_markdown(path, report) -> None:
+    totals = report["totals"]
+    lines = [
+        f"# Verification Report — `{os.path.basename(report['draft'])}`",
+        f"*Generated {report['generated']} · model `{report['model']}`*\n",
+        "## Summary\n",
+        "| Outcome | Count |",
+        "|---------|-------|",
+        f"| Citations checked | {totals['total']} |",
+        f"| Judged | {totals['judged']} |",
+        f"| **Contradicts** | **{totals.get('Contradicts', 0)}** |",
+        f"| **Does not support** | **{totals.get('Does not support', 0)}** |",
+        f"| Unclear / insufficient evidence | {totals.get('Unclear / insufficient evidence', 0)} |",
+        f"| Partially supports | {totals.get('Partially supports', 0)} |",
+        f"| Supports | {totals.get('Supports', 0)} |",
+        f"| Key not in mapping | {totals['orphaned']} |",
+        f"| Source not in corpus | {totals['unresolved']} |",
+        f"| No evidence retrieved | {totals['no_evidence']} |",
+        f"| Unusable model reply | {totals['parse_failed']} |",
+        "",
+        "---\n",
+    ]
+
+    judged = [e for e in report["results"] if e["outcome"] == "judged"]
+    other = [e for e in report["results"] if e["outcome"] != "judged"]
+    judged.sort(key=lambda e: (_SEVERITY.get(e["judgement"], 9), e["sentence_index"]))
+
+    flagged = [e for e in judged if e["judgement"] != "Supports"]
+    clean = [e for e in judged if e["judgement"] == "Supports"]
+
+    if flagged:
+        lines.append("## Citations to review\n")
+        for entry in flagged:
+            lines.extend(_entry_block(entry))
+
+    if other:
+        lines.append("## Not judged\n")
+        for entry in other:
+            lines.append(f"### Sentence {entry['sentence_index'] + 1} — {entry['outcome']}\n")
+            lines.append(f"> {entry['sentence']}\n")
+            lines.append(f"Key `{entry['cite_key']}`"
+                         + (f" → {entry['citation_source']}" if entry["citation_source"] else "")
+                         + "\n")
+            if entry.get("raw"):
+                lines.append("<details><summary>Raw reply</summary>\n")
+                lines.append(f"```\n{entry['raw'][:2000]}\n```\n")
+                lines.append("</details>\n")
+            lines.append("---\n")
+
+    if clean:
+        lines.append("## Verified\n")
+        for entry in clean:
+            lines.append(
+                f"- Sentence {entry['sentence_index'] + 1} — `{entry['cite_key']}` "
+                f"({entry['confidence']} confidence, evidence "
+                f"{entry['evidence_sufficiency']}): {entry['sentence']}"
+            )
+        lines.append("")
+
+    with atomic_write(path) as fh:
+        fh.write("\n".join(lines))
+
+
+def _entry_block(entry) -> list:
+    slots = entry.get("slots", {})
+    block = [
+        f"### Sentence {entry['sentence_index'] + 1} — {entry['judgement']}\n",
+        f"> {entry['sentence']}\n",
+        f"**Cited source:** {entry['citation_source']} (`{entry['cite_key']}`)\n",
+        f"**Confidence:** {entry['confidence']} · "
+        f"**Evidence sufficiency:** {entry['evidence_sufficiency']}\n",
+        "| Slot | Assertion | Verdict |",
+        "|------|-----------|---------|",
+    ]
+    for name in ("finding", "scope", "strength"):
+        slot = slots.get(name, {})
+        block.append(
+            f"| `{name}` | {slot.get('assertion', '—')} | {slot.get('verdict', '—')} |"
+        )
+    block.append("")
+    if entry.get("supporting_span"):
+        block.append(f"**Supporting span:**\n> {entry['supporting_span']}\n")
+    block.append(f"**Reason:** {entry['reason']}\n")
+    block.append("---\n")
+    return block
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Agent 8 — verify the citations in an already-cited draft."
+    )
+    parser.add_argument("--draft", required=True, help="Path to the cited draft (.txt).")
+    parser.add_argument("--citations", default=None,
+                        help="Path to _citations.json. Defaults to the draft's sibling.")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help=f"Chunks judged per source (default {JUDGEMENT_TOP_K}).")
+    args = parser.parse_args()
+
+    report = verify_draft(args.draft, args.citations, args.top_k)
+    totals = report["totals"]
+    flagged = sum(
+        totals.get(j, 0)
+        for j in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
+    )
+    logger.info(
+        "Checked %d citation(s): %d judged, %d need review.",
+        totals["total"], totals["judged"], flagged,
+    )
+
+
+if __name__ == "__main__":
+    main()
