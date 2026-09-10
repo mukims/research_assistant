@@ -1,0 +1,83 @@
+# Multi-stage standalone all-in-one image:
+# Includes Ollama (with baked gemma4:e2b + nomic-embed-text), GROBID (Java 17), and Streamlit app.
+
+# Stage 1: Extract GROBID and OpenJDK 17
+FROM lfoppiano/grobid:0.8.1 AS grobid-stage
+
+# Stage 2: Extract Ollama binaries
+FROM ollama/ollama:latest AS ollama-stage
+
+# Stage 3: Final runtime
+FROM python:3.12-slim
+
+# Install system dependencies: curl, tini, procps, build-essential, plus libfontconfig1/libxml2 for pdfalto and poppler-utils for pdftotext
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        tini \
+        procps \
+        build-essential \
+        libfontconfig1 \
+        libxml2 \
+        poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy OpenJDK 17 and GROBID from grobid-stage
+COPY --from=grobid-stage /usr/local/openjdk-17 /usr/local/openjdk-17
+COPY --from=grobid-stage /opt/grobid /opt/grobid
+
+# Copy Ollama binary and CPU/GPU runners from ollama-stage
+COPY --from=ollama-stage /usr/bin/ollama /usr/bin/ollama
+COPY --from=ollama-stage /usr/lib/ollama /usr/lib/ollama
+
+# Set up environment for Java, Ollama, and GROBID
+ENV JAVA_HOME=/usr/local/openjdk-17 \
+    PATH=/usr/local/openjdk-17/bin:$PATH \
+    OLLAMA_MODELS=/opt/ollama/models \
+    OLLAMA_HOST=http://127.0.0.1:11434 \
+    GROBID_SERVER=http://127.0.0.1:8070 \
+    GROBID_SERVICE_OPTS="-Djava.library.path=grobid-home/lib/lin-64:grobid-home/lib/lin-64/jep --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED"
+
+# Copy pre-baked models (manifests + blobs)
+COPY models /opt/ollama/models
+
+# Optimization: tune GROBID config for faster boot (preload off so it starts in seconds)
+RUN sed -i 's/modelPreload: true/modelPreload: false/' /opt/grobid/grobid-home/config/grobid.yaml
+
+# Set up application directory
+WORKDIR /home/user/app
+
+# Install Python requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code selectively (avoid copying the 7GB models directory)
+COPY app.py watch.py orchestrate.py publaynet_config.yaml pyproject.toml README.md ./
+COPY research_assistant ./research_assistant
+
+# Editable install so research_assistant package resolves everywhere
+RUN pip install --no-cache-dir -e .
+
+# Create data directory for vector DB, drafts, and uploaded PDFs
+ENV CITATION_DATA_DIR=/home/user/data \
+    CITATION_LAYOUT_DETECTION=0 \
+    CITATION_LOG_FILE=0 \
+    LLM_BACKEND=ollama \
+    CITATION_EMBED_BACKEND=ollama \
+    CITATION_LLM_MODEL=gemma4:e2b \
+    CITATION_CHAT_MODEL=gemma4:e2b \
+    CITATION_EMBED_MODEL=nomic-embed-text \
+    PORT=8080
+
+RUN mkdir -p /home/user/data
+
+# Copy entrypoint
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose Streamlit web UI
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
+    CMD curl -f "http://localhost:${PORT:-8080}/_stcore/health" || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

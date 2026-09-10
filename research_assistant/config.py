@@ -56,8 +56,8 @@ HF_TOKEN        = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
 # backend, e.g. CITATION_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct.
 # (gemma4:latest is not a published Ollama tag — the registry 404s on it —
 #  gemma4:e2b is the variant that actually pulls.)
-LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", "gemma4:31b-cloud")
-CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", "gemma4:e2b-mlx")
+LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", "gemma4:e2b")
+CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", "gemma4:e2b")
 EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
 
 # ─── Chat Model Runtime Options ──────────────────────────────────────────────
