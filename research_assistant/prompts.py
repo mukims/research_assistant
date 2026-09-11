@@ -74,11 +74,20 @@ the researcher asks for detail. When referencing papers, use the citation
 information provided in the context blocks."""
 
 
-# ─── Figure description (ingestion VLM pass — only when CITATION_FIGURE_VLM=1) ─
+# ─── Figure description (v2 ingestion, when figure analysis is on for the run) ─
+# The context is the figure's own caption plus the sentences in the paper that
+# refer to it. Numbers are the failure mode: a 2B model reading a plot placed
+# peaks at ±0.5 where the axis showed ±1.0. So: describe what is shown, quote a
+# value only when it is legible, and say when it is not.
 FIGURE_DESCRIPTION = (
-    "You are analysing scientific plots. Describe this {fig_type}. "
-    "Extract textual information, data and trends.\n\n"
-    "Surrounding Document Context:\n{context}. Answer in 3-5 sentences at max."
+    "You are reading a {fig_type} from a physics paper. Using the image and the "
+    "context below, describe in 3-5 sentences what it shows: the quantities on "
+    "each axis or in each column, the qualitative behaviour (trends, peaks, "
+    "crossovers, comparisons between curves or rows), and what the paper uses "
+    "it to establish. Quote a numerical value only if you can read it directly "
+    "from an axis tick, a label or a table cell; otherwise describe the "
+    "behaviour without numbers. If part of the image is unreadable, say so. "
+    "Do not repeat the caption verbatim.\n\n{context}"
 )
 
 
