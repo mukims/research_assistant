@@ -557,6 +557,7 @@ with tab_build:
     submitted = False
     ask = True
     force = False
+    describe_figures = config.FIGURE_VLM
 
     if source_type == "📄 Upload research paper(s) (PDF or ZIP)":
         with st.form("upload_papers_form"):
@@ -571,9 +572,16 @@ with tab_build:
                 placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
                 help="If provided, used to synthesize an answer across the papers at the end.",
             )
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             ask = c1.toggle("Answer my query at the end", value=True)
             force = c2.toggle("Force re-run every stage", value=False)
+            describe_figures = c3.toggle(
+                "Analyse figures and tables with the model",
+                value=config.FIGURE_VLM,
+                help="One choice for this whole run: every figure and table in every paper "
+                     "is described by the model and the description joins the corpus. "
+                     "Adds roughly a minute per figure on CPU.",
+            )
             submitted = st.form_submit_button("Process and Index Paper(s)", type="primary")
 
         if submitted:
@@ -604,9 +612,10 @@ with tab_build:
                             st.write(f"📄 Found: **{title_lbl}** (`{p.get('filename', os.path.basename(p['path']))}`)")
 
                         st.write("⚙️ Parsing text chunks, computing embeddings, and building vector index…")
-                        from research_assistant.shared.ingestion import ingest_pdfs
-
-                        ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force)
+                        ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force,
+                                                 describe_figures=describe_figures)
+                        if ingest_res.get("described"):
+                            st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
                         scanned_empty = ingest_res.get("scanned_or_empty", [])
                         inserted = ingest_res.get("inserted", 0)
                         processed = ingest_res.get("processed", len(candidates))
@@ -696,9 +705,16 @@ with tab_build:
                 help="Used when the search finds no open-access PDF. "
                      "Accepts an arXiv link or a direct .pdf URL.",
             )
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             ask = c1.toggle("Answer my query at the end", value=True)
             force = c2.toggle("Force re-run every stage", value=False)
+            describe_figures = c3.toggle(
+                "Analyse figures and tables with the model",
+                value=config.FIGURE_VLM,
+                help="One choice for this whole run: every figure and table in every paper "
+                     "is described by the model and the description joins the corpus. "
+                     "Adds roughly a minute per figure on CPU.",
+            )
             submitted = st.form_submit_button("Build corpus", type="primary")
 
         if submitted:
@@ -721,6 +737,7 @@ with tab_build:
             "ask": ask,
             "seed_url": seed_url_val,
             "seed_file": seed_file_path,
+            "describe_figures": describe_figures,
         }
 
         # Filled progressively as nodes complete, so the seed + downloads show

@@ -214,5 +214,29 @@ class TestUploadStaging(unittest.TestCase):
             self.assertEqual(fh.read(), b"%PDF-1.4 first")
 
 
+class TestDescribeFiguresFlowsToIngest(unittest.TestCase):
+    def test_ingest_seed_passes_the_switch(self):
+        import orchestrate
+        seen = {}
+        with patch.object(orchestrate, "ingest_pdfs", lambda pdfs, **kw: seen.update(kw) or {}):
+            orchestrate.ingest_seed({"seed_path": "/x/a.pdf", "seed_label": "A", "workers": 1,
+                                     "force": False, "describe_figures": True})
+        self.assertTrue(seen["describe_figures"])
+
+    def test_ingest_refs_passes_the_switch(self):
+        import orchestrate
+        seen = {}
+        with patch.object(orchestrate.agent3_ingestor, "run_ingestor", lambda **kw: seen.update(kw)):
+            orchestrate.ingest_refs({"workers": 2, "force": False, "describe_figures": False})
+        self.assertEqual(seen, {"workers": 2, "force": False, "describe_figures": False})
+
+    def test_absent_key_means_none_so_config_decides(self):
+        import orchestrate
+        seen = {}
+        with patch.object(orchestrate, "ingest_pdfs", lambda pdfs, **kw: seen.update(kw) or {}):
+            orchestrate.ingest_seed({"seed_path": "/x/a.pdf", "seed_label": "A"})
+        self.assertIsNone(seen["describe_figures"])
+
+
 if __name__ == "__main__":
     unittest.main()

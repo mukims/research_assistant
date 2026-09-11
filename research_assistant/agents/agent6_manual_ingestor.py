@@ -42,7 +42,12 @@ logger = get_logger("agent6")
 # ─── Core Ingestion Logic ──────────────────────────────────────────────────────
 
 
-def ingest_manual_pdf(pdf_path: str, citation_string: str | None = None, workers: int = 1):
+def ingest_manual_pdf(
+    pdf_path: str,
+    citation_string: str | None = None,
+    workers: int = 1,
+    describe_figures: bool | None = None,
+):
     """
     Ingest a single manually placed PDF into the ChromaDB vector database.
 
@@ -57,6 +62,7 @@ def ingest_manual_pdf(pdf_path: str, citation_string: str | None = None, workers
                          If None, the PDF filename (without extension) is used.
         workers:         Worker processes for the parsing stage (single file, so
                          this is only useful if the file is very large).
+        describe_figures: v2 — analyse every figure and table with the model for this run (None → config).
 
     Returns:
         dict: The result summary from :func:`shared.ingestion.ingest_pdfs`.
@@ -65,7 +71,7 @@ def ingest_manual_pdf(pdf_path: str, citation_string: str | None = None, workers
         citation_string = os.path.splitext(os.path.basename(pdf_path))[0]
 
     logger.info("Ingesting %s (citation label: '%s')", pdf_path, citation_string)
-    return ingest_pdfs({pdf_path: citation_string}, workers=workers)
+    return ingest_pdfs({pdf_path: citation_string}, workers=workers, describe_figures=describe_figures)
 
 
 # ─── Watchdog Handler ─────────────────────────────────────────────────────────
@@ -125,10 +131,17 @@ def main():
         default=None,
         help="Optional citation label for --once mode. Defaults to the PDF filename.",
     )
+    parser.add_argument(
+        "--describe-figures",
+        action="store_true",
+        default=None,
+        help="Index v2: describe every figure and table with the model during this run "
+             "(one choice for the whole run; ~1 minute per figure on CPU). Default: CITATION_FIGURE_VLM.",
+    )
     args = parser.parse_args()
 
     if args.once:
-        ingest_manual_pdf(args.once, citation_string=args.citation)
+        ingest_manual_pdf(args.once, citation_string=args.citation, describe_figures=args.describe_figures)
         return
 
     os.makedirs(PULLED_PDFS_DIR, exist_ok=True)

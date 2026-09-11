@@ -74,6 +74,8 @@ class PipelineState(_Inputs, total=False):
     extraction: Optional[dict]
     answer: Optional[dict]
     stopped: Optional[str]   # reason the run ended early, if it did
+    # v2: the run's figure-analysis switch. None → config.FIGURE_VLM.
+    describe_figures: Optional[bool]
 
 
 def _banner(title: str) -> None:
@@ -131,6 +133,7 @@ def ingest_seed(state: PipelineState) -> dict:
         {state["seed_path"]: state["seed_label"]},
         workers=state.get("workers", 1),
         skip_ingested=not state.get("force", False),
+        describe_figures=state.get("describe_figures"),
     )
     return {}
 
@@ -159,7 +162,8 @@ def fetch(state: PipelineState) -> dict:
 def ingest_refs(state: PipelineState) -> dict:
     _banner("ingest_refs — ingesting the reference PDFs (Agent 3)")
     agent3_ingestor.run_ingestor(
-        workers=state.get("workers", 1), force=state.get("force", False)
+        workers=state.get("workers", 1), force=state.get("force", False),
+        describe_figures=state.get("describe_figures"),
     )
     return {}
 
@@ -239,6 +243,7 @@ def run(
     ask: bool = False,
     seed_url: str | None = None,
     seed_file: str | None = None,
+    describe_figures: bool | None = None,
 ) -> int:
     app = build_graph()
     thread_key = query or (os.path.abspath(seed_file) if seed_file else "") or (seed_url or "") or "run"
@@ -254,6 +259,7 @@ def run(
             "ask": ask,
             "seed_url": seed_url,
             "seed_file": seed_file,
+            "describe_figures": describe_figures,
         },
         config=config,
         stream_mode="values",
@@ -306,6 +312,10 @@ def main():
         "--seed-file",
         help="Seed directly from a local PDF file instead of searching.",
     )
+    parser.add_argument(
+        "--describe-figures", action="store_true", default=None,
+        help="Index v2: analyse every figure and table with the model during this run.",
+    )
     args = parser.parse_args()
 
     if not args.query and not args.seed_file and not args.seed_url:
@@ -314,6 +324,7 @@ def main():
     raise SystemExit(run(
         args.query, workers=args.workers, force=args.force, ask=args.ask,
         seed_url=args.seed_url, seed_file=args.seed_file,
+        describe_figures=args.describe_figures,
     ))
 
 
