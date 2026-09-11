@@ -66,11 +66,18 @@ CHAT_OLLAMA_OPTIONS = {
 }
 
 
+# ─── Index version ───────────────────────────────────────────────────────────
+# Every on-disk name the index uses is derived from this, so a v2 index (new
+# extractor, new chunker, prefixed embeddings) lives beside v1 and never
+# opens a v1 file for writing. Default 1: nothing changes until set.
+INDEX_VERSION = _env_int("CITATION_INDEX_VERSION", 1)
+_INDEX_SUFFIX = "" if INDEX_VERSION == 1 else f"_v{INDEX_VERSION}"
+
 # ─── Vector Database ──────────────────────────────────────────────────────────
 VECTORDB_PATH    = os.path.join(DATA_DIR, "physics_vectordb")
-COLLECTION_NAME  = "physics_papers"       # detail chunks (stage-2 retrieval)
-SUMMARY_COLLECTION_NAME = "physics_summaries"   # one summary per document (stage 1)
-BM25_INDEX_PATH  = os.path.join(DATA_DIR, "bm25_index.pkl")
+COLLECTION_NAME  = f"physics_papers{_INDEX_SUFFIX}"       # detail chunks (stage-2 retrieval)
+SUMMARY_COLLECTION_NAME = f"physics_summaries{_INDEX_SUFFIX}"   # one summary per document (stage 1)
+BM25_INDEX_PATH  = os.path.join(DATA_DIR, f"bm25_index{_INDEX_SUFFIX}.pkl")
 
 # ─── Directories ──────────────────────────────────────────────────────────────
 RAW_DIR          = os.path.join(DATA_DIR, "raw")
@@ -94,7 +101,7 @@ FAILED_DOWNLOADS_PATH    = os.path.join(DATA_DIR, "failed_downloads.json")
 # by the query string. Same crash-safe rewrite-after-each-write pattern as
 # downloaded.json.
 SEED_PAPERS_PATH         = os.path.join(DATA_DIR, "seed_papers.json")
-INGESTED_MANIFEST_PATH   = os.path.join(DATA_DIR, "ingested.json")
+INGESTED_MANIFEST_PATH   = os.path.join(DATA_DIR, f"ingested{_INDEX_SUFFIX}.json")
 
 # ─── Detectron2 / layout detection ──────────────────────────────────────────
 # Layout detection (figure/table crops + a VLM description of each) is the
@@ -125,6 +132,13 @@ EMBED_BATCH_SIZE         = 1000     # ChromaDB upsert batch size
 EMBED_MAX_CHARS          = 4000     # Truncate documents to this length before embedding
 SEMANTIC_CHUNKER_TYPE    = "percentile"
 SEMANTIC_CHUNKER_AMOUNT  = 90       # 90th percentile breakpoint
+
+# v2 chunker (INDEX_VERSION >= 2): sentence windows packed within a section.
+# ~1,200 chars is ~300 tokens; six of them fill ~1,800 tokens of a 4k window.
+CHUNK_TARGET_CHARS       = _env_int("CITATION_CHUNK_TARGET_CHARS", 1200)
+CHUNK_MAX_CHARS          = _env_int("CITATION_CHUNK_MAX_CHARS", 1800)
+CHUNK_MIN_CHARS          = 200      # shorter windows are dropped (captions exempt)
+CHUNK_MIN_ALPHA          = 0.6      # alphabetic ratio below this is font-map garbage
 
 # Figure/table handling. The layout pass always crops the image and keeps its
 # caption as the searchable text. Set CITATION_FIGURE_VLM=1 to also run a VLM
@@ -214,6 +228,12 @@ GROBID_DOCKER_IMAGE      = os.environ.get("GROBID_DOCKER_IMAGE", "grobid/grobid:
 GROBID_CONTAINER_NAME    = os.environ.get("GROBID_CONTAINER_NAME", "grobid")
 GROBID_START_COMMAND     = os.environ.get("GROBID_START_COMMAND", "")
 GROBID_JAR_PATH          = os.environ.get("GROBID_JAR_PATH", "")
+
+# v2 ingestion sends every PDF to processFulltextDocument. One TEI per PDF is
+# cached here — the same directory Agent 1 writes, so a seed paper it has
+# already processed is never sent twice.
+GROBID_TEI_DIR           = os.path.join(RAW_DIR, "grobid_output")
+GROBID_FULLTEXT_TIMEOUT  = _env_int("GROBID_FULLTEXT_TIMEOUT", 300)
 
 # ─── Agent 2 — Fetcher ───────────────────────────────────────────────────────
 MAX_CITATION_LEN   = 500   # Skip citations longer than this (likely malformed)
