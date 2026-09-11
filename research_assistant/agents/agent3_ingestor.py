@@ -10,7 +10,7 @@ import json
 import argparse
 import multiprocessing
 
-from research_assistant.config import DOWNLOADED_JSON_PATH
+from research_assistant.config import DOWNLOADED_JSON_PATH, PULLED_PDFS_DIR
 from research_assistant.schemas import DownloadedPaper, SchemaError
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.ingestion import ingest_pdfs
@@ -32,7 +32,12 @@ def _pdfs_from_manifest(downloaded: dict) -> dict[str, str]:
         except SchemaError as exc:
             logger.warning("Skipping malformed manifest entry %s: %s", key, exc)
             continue
-        pdfs[paper.path] = paper.title or paper.raw_reference or paper.key
+        path = paper.path
+        if not os.path.exists(path):
+            candidate = os.path.join(PULLED_PDFS_DIR, os.path.basename(path))
+            if os.path.exists(candidate):
+                path = candidate
+        pdfs[path] = paper.title or paper.raw_reference or paper.key
     return pdfs
 
 
