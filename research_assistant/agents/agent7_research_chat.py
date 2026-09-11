@@ -51,14 +51,17 @@ HELP_TEXT = """
 class ResearchChat:
     """Multi-turn conversational RAG agent backed by the paper database."""
 
-    def __init__(self, top_k: int = 5):
+    def __init__(self, top_k: int = 5, search_resources: tuple = None):
         self.top_k = top_k
         self.history = []          # list of {"role": ..., "content": ...}
         self.last_sources = []     # sources used in the most recent answer
         self.turn_count = 0
 
-        logger.info("Loading search resources…")
-        self.collection, self.bm25, self.texts, self.metadatas = load_search_resources()
+        if search_resources:
+            self.collection, self.bm25, self.texts, self.metadatas = search_resources
+        else:
+            logger.info("Loading search resources…")
+            self.collection, self.bm25, self.texts, self.metadatas = load_search_resources()
         logger.info("Ready. %d chunks in database.", len(self.texts))
 
     # ── RAG retrieval ────────────────────────────────────────────────────

@@ -19,8 +19,74 @@ import streamlit as st
 from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
 
-st.set_page_config(page_title="Research assistant", page_icon="📚", layout="centered")
+st.set_page_config(page_title="Research Assistant", page_icon="📚", layout="wide")
 os.makedirs(config.DATA_DIR, exist_ok=True)
+
+
+def _check_auth() -> bool:
+    app_pwd = os.environ.get("APP_PASSWORD")
+    if not app_pwd:
+        try:
+            if hasattr(st, "secrets") and "password" in st.secrets:
+                app_pwd = st.secrets["password"]
+        except Exception:
+            app_pwd = None
+
+    if not app_pwd:
+        return True
+    if st.session_state.get("authenticated", False):
+        return True
+
+    st.markdown("### 🔐 Research Assistant — Access Verification")
+    st.caption("This research instance is currently protected during review. Please enter the access code to continue.")
+    with st.form("auth_form", clear_on_submit=False):
+        entered = st.text_input("Access Code", type="password", placeholder="Enter access password")
+        submitted = st.form_submit_button("Unlock", type="primary")
+        if submitted:
+            if entered.strip() == app_pwd.strip():
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Invalid access code. Please verify the code and try again.", icon="🚫")
+    return False
+
+
+if not _check_auth():
+    st.stop()
+
+
+@st.cache_resource(show_spinner=False)
+def get_cached_search_resources(mtime: float):
+    """Load ChromaDB collection and BM25 index once into memory for all sessions.
+    
+    Keyed on the modification time of BM25_INDEX_PATH so re-indexing automatically
+    refreshes the shared cache without needing server restarts.
+    """
+    from research_assistant.shared.db import load_search_resources
+    return load_search_resources()
+
+
+def _get_resources_mtime() -> float:
+    if os.path.exists(config.BM25_INDEX_PATH):
+        return os.path.getmtime(config.BM25_INDEX_PATH)
+    return 0.0
+
+
+def _is_ingest_locked() -> bool:
+    lock_path = getattr(config, "INGEST_LOCK_PATH", "/mnt/disks/data/ingest.lock")
+    if not os.path.exists(lock_path):
+        return False
+    try:
+        import fcntl
+        with open(lock_path, "a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(f, fcntl.LOCK_UN)
+                return False
+            except OSError:
+                return True
+    except Exception:
+        return False
 
 
 # ─── Data helpers ───────────────────────────────────────────────────────────
@@ -56,6 +122,13 @@ def _corpus_stats():
                 papers += len(json.load(fh))
         except Exception:
             pass
+
+    try:
+        from research_assistant.shared import manifest
+        manifest_count = len(manifest.load())
+        papers = max(papers, manifest_count)
+    except Exception:
+        pass
     return chunks, papers
 
 
@@ -282,8 +355,10 @@ def _render_seed_and_downloads(query, final):
     seed = seeds.get(query) or {}
     if not seed and final.get("seed_path"):
         norm_path = os.path.abspath(final["seed_path"])
+        base_name = os.path.basename(final["seed_path"])
         for s in reversed(list(seeds.values())):
-            if s.get("path") and os.path.abspath(s["path"]) == norm_path:
+            p = s.get("path")
+            if p and (os.path.abspath(p) == norm_path or os.path.basename(p) == base_name):
                 seed = s
                 break
     # Query-key mismatch fallback: only if a seed was actually established for this run
@@ -308,18 +383,36 @@ def _render_seed_and_downloads(query, final):
             if bits:
                 st.caption(" · ".join(bits))
 
-    if final.get("seed_path"):
-        downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
-        failed = _manifest(config.FAILED_DOWNLOADS_PATH)
+    if final.get("seed_path") and (final.get("extraction") or final.get("references_ok") or final.get("answer")):
+        from research_assistant.agents.agent2_fetcher import source_key
+
+        extracted_data = _manifest(config.EXTRACTED_CITATIONS_PATH)
+        extracted_refs = extracted_data.get("references", []) if isinstance(extracted_data, dict) else []
+        target_keys = {source_key(r) for r in extracted_refs if isinstance(r, dict) and source_key(r)} if extracted_refs else set()
+
+        all_downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
+        all_failed = _manifest(config.FAILED_DOWNLOADS_PATH)
+
+        if target_keys:
+            downloaded = [rec for k, rec in all_downloaded.items() if k in target_keys]
+            failed = [rec for k, rec in all_failed.items() if k in target_keys]
+        else:
+            downloaded = list(all_downloaded.values())
+            failed = list(all_failed.values())
+
         if downloaded or failed:
+            total_extracted = len(extracted_refs) if extracted_refs else (len(downloaded) + len(failed))
+            label = f"📄 Reference PDFs — {len(downloaded)} fetched, {len(failed)} unavailable"
+            if total_extracted:
+                label += f" ({total_extracted} references found)"
             with st.expander(
-                f"📄 Reference PDFs — {len(downloaded)} fetched, {len(failed)} unavailable",
+                label,
                 expanded=bool(downloaded) and not final.get("answer"),
             ):
-                for rec in downloaded.values():
+                for rec in downloaded:
                     t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
                     st.markdown(f"- ✅ {t}")
-                for rec in failed.values():
+                for rec in failed:
                     t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
                     st.markdown(
                         f"- ⚠️ {t}  \n  <sub>{rec.get('reason', '')}</sub>",
@@ -337,6 +430,38 @@ def _render_shortlist(selected):
 
 
 def _render_build(final, query):
+    if final.get("batch_uploaded"):
+        staged = final["batch_uploaded"]
+        with st.container(border=True):
+            st.markdown(f"**📚 Uploaded Paper Collection** — {len(staged)} paper(s) indexed")
+            for p in staged:
+                title = p.get("title") or p.get("filename")
+                bits = [f"📄 `{p.get('filename')}`"]
+                if p.get("doi"):
+                    bits.append(f"doi:{p['doi']}")
+                if p.get("arxiv_id"):
+                    bits.append(f"arXiv:{p['arxiv_id']}")
+                st.markdown(
+                    f"- **{title}**  \n  <small style='color:gray;'>{' · '.join(bits)}</small>",
+                    unsafe_allow_html=True,
+                )
+
+        answer = final.get("answer")
+        if answer:
+            _render_shortlist(answer.get("selected"))
+            with st.container(border=True):
+                st.markdown("###### Related work across collection")
+                st.markdown(answer["suggestion"])
+            if answer.get("citations"):
+                st.caption("Sources: " + " · ".join(str(c) for c in answer["citations"]))
+            _render_passages(answer.get("passages") or [])
+        else:
+            st.info(
+                "Corpus updated with uploaded papers. Switch to **Research chat** or **Cite a draft** to query them.",
+                icon="✍️",
+            )
+        return
+
     # Show whatever the run produced — seed, downloads — even if it stopped early.
     _render_seed_and_downloads(query, final)
 
@@ -399,9 +524,9 @@ with st.sidebar:
 
 st.title("📚 Research Assistant")
 st.caption(
-    "Give it a research idea → it builds a corpus from the literature and tells "
-    "you what's already been done. Or hand it a sentence and it finds the "
-    "citation."
+    "Autonomous AI Research Assistant — Give it a research idea → it builds a "
+    "corpus from the literature and tells you what's already been done. Or hand it "
+    "a sentence and it finds the citation."
 )
 
 tab_build, tab_cite, tab_batch, tab_chat, tab_help = st.tabs(
@@ -413,9 +538,16 @@ tab_build, tab_cite, tab_batch, tab_chat, tab_help = st.tabs(
 # ─── Tab 1: build a corpus ─────────────────────────────────────────────────
 
 with tab_build:
+    if _is_ingest_locked():
+        st.info(
+            "⏳ **Server Busy**: Another paper indexing process is actively running on the server. "
+            "Your upload or pipeline request will queue safely once the active job finishes.",
+            icon="ℹ️",
+        )
+
     source_type = st.radio(
         "Start pipeline from",
-        ["📄 Upload a seed PDF", "🔍 Search for a paper"],
+        ["📄 Upload research paper(s) (PDF or ZIP)", "🔍 Search for a paper"],
         horizontal=True,
     )
 
@@ -426,31 +558,132 @@ with tab_build:
     ask = True
     force = False
 
-    if source_type == "📄 Upload a seed PDF":
-        with st.form("upload_seed_form"):
-            uploaded_pdf = st.file_uploader(
-                "Seed paper (.pdf)",
-                type=["pdf"],
-                help="Start from this PDF as the seed paper. Its references will be extracted, fetched, and indexed.",
+    if source_type == "📄 Upload research paper(s) (PDF or ZIP)":
+        with st.form("upload_papers_form"):
+            uploaded_files = st.file_uploader(
+                "Select research paper(s) (.pdf or .zip)",
+                type=["pdf", "zip"],
+                accept_multiple_files=True,
+                help="Upload one or multiple PDF papers, or a .zip archive of papers. If 1 paper is uploaded, its references can be mined; if multiple papers are uploaded, all are directly indexed into the corpus.",
             )
             pdf_query = st.text_input(
                 "Research topic / question (optional)",
-                placeholder="e.g. topological protection in disordered wires (leave blank to infer from paper)",
-                help="If provided, used for the final related-work answer. If blank, automatically inferred from the paper title or filename.",
+                placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
+                help="If provided, used to synthesize an answer across the papers at the end.",
             )
             c1, c2 = st.columns(2)
             ask = c1.toggle("Answer my query at the end", value=True)
             force = c2.toggle("Force re-run every stage", value=False)
-            submitted = st.form_submit_button("Build corpus from PDF", type="primary")
+            submitted = st.form_submit_button("Process and Index Paper(s)", type="primary")
 
         if submitted:
-            if not uploaded_pdf:
-                st.warning("Please upload a PDF file to begin.", icon="⚠️")
-            elif uploaded_pdf.size == 0:
-                st.warning("The uploaded PDF is empty (0 bytes).", icon="⚠️")
+            if not uploaded_files:
+                st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
             else:
-                seed_file_path = _stage_upload(uploaded_pdf)
-                q = pdf_query.strip()
+                from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
+
+                staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
+                if not staged:
+                    st.error(
+                        "No valid PDF documents found in the uploaded files. Check that files contain valid PDF headers (%PDF-).",
+                        icon="⚠️",
+                    )
+                elif len(staged) == 1:
+                    # Single PDF: execute full LangGraph pipeline (discover, seed ingest, reference extraction & fetch, synthesis)
+                    seed_file_path = staged[0]["path"]
+                    q = pdf_query.strip()
+                else:
+                    # Multiple PDFs: execute direct batch ingestion of all papers
+                    st.session_state.pop("build_result", None)
+                    st.session_state.pop("build_query", None)
+                    with st.status(f"Ingesting {len(staged)} research papers into corpus…", expanded=True) as status:
+                        candidates = {}
+                        for p in staged:
+                            title_lbl = p.get("title") or p.get("key") or os.path.basename(p["path"])
+                            candidates[p["path"]] = title_lbl
+                            st.write(f"📄 Found: **{title_lbl}** (`{p.get('filename', os.path.basename(p['path']))}`)")
+
+                        st.write("⚙️ Parsing text chunks, computing embeddings, and building vector index…")
+                        from research_assistant.shared.ingestion import ingest_pdfs
+
+                        ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force)
+                        scanned_empty = ingest_res.get("scanned_or_empty", [])
+                        inserted = ingest_res.get("inserted", 0)
+                        processed = ingest_res.get("processed", len(candidates))
+
+                        if scanned_empty and inserted == 0 and processed > 0:
+                            st.error(
+                                f"📄 **No selectable text found in: {', '.join(scanned_empty)}**. "
+                                "This PDF appears to be a scanned photocopy or rasterized document without an embedded OCR text layer. "
+                                "GROBID and PyMuPDF require digital selectable text. Please run OCR or upload a PDF with digital text.",
+                                icon="⚠️",
+                            )
+                        elif scanned_empty:
+                            st.warning(
+                                f"⚠️ **{len(scanned_empty)} document(s) had no selectable text** ({', '.join(scanned_empty)}). "
+                                f"The remaining documents were indexed successfully ({inserted} chunks inserted).",
+                                icon="⚠️",
+                            )
+                        else:
+                            st.write(
+                                f"✅ Ingestion complete: {processed} processed, "
+                                f"{inserted} chunks inserted into ChromaDB."
+                            )
+
+                        # Record in downloaded.json so they appear in manifests and sidebar
+                        try:
+                            import json, time
+                            from research_assistant.shared.atomic import atomic_write_json
+
+                            dl_manifest = {}
+                            if os.path.exists(config.DOWNLOADED_JSON_PATH):
+                                with open(config.DOWNLOADED_JSON_PATH, "r", encoding="utf-8") as f:
+                                    dl_manifest = json.load(f)
+                            now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                            for p in staged:
+                                k = p.get("key") or os.path.basename(p["path"])
+                                dl_manifest[k] = {
+                                    "key": k,
+                                    "title": p.get("title") or os.path.basename(p["path"]),
+                                    "doi": p.get("doi"),
+                                    "arxiv_id": p.get("arxiv_id"),
+                                    "path": p["path"],
+                                    "source": "upload",
+                                    "fetched_at": now_iso,
+                                }
+                            atomic_write_json(config.DOWNLOADED_JSON_PATH, dl_manifest, ensure_ascii=False)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("Could not update downloaded.json: %s", e)
+
+                        # Formulate synthesis if query or ask is set
+                        answer = None
+                        effective_q = pdf_query.strip() or (staged[0].get("title") if staged else "")
+                        if ask and effective_q:
+                            st.write("🧠 Formulating related-work synthesis across uploaded collection…")
+                            from research_assistant.shared import retrieve
+
+                            try:
+                                answer = retrieve.research_answer(effective_q)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.error("Synthesis failed: %s", exc)
+                                answer = {
+                                    "suggestion": f"Synthesis encountered an error: {exc}",
+                                    "citations": [],
+                                    "passages": [],
+                                }
+
+                        status.update(label=f"Done — {len(staged)} paper(s) indexed!", state="complete")
+
+                    final = {
+                        "seed_path": staged[0]["path"] if staged else None,
+                        "seed_label": f"Uploaded collection ({len(staged)} papers)",
+                        "batch_uploaded": staged,
+                        "answer": answer,
+                    }
+                    effective_final_q = effective_q or "Uploaded paper collection"
+                    st.session_state["build_result"] = final
+                    st.session_state["build_query"] = effective_final_q
+                    _corpus_stats.clear()
     else:
         with st.form("build_form"):
             query = st.text_input(
@@ -476,6 +709,8 @@ with tab_build:
                 seed_url_val = seed_url.strip() or None
 
     if submitted and (seed_file_path or q):
+        st.session_state.pop("build_result", None)
+        st.session_state.pop("build_query", None)
         graph = _graph()
         thread_seed = q or (os.path.basename(seed_file_path) if seed_file_path else "run")
         cfg = {"configurable": {"thread_id": hashlib.sha1(thread_seed.encode()).hexdigest()[:16]}}
@@ -500,7 +735,7 @@ with tab_build:
                         icon, label = STEPS.get(node, ("•", node))
                         st.write(f"{icon} {label}")
                         final.update(payload or {})
-                        if node in ("discover", "ingest_seed", "fetch", "ingest_refs"):
+                        if node in ("discover", "ingest_seed", "extract", "fetch", "ingest_refs"):
                             with live.container():
                                 effective_display_q = final.get("query") or q
                                 _render_seed_and_downloads(effective_display_q, final)
@@ -559,11 +794,10 @@ with tab_cite:
         )
 
     if cite_submitted and draft.strip():
-        from research_assistant.shared.db import load_search_resources
         from research_assistant.agents import agent4_assistant
 
         try:
-            resources = load_search_resources()
+            resources = get_cached_search_resources(_get_resources_mtime())
             with st.spinner("Retrieving and drafting…"):
                 result = agent4_assistant.suggest_citation(
                     draft.strip(), top_k=top_k, search_resources=resources
@@ -612,7 +846,10 @@ with tab_batch:
 
         with st.spinner("Checking each sentence and retrieving sources…"):
             try:
-                written = agent5_batch_citer.run_batch_citer(draft_path, out_path)
+                cached_res = get_cached_search_resources(_get_resources_mtime())
+                written = agent5_batch_citer.run_batch_citer(
+                    draft_path, out_path, search_resources=cached_res
+                )
             except Exception as e:  # noqa: BLE001
                 st.exception(e)
                 written = None
@@ -720,7 +957,8 @@ with tab_chat:
             from research_assistant.agents.agent7_research_chat import ResearchChat
 
             try:
-                st.session_state["chat_agent"] = ResearchChat(top_k=5)
+                cached_res = get_cached_search_resources(_get_resources_mtime())
+                st.session_state["chat_agent"] = ResearchChat(top_k=5, search_resources=cached_res)
             except Exception as e:
                 st.warning(f"Could not load search index: {e}")
                 st.session_state["chat_agent"] = None
@@ -744,7 +982,16 @@ with tab_chat:
                     st.markdown(question)
                 with st.chat_message("assistant"):
                     try:
-                        st.write_stream(agent.stream_turn(question))
+                        with st.spinner("Searching literature and formulating response…"):
+                            stream = agent.stream_turn(question)
+                            first_chunk = next(stream, None)
+                        if first_chunk is not None:
+                            def _generator():
+                                yield first_chunk
+                                yield from stream
+                            st.write_stream(_generator())
+                        else:
+                            st.info("No response generated.")
                     except Exception as e:  # noqa: BLE001
                         st.exception(e)
                 if agent.last_sources:

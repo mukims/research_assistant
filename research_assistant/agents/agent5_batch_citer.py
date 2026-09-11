@@ -250,7 +250,7 @@ def _generate_report(
     logger.info("Saved citation report to %s", report_path)
 
 
-def run_batch_citer(file_path, out_path="cited_draft.txt"):
+def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None):
     """Cite every claim in *file_path* that the retrieved corpus supports.
 
     Writes three files alongside *out_path*: the cited draft, a
@@ -268,7 +268,10 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     with open(file_path, "r") as f:
         draft_text = f.read()
 
-    collection, bm25, texts, metadatas = load_search_resources()
+    if search_resources:
+        collection, bm25, texts, metadatas = search_resources
+    else:
+        collection, bm25, texts, metadatas = load_search_resources()
 
     sentences = split_into_sentences(draft_text)
     logger.info("Split draft into %d sentences.", len(sentences))

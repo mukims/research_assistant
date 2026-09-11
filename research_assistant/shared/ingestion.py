@@ -375,10 +375,17 @@ def _extract_text_only(pdf_path: str, citation_string: str):
                     "type": "text",
                     "content": text,
                 })
-    logger.info(
-        "✓ %s: %d pages, %d text blocks in %.1fs (text-only)",
-        pdf_name, len(pdf), len(corpus), time.perf_counter() - t0,
-    )
+    if not corpus:
+        logger.warning(
+            "⚠️ %s: 0 text blocks extracted across %d page(s). "
+            "The document appears to be scanned or image-only without an OCR text layer.",
+            pdf_name, len(pdf),
+        )
+    else:
+        logger.info(
+            "✓ %s: %d pages, %d text blocks in %.1fs (text-only)",
+            pdf_name, len(pdf), len(corpus), time.perf_counter() - t0,
+        )
     return corpus
 
 
@@ -851,11 +858,15 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
         return result
 
     corpus = []
+    scanned_or_empty = []
     if workers <= 1:
         logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
         for i, (path, label) in enumerate(candidates.items(), 1):
             logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), os.path.basename(path))
-            corpus.extend(process_pdf(path, label))
+            entries = process_pdf(path, label)
+            if not entries:
+                scanned_or_empty.append(os.path.basename(path))
+            corpus.extend(entries)
     else:
         logger.info(
             "%sProcessing %d PDF(s) with %d workers…", log_prefix, len(candidates), workers
@@ -867,12 +878,16 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
             }
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    corpus.extend(future.result())
+                    entries = future.result()
+                    if not entries:
+                        scanned_or_empty.append(os.path.basename(futures[future]))
+                    corpus.extend(entries)
                 except Exception as e:
                     logger.error("%sWorker failed on %s: %s", log_prefix, futures[future], e)
                     result["failed"].append(futures[future])
 
     result["processed"] = len(candidates)
+    result["scanned_or_empty"] = scanned_or_empty
 
     # How the batch was actually extracted, counted per document rather than
     # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for

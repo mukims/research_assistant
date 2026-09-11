@@ -61,13 +61,10 @@ CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", "gemma4:e2b")
 EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
 
 # ─── Chat Model Runtime Options ──────────────────────────────────────────────
-# Flash Attention + 8-bit quantized KV cache for lower latency on CPU
 CHAT_OLLAMA_OPTIONS = {
-    "num_ctx":    4096,        # Smaller context window = faster inference
-    "num_thread": 16,          # Use most of the available CPU threads
-    "flash_attn": True,        # Enable Flash Attention
-    "kv_cache_type": "q8_0",   # 8-bit quantized KV cache
+    "num_ctx": 4096,           # Context window
 }
+
 
 # ─── Vector Database ──────────────────────────────────────────────────────────
 VECTORDB_PATH    = os.path.join(DATA_DIR, "physics_vectordb")
