@@ -45,3 +45,7 @@ pytest~=9.1
 numpy~=2.2.6
 requests~=2.32
 watchdog~=6.0
+# snowballstemmer backs shared/tokenize.py, which shared/search.py imports at
+# module scope; pysbd backs shared/chunking.py. Both are pure Python.
+snowballstemmer~=3.1
+pysbd~=0.3
