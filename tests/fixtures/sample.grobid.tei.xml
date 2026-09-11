@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- tests/fixtures/sample.grobid.tei.xml — trimmed shape of GROBID 0.8.1
+     processFulltextDocument output with teiCoordinates=p,head,figure and
+     segmentSentences=1. Pages in coords are 1-based. -->
+<TEI xmlns="http://www.tei-c.org/ns/1.0" xml:id="_x">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt><title level="a" type="main">Charge transport in covalent MoS2 networks</title></titleStmt>
+    </fileDesc>
+    <profileDesc>
+      <abstract>
+        <div><p coords="1,50.0,100.0,400.0,10.0">We study charge transport in MoS2 networks. Hopping dominates at low temperature.</p></div>
+      </abstract>
+    </profileDesc>
+  </teiHeader>
+  <text>
+    <body>
+      <div><head n="1.">Introduction</head>
+        <p coords="1,50.0,200.0,400.0,10.0;1,50.0,212.0,400.0,10.0"><s>Two-dimensional semiconductors are of interest for flexible electronics.</s> <s>We find that the photoconductivity increases by 10% in covalent networks (<ref type="figure" target="#fig_0">Figure 1b</ref>).</s></p>
+        <p coords="2,50.0,60.0,400.0,10.0"><s>This paragraph starts on page two.</s></p>
+      </div>
+      <div><head>(3 of 11)</head>
+        <p coords="3,50.0,60.0,400.0,10.0"><s>Text under a running header belongs to the previous section.</s></p>
+      </div>
+      <div><head n="2.">Methods</head>
+        <p coords="3,50.0,300.0,400.0,10.0"><s>Films were prepared by exfoliation.</s></p>
+        <formula xml:id="formula_0" coords="3,50.0,320.0,100.0,12.0">σ = n e μ</formula>
+        <p coords="3,50.0,340.0,400.0,10.0"><s>Conductivity was measured in a four-probe geometry.</s></p>
+      </div>
+      <div><head n="3.">Acknowledgements</head>
+        <p coords="10,50.0,60.0,400.0,10.0"><s>We thank the funding agency.</s></p>
+      </div>
+      <figure xml:id="fig_0" coords="3,48.0,653.0,496.0,8.0;3,50.0,379.0,492.0,264.0">
+        <head>Figure 1.</head><label>1</label>
+        <figDesc>Figure 1. THz spectral analysis on MoS2 films. a) Schematic. b) Photoconductivity dynamics.</figDesc>
+        <graphic coords="3,50.0,379.0,492.0,264.0" type="bitmap" />
+      </figure>
+      <figure xml:id="tab_0" type="table" coords="5,48.0,100.0,496.0,200.0">
+        <head>Table 1</head><label>1</label>
+        <figDesc>Table 1. Mobility of each sample.</figDesc>
+        <table><row><cell>Sample</cell><cell>Mobility</cell></row></table>
+      </figure>
+    </body>
+    <back>
+      <div type="references"><listBibl>
+        <biblStruct xml:id="b0"><analytic><title>Ref one</title></analytic></biblStruct>
+        <biblStruct xml:id="b1"><analytic><title>Ref two</title></analytic></biblStruct>
+      </listBibl></div>
+    </back>
+  </text>
+</TEI>
