@@ -27,6 +27,7 @@ from research_assistant.config import (
     OPENAI_BASE_URL,
     OPENAI_API_KEY,
     HF_TOKEN,
+    INDEX_VERSION,
 )
 from research_assistant.shared.log import get_logger
 
@@ -226,6 +227,27 @@ class _OpenAIEmbeddings:
         return self.embed_documents([text])[0]
 
 
+NOMIC_DOC_PREFIX = "search_document: "
+NOMIC_QUERY_PREFIX = "search_query: "
+
+
+class _PrefixedEmbeddings:
+    """nomic-embed-text's task prefixes. Applied only to a v2 index: v1 vectors
+    were computed without them, and prefixed queries against unprefixed
+    documents are worse than neither."""
+
+    def __init__(self, inner, doc_prefix, query_prefix):
+        self._inner = inner
+        self._dp = doc_prefix
+        self._qp = query_prefix
+
+    def embed_documents(self, texts):
+        return self._inner.embed_documents([self._dp + t for t in texts])
+
+    def embed_query(self, text):
+        return self._inner.embed_query(self._qp + text)
+
+
 _embeddings_singleton = None
 
 
@@ -249,5 +271,10 @@ def get_embeddings(model=None):
             raise ValueError(
                 f"Unknown EMBED_BACKEND {EMBED_BACKEND!r} "
                 "(expected 'ollama', 'openai' or 'huggingface')"
+            )
+        if INDEX_VERSION >= 2 and model.startswith("nomic-embed"):
+            logger.info("Embeddings: nomic task prefixes on (index v%d)", INDEX_VERSION)
+            _embeddings_singleton = _PrefixedEmbeddings(
+                _embeddings_singleton, NOMIC_DOC_PREFIX, NOMIC_QUERY_PREFIX
             )
     return _embeddings_singleton

@@ -157,5 +157,45 @@ class TestChatTemperatureOllama(unittest.TestCase):
         self.assertEqual(opts, {"num_ctx": 8192})
 
 
+class TestNomicPrefixes(unittest.TestCase):
+    """nomic-embed-text expects task prefixes; v1 vectors were made without
+    them, so the wrapper applies only under INDEX_VERSION >= 2."""
+
+    def setUp(self):
+        llm._embeddings_singleton = None
+        self.addCleanup(setattr, llm, "_embeddings_singleton", None)
+        self.calls = []
+        inner = types.SimpleNamespace(
+            embed_documents=lambda texts: (self.calls.append(("docs", list(texts))), [[0.0]] * len(texts))[1],
+            embed_query=lambda text: (self.calls.append(("query", text)), [0.0])[1],
+        )
+        ollama_mod = types.ModuleType("langchain_ollama")
+        ollama_mod.OllamaEmbeddings = lambda model: inner
+        p = patch.dict("sys.modules", {"langchain_ollama": ollama_mod}); p.start(); self.addCleanup(p.stop)
+        p = patch.object(llm, "EMBED_BACKEND", "ollama"); p.start(); self.addCleanup(p.stop)
+        p = patch.object(llm, "EMBED_MODEL", "nomic-embed-text"); p.start(); self.addCleanup(p.stop)
+
+    def test_v2_prefixes_documents_and_queries(self):
+        with patch.object(llm, "INDEX_VERSION", 2):
+            emb = llm.get_embeddings()
+            emb.embed_documents(["a", "b"])
+            emb.embed_query("q")
+        self.assertEqual(self.calls, [("docs", ["search_document: a", "search_document: b"]),
+                                      ("query", "search_query: q")])
+
+    def test_v1_is_unprefixed(self):
+        with patch.object(llm, "INDEX_VERSION", 1):
+            emb = llm.get_embeddings()
+            emb.embed_documents(["a"])
+            emb.embed_query("q")
+        self.assertEqual(self.calls, [("docs", ["a"]), ("query", "q")])
+
+    def test_non_nomic_model_is_unprefixed_even_on_v2(self):
+        with patch.object(llm, "INDEX_VERSION", 2), patch.object(llm, "EMBED_MODEL", "mxbai-embed-large"):
+            emb = llm.get_embeddings()
+            emb.embed_query("q")
+        self.assertEqual(self.calls, [("query", "q")])
+
+
 if __name__ == "__main__":
     unittest.main()
