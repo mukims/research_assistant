@@ -52,9 +52,14 @@ first:
    chunker, figure/table handling, versioned index.
 4. **Depth** — map-reduce synthesis on the Tab 1 path.
 
-Each phase gets its own implementation plan, written when the previous
-phase's harness numbers are in — later phases may be adjusted by what the
-earlier ones measure. All work is local against the 323-paper corpus. **Deploying to the VM is a
+Each phase gets its own implementation plan. **Order as decided on
+2026-09-11: ingestion v2 (§4, including figure analysis §4.6) is built
+first**, carrying with it the two index-construction items from §3 — the
+BM25 tokenizer (§3.5) and the nomic task prefixes (§3.6) — so the v2 index
+is built once. The harness (§2) is deferred; until it exists, v2's gains are
+asserted from the diagnosis above and judged in the app, not measured. The
+remaining query-time items (§3.1–3.4) and depth (§5) follow. All work is
+local against the 323-paper corpus. **Deploying to the VM is a
 separate decision at the end of each phase**, taken by the operator, not folded
 into any phase. Nothing in this spec writes to the v1 index; v1 collections,
 BM25 pickle and manifest are read-only to v2 code paths.
