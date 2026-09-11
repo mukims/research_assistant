@@ -33,11 +33,12 @@ def _pdfs_from_manifest(downloaded: dict) -> dict[str, str]:
             logger.warning("Skipping malformed manifest entry %s: %s", key, exc)
             continue
         path = paper.path
+        label = paper.title or paper.raw_reference or paper.key
+        pdfs[path] = label
         if not os.path.exists(path):
             candidate = os.path.join(PULLED_PDFS_DIR, os.path.basename(path))
             if os.path.exists(candidate):
-                path = candidate
-        pdfs[path] = paper.title or paper.raw_reference or paper.key
+                pdfs[candidate] = label
     return pdfs
 
 
