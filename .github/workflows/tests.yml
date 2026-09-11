@@ -60,6 +60,9 @@ jobs:
                    research_assistant.shared.search research_assistant.shared.retrieve \
                    research_assistant.shared.source_key research_assistant.shared.fetch \
                    research_assistant.shared.ingestion \
+                   research_assistant.shared.tokenize research_assistant.shared.extract \
+                   research_assistant.shared.chunking research_assistant.shared.figures \
+                   research_assistant.shared.ingest_v2 \
                    research_assistant.agents.agent0_discoverer \
                    research_assistant.agents.agent1_extractor \
                    research_assistant.agents.agent2_fetcher \
@@ -68,6 +71,7 @@ jobs:
                    research_assistant.agents.agent5_batch_citer \
                    research_assistant.agents.agent6_manual_ingestor \
                    research_assistant.agents.agent7_research_chat \
+                   research_assistant.agents.agent8_verifier \
                    app orchestrate watch; do
             python -c "import $m" || exit 1
           done

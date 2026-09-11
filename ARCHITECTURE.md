@@ -294,6 +294,51 @@ Comparing the full in-memory text against that stored prefix never matches for a
 long chunk, so every chunk over the limit was re-inserted on each run and the
 corpus grew a fresh copy of it every time.
 
+### 4.7 v2: GROBID full text, then sentence windows
+
+Under `CITATION_INDEX_VERSION=2` every PDF goes through GROBID's
+`processFulltextDocument` (TEI cached in `raw/grobid_output/`), and the
+chunker packs `pysbd` sentences into ~1,200-character windows within a
+section, with one sentence of overlap. PyMuPDF is the fallback, recorded per
+chunk as `extraction=pymupdf`.
+
+**Why.** On the v1 corpus the median chunk was 242 characters and 45% were
+under 200 — chopped bibliography entries and font-map garbage, which BM25's
+length normalisation ranks above real passages. GROBID keeps the
+bibliography out (the heading heuristic found it on 1 of 3 papers; GROBID
+on 4 of 4), de-hyphenates (`quan- tum`), normalises ligatures (`ﬁeld`, in
+31% of v1 chunks and invisible to a query for "field"), and yields sections
+and captions PyMuPDF cannot. Windows give the 4k-window generator ~1,800
+tokens of evidence from six chunks instead of ~400.
+
+**Trade-off.** 6–11 s of GROBID per paper at ingest; formulas are dropped
+from paragraph text (they were glyph soup inline); a broken-font PDF is
+garbage under both paths and is dropped by the alphabetic-ratio filter.
+
+### 4.8 What is embedded is not what is stored
+
+The stored chunk is the window verbatim — quoted, cited, verified. The
+embedded text is `search_document: Title: … Section: … <window>`: nomic's
+task prefix plus a contextual header. Queries get `search_query:`. Prefixes
+apply to the v2 index only; v1's vectors were made without them and mixing
+is worse than neither.
+
+### 4.9 Figures: GROBID captions, coordinate crops, descriptions as a run's choice
+
+Captions come from GROBID's `<figDesc>` for figures *and* tables (v1's
+`find_caption` had no table branch — all 548 tables were placeholders — and
+attached body text to 30% of figures). Crops are PyMuPDF renders of GROBID's
+`<graphic coords>` box; no Detectron2. Whether every figure is then described
+by the model is one switch per run (`--describe-figures`, the Tab 1 toggle,
+default `CITATION_FIGURE_VLM`) — never a per-image choice — and the
+description is a separate `figure_description` chunk whose text opens with
+"Auto-generated description of … verify values against the figure".
+
+**Why the marker and the exclusion.** In testing, the model placed a plot's
+peaks at ±0.5 where the axis read ±1.0. Descriptions are retrievable for
+synthesis and chat; Agent 8 excludes them as evidence (`exclude_types`), so
+a citation verdict rests on the paper's text.
+
 ---
 
 ## 5. Retrieval — two-stage

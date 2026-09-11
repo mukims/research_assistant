@@ -119,6 +119,8 @@ the code:
   still add something". That last part — the gap, the thing worth doing next —
   is what you actually came for, and it's the part he does least well.
 
+The first of those is being fixed: `CITATION_INDEX_VERSION=2` builds a second index from GROBID full text with proper chunks and captions, beside the old one — see `PIPELINE.md`.
+
 We will give him depth. Those three are where it goes. Until then he is a very
 well-read undergraduate: he has read everything and understood some of it. He
 would like that on the record.
