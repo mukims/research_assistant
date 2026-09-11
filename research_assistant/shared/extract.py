@@ -13,12 +13,15 @@ coords are 1-based and converted here.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
 from lxml import etree
 
+from research_assistant.config import GROBID_SERVER, GROBID_TEI_DIR, GROBID_FULLTEXT_TIMEOUT
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.tokenize import normalize
 
 logger = get_logger("extract")
 
@@ -213,3 +216,131 @@ def parse_tei(xml: bytes, key: str) -> Document:
 
     return Document(key=key, title=title, abstract=abstract, sections=sections,
                     figures=figures, extraction="grobid", n_bib=n_bib)
+
+
+# ─── GROBID call + cache ─────────────────────────────────────────────────────
+
+# Agent 1 caches TEI under these suffixes for seed papers; reuse any of them
+# for the same PDF stem before asking GROBID again.
+_TEI_SUFFIXES = (".grobid.tei.xml", ".fulltext.tei.xml", ".tei.xml")
+
+
+def _stem(pdf_path: str) -> str:
+    return os.path.splitext(os.path.basename(pdf_path))[0]
+
+
+def tei_cache_path(pdf_path: str) -> str:
+    stem = _stem(pdf_path)
+    for suffix in _TEI_SUFFIXES:
+        candidate = os.path.join(GROBID_TEI_DIR, stem + suffix)
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(GROBID_TEI_DIR, stem + _TEI_SUFFIXES[0])
+
+
+def grobid_fulltext(pdf_path: str, server: str = GROBID_SERVER,
+                    timeout: int = GROBID_FULLTEXT_TIMEOUT) -> bytes:
+    """POST the PDF to processFulltextDocument. Raises on any failure —
+    extract() decides what to do about it."""
+    import requests
+
+    with open(pdf_path, "rb") as fh:
+        # Repeated teiCoordinates fields: paragraph coords give the page,
+        # figure coords give the bitmap box. segmentSentences wraps sentences
+        # in <s>, which is what lets a figure reference carry its sentence.
+        data = [
+            ("consolidateHeader", "0"),
+            ("segmentSentences", "1"),
+            ("teiCoordinates", "p"),
+            ("teiCoordinates", "head"),
+            ("teiCoordinates", "figure"),
+        ]
+        resp = requests.post(f"{server.rstrip('/')}/api/processFulltextDocument",
+                             files={"input": fh}, data=data, timeout=timeout)
+    if resp.status_code != 200:
+        raise RuntimeError(f"GROBID returned HTTP {resp.status_code} for {os.path.basename(pdf_path)}")
+    if not resp.content.strip():
+        raise RuntimeError(f"GROBID returned an empty body for {os.path.basename(pdf_path)}")
+    return resp.content
+
+
+# ─── PyMuPDF fallback ────────────────────────────────────────────────────────
+
+_BIB_HEAD = re.compile(r"^\s*(references?|bibliography|literature cited)\s*$", re.I)
+
+
+def extract_pymupdf(pdf_path: str, key: str) -> Document:
+    """Page text blocks → one section of kind "other". Ligatures are NFKC-
+    normalised, blocks repeated on ≥30% of pages are dropped as running
+    headers/footers, and everything from the last References heading on is
+    cut. No figures: nothing in a text block says where a figure is."""
+    import fitz
+
+    pdf = fitz.open(pdf_path)
+    pages: list[list[str]] = []
+    for page in pdf:
+        blocks = []
+        for b in page.get_text("blocks"):
+            if b[6] != 0:                       # image block
+                continue
+            text = normalize(b[4].replace("\n", " "))
+            if len(text) > 4:
+                blocks.append(text)
+        pages.append(blocks)
+
+    npages = len(pages)
+    seen_on = {}
+    for blocks in pages:
+        for b in set(blocks):
+            seen_on[b] = seen_on.get(b, 0) + 1
+    repeated = {b for b, n in seen_on.items() if npages >= 4 and n >= max(2, 0.3 * npages)}
+
+    flat: list[Paragraph] = []
+    for i, blocks in enumerate(pages):
+        for b in blocks:
+            if b not in repeated:
+                flat.append(Paragraph(b, i))
+
+    cut = max((i for i, p in enumerate(flat) if _BIB_HEAD.match(p.text)), default=None)
+    body = flat[:cut] if cut is not None else flat
+
+    return Document(key=key, title=key, abstract=[],
+                    sections=[Section("", "other", body)], figures=[],
+                    extraction="pymupdf")
+
+
+# ─── Entry point ─────────────────────────────────────────────────────
+
+def extract(pdf_path: str, key: str | None = None) -> Document:
+    """Cached TEI → GROBID → PyMuPDF. Never raises for a readable PDF; the
+    Document says which path produced it."""
+    key = key or os.path.basename(pdf_path).strip().replace(" ", "_").lower()
+    cache = tei_cache_path(pdf_path)
+
+    xml = None
+    if os.path.exists(cache):
+        with open(cache, "rb") as f:
+            xml = f.read()
+    else:
+        try:
+            xml = grobid_fulltext(pdf_path)
+            os.makedirs(GROBID_TEI_DIR, exist_ok=True)
+            with open(cache, "wb") as f:
+                f.write(xml)
+        except Exception as exc:                # noqa: BLE001 — any failure is a fallback
+            logger.warning("GROBID full-text failed for %s (%s) — falling back to PyMuPDF.",
+                           os.path.basename(pdf_path), exc)
+
+    if xml is not None:
+        try:
+            doc = parse_tei(xml, key)
+        except etree.XMLSyntaxError as exc:
+            logger.warning("Cached TEI for %s is not well-formed (%s) — falling back to PyMuPDF.",
+                           os.path.basename(pdf_path), exc)
+            doc = None
+        if doc is not None and (doc.abstract or any(s.paragraphs for s in doc.sections)):
+            return doc
+        logger.warning("GROBID produced no body text for %s — falling back to PyMuPDF.",
+                       os.path.basename(pdf_path))
+
+    return extract_pymupdf(pdf_path, key)
