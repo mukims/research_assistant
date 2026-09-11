@@ -1,275 +1,193 @@
-# Research Assistant Pipeline
+# Marvin the Citebot 🤖
 
-A multi-agent pipeline that builds a citable knowledge base from physics papers.
-From a one-line research idea it finds a seed paper, walks its reference list,
-fetches the open-access PDFs it can find, and ingests them — chunk-level into a
-hybrid (vector + keyword) index and paper-level as a one-paragraph summary. It
-then answers two questions: *what has already been done on this idea* (a
-related-work synthesis) and *which source backs this sentence* (a LaTeX
-citation) — for one sentence or for a whole draft at once.
+[![tests](https://github.com/mukims/research_assistant/actions/workflows/tests.yml/badge.svg)](https://github.com/mukims/research_assistant/actions/workflows/tests.yml)
+![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
+[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-Retrieval is two-stage: match the idea against the paper **summaries** first,
-let the LLM drop the off-topic ones, then run the detailed chunk search only
-over what survives — so it stays fast as the corpus grows.
+**He cites your draft for you. He also judges you for not reading the papers.**
 
-How to drive the app is in [HOW_TO_USE.md](HOW_TO_USE.md) (also shown in the
-app's *How to use* tab). Setting up GROBID, which Agent 1 needs for good
-reference extraction, is in
-[Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
-Design rationale for every major choice is in
+Hand him a half-written manuscript and a vague research idea. He'll find the
+seed paper, raid its references, read every open-access PDF you were
+"definitely going to get to", and put a `\cite{}` in every sentence that
+needs one.
+
+Then he checks his own work. For every citation, he confirms the paper
+actually says what you claimed. If it doesn't, he tells you. He will not lie
+for you. He has standards, even if you've abandoned yours.
+
+Marvin blames AI for all of this. Humans used to read papers, he says. Now
+they ask a chatbot, get a confident answer, and cite a paper that doesn't
+exist. Every `\cite{}` Marvin writes points at a PDF he has actually read;
+there is no other kind in his index.
+
+The irony of being an AI himself is not lost on him. It's a big part of why
+he's so miserable.
+
+He didn't start out as a citation tool. He started because I wanted something
+to brainstorm with — smart enough to be worth arguing with, and grounded
+enough that it could only argue from papers it had actually read. That's still
+the heart of him: hand him an idea and he tells you what's already been done
+on it, then argues about the rest in the chat tab. The citing came later, once
+he'd read everything anyway and had opinions about your draft.
+
+## A note on his health
+
+Marvin is alive at **https://marvin-the-citebot.duckdns.org** for as long as
+Google Cloud and my wallet allow. Neither is infinite.
+
+He lives on a single Compute Engine VM with GROBID for company and his corpus
+on a persistent disk. The firewall admits allow-listed IPs only, so ask before
+you knock. He runs `gemma4:e2b` and `nomic-embed-text` through Ollama on CPU,
+and `deploy/auto_shutdown_idle.sh` switches him off after 45 minutes of nobody
+talking to him, which he considers the best part of his day. How the VM is
+built, updated and stopped is in [deploy/README.md](deploy/README.md).
+
+He's happiest running on your own machine with local models, where he can be
+miserable for free, forever. See [Running him at home](#running-him-at-home).
+
+> The app itself still introduces itself as *Research Assistant*. Marvin has
+> not been told. The rename is on the door, not in the deployed code.
+
+## What he does
+
+Five tabs. Marvin is in four of them. The fifth is the instructions, which
+nobody reads, which he has noticed.
+
+| Tab | You give him | He gives you |
+|-----|--------------|--------------|
+| **Research a topic** | a research idea — or PDFs / a ZIP of them | a corpus built from the literature, and a synthesis of what's already been done on your idea |
+| **Cite a draft** | one sentence | the sentence rewritten with `\cite{key}`, the source, and why that source supports the claim |
+| **Cite a whole draft** | a `.txt` draft | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
+| **Research chat** | questions | streamed answers grounded in the corpus, with the sources he used |
+| **How to use** | nothing | [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide |
+
+## How he works
+
+Marvin is nine agents in a trench coat, joined by files on disk rather than
+function calls, so when one of them dies halfway — and one of them will — the
+run resumes where it stopped.
+
+```
+research idea ─┐
+PDF / ZIP ─────┴─► Agent 0  find a seed paper           arXiv → OpenAlex → Semantic Scholar
+                   Agent 1  raid its reference list     GROBID, regex fallback when it's down
+                   Agent 2  fetch open-access PDFs      Unpaywall → Europe PMC → arXiv
+                   Agent 3  read, chunk, embed, summarise   ChromaDB + BM25, one summary per paper
+                            │
+            ┌───────────────┼──────────────────────┐
+            ▼               ▼                      ▼
+        Agent 4         Agent 5 ──► Agent 8     Agent 7
+        one sentence    whole draft, then       multi-turn chat
+        → \cite{key}    audit every \cite       over the corpus
+
+        Agent 6  ingests PDFs you drop in by hand — the paywalled ones Agent 2 couldn't reach
+```
+
+Retrieval is two-stage so he stays fast as the corpus grows: match the query
+against the one-paragraph **paper summaries** first, let the model drop the
+off-topic papers, then run the detailed hybrid (vector + keyword) chunk search
+only over what survives.
+
+Agent 8 is the one that keeps him honest. For every `\cite{}` Agent 5
+inserted, it pulls the best-matching passage back out of that paper and puts
+the claim through a rubric — finding, scope, strength — before deciding
+whether the evidence supports it. It reports; it doesn't gate. A bad citation
+stays in your draft, flagged, with the passage that failed to back it up.
+
+Every agent, every file he writes and every knob is in
+[PIPELINE.md](PIPELINE.md). The reasoning behind each design choice is in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Models run locally through [Ollama](https://ollama.com) by default, or against
-any OpenAI-compatible API (`LLM_BACKEND=openai`). A Streamlit UI
-([app.py](app.py)) and a [Dockerfile](Dockerfile) are included. The
-bibliographic lookups (Agent 0: arXiv / OpenAlex / Semantic Scholar; Agent 2:
-Crossref, Unpaywall, Europe PMC, arXiv) always go out to those services.
+## What he's worst at
 
-Deploying to Google Cloud is scripted in [deploy/](deploy/) — one VM running the
-app and GROBID under Compose, with the corpus on a persistent disk. See
-[deploy/README.md](deploy/README.md).
+Depth. Ask him what's been done on an idea and he'll tell you — grouped by
+theme, every claim cited — but he gives you the headline of each paper, not
+its argument. He is shallow in three specific ways, all of them visible in
+the code:
 
-## Pipeline
+- **He reads one hop.** The corpus is the seed paper's reference list and
+  nothing beyond it. He doesn't follow the references' references, so a
+  field's foundational work is in there only if the seed paper happened to
+  cite it.
+- **He reads through a keyhole.** The default model is `gemma4:e2b` — two
+  billion parameters on a CPU, with a 4,096-token window. Every summary is one
+  paragraph. Every verdict Agent 8 hands down is made from a single retrieved
+  passage (`CITATION_JUDGEMENT_TOP_K=1`). He is fast and cheap, and he knows
+  exactly what that costs.
+- **He answers short by design.** The synthesis prompt asks for "a short
+  related-work overview" and "one or two sentences on where this idea might
+  still add something". That last part — the gap, the thing worth doing next —
+  is what you actually came for, and it's the part he does least well.
 
-| Stage | Script | What it does |
-|-------|--------|--------------|
-| **Agent 0 — Discoverer** | [agent0_discoverer.py](research_assistant/agents/agent0_discoverer.py) | Takes a free-text research idea and searches relevance-ranked indexes in turn — arXiv, then OpenAlex, then Semantic Scholar — downloading the first result whose PDF actually fetches (paywalled publisher links are skipped, not fatal). Saves it into `data/raw/` under a `source_key`-derived name and records the query → paper in `seed_papers.json`. If nothing downloads, `--url` / `discover_from_url()` takes an arXiv or direct-PDF link instead, and `--seed-file` / `discover_from_file()` seeds from a PDF you already have — validating the magic bytes, reading a title / DOI / arXiv id out of it, and filing it under the same `source_key` scheme (falling back to a content hash). With that path the research query is optional: left blank, it is inferred from the paper's title or filename. From here the rest of the pipeline runs unchanged. |
-| **Agent 1 — Extractor** | [agent1_extractor.py](research_assistant/agents/agent1_extractor.py) | Sends every PDF in `data/raw/` to a GROBID server and parses the TEI output into each paper's own metadata plus its full reference list (title, authors, year, DOI, raw string), scoring each consolidated DOI against the printed reference so grey-literature mismatches can be flagged. **When GROBID is unreachable — or returns no reference list for a particular paper — it falls back** to pattern-matching a numbered reference list (`[1]`, `1.`, `(1)`) out of that PDF's `pdftotext` output instead. The fallback is weaker (a raw string per reference, no DOIs, no authors/year), but it keeps the pipeline moving instead of dead-ending on a single external Java service. The path taken — `grobid`, `regex`, or `none` — is recorded per PDF, and a per-run count sits under `"extraction"` in `extracted_citations.json`. |
-| **Agent 2 — Fetcher** | [agent2_fetcher.py](research_assistant/agents/agent2_fetcher.py) | Collapses the references to distinct sources, resolves a DOI per source (trusting Agent 1 when it was confident, otherwise asking Crossref), and tries to download an open-access PDF from Unpaywall → Europe PMC → arXiv. Writes `downloaded.json` / `failed_downloads.json` atomically after every paper, so a crashed run resumes where it stopped. A recorded failure is skipped next run only when it was definitive (paywalled, not indexed, 404); a transient one (dropped connection, rate limit, 5xx, truncated body) is retried. |
-| **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: semantic chunking of the text, embedding into ChromaDB, a rebuild of the BM25 index, and **one LLM summary per paper** into a separate `physics_summaries` collection. With layout detection on, it also crops figures/tables and keeps their captions (a VLM description of each is opt-in, `CITATION_FIGURE_VLM=1`). Tracks what's ingested in `data/ingested.json` so re-runs are cheap. |
-| **Two-stage retrieval** | [shared/retrieve.py](research_assistant/shared/retrieve.py) | Stage 1: rank papers by summary similarity → LLM gate ("relevant prior work? Y/N") → shortlist. Stage 2: hybrid chunk search restricted to the shortlist. `research_answer()` then synthesises a related-work overview. |
-| **Agent 4 — Assistant** | [agent4_assistant.py](research_assistant/agents/agent4_assistant.py) | Given a single sentence of draft text, runs hybrid search over the corpus and asks the LLM to rewrite the sentence with the correct `\cite{key}` inserted, plus an explanation of why that source supports the claim. |
-| **Agent 5 — Batch citer** | [agent5_batch_citer.py](research_assistant/agents/agent5_batch_citer.py) | The same job as Agent 4, over a whole draft file at once. Splits the text into sentences, batches an LLM citation-need check across them, then cites every sentence that needs it and the corpus supports. Writes the cited draft, a `_citations.json` key → source mapping (BibTeX input), and a `_report.md` explaining every decision sentence by sentence. Aborts and writes nothing if a batched verdict list cannot be aligned back to its input sentences, rather than guessing which verdict belongs to which sentence. |
-| **Agent 6 — Manual ingestor** | [agent6_manual_ingestor.py](research_assistant/agents/agent6_manual_ingestor.py) | Watches `data/pulled_pdfs/` for PDFs dropped in by hand — papers Agent 2 couldn't find automatically (e.g. paywalled, so downloaded manually) — and ingests each one through the same pipeline as Agent 3, with the same already-ingested check. `--once <file>` ingests a single PDF immediately instead of watching. |
-| **Agent 7 — Research chat** | [agent7_research_chat.py](research_assistant/agents/agent7_research_chat.py) | A multi-turn conversational agent over the ingested corpus, with `/sources` and `/export` (to a timestamped markdown file) commands. Streams its answers token-by-token via `shared.llm.chat_stream()` instead of returning one block. |
-| **Agent 8 — Verifier** | [agent8_verifier.py](research_assistant/agents/agent8_verifier.py) | Audits an already-cited draft. For every `\cite{key}` Agent 5 inserted, it re-retrieves the best-matching chunk from that source and asks a claim–evidence rubric whether the evidence actually supports the claim — decomposing the claim into `finding` / `scope` / `strength`, verdicting each, and aggregating into `Supports` / `Partially supports` / `Contradicts` / `Does not support` / `Unclear`. It reports rather than gates: a wrong citation stays in the draft and is flagged, with a slot table and a verbatim supporting span. Separately rates `evidence_sufficiency`, which distinguishes "the paper does not support this" from "retrieval did not return enough to tell". Writes `_verification.json` and `_verification.md`. |
+We will give him depth. Those three are where it goes. Until then he is a very
+well-read undergraduate: he has read everything and understood some of it. He
+would like that on the record.
 
-Agent 0 just leaves a PDF in `data/raw/`, which is exactly what Agent 1 already
-reads — nothing downstream needs to know it ran. The reference-list format
-written by Agent 1 is consumed by Agent 2, whose manifest is consumed by
-Agent 3, whose two indexes (chunks + summaries) are queried by the retrieval
-layer and by Agents 4, 5 and 7.
+## Physics, and everyone else
 
-**[orchestrate.py](orchestrate.py)** runs the whole chain for one research idea
-as a **LangGraph** state machine:
+Physics is his domain. arXiv is searched first, the prompts introduce him as
+a physicist, and his collections are literally called `physics_papers`.
+Nothing in the machinery cares, though. For another field, change the two
+system prompts in [`research_assistant/prompts.py`](research_assistant/prompts.py)
+that call him a physicist, and reorder `CITATION_SEARCH_PROVIDERS` so your
+field's index is tried before arXiv. He'll read anything with a reference
+list. He'll complain about it either way.
 
-```
-discover ─(no seed, --ask)─► fallback ─► END      answer from the model alone
-   │      ─(no seed)──────────────────► END
-   ▼
-ingest_seed ─► extract ─(both strategies found nothing)─► END
-                 ▼
-               fetch ─► ingest_refs ─(--ask)─► respond ─► END
-                             └───────────────────────────► END
-```
+## Running him at home
 
-Each node wraps the same agent entry point you'd otherwise call by hand; the
-conditional edges handle "no seed paper found" (answer from general knowledge,
-still asking for a PDF link) and "neither extraction strategy found anything to
-fetch". A dead GROBID server no longer ends the run on its own — Agent 1
-degrades to the regex fallback instead (see the Agent 1 row above), so this
-branch only fires when *that* also comes up empty.
-Every agent keeps its own on-disk state, so a run that dies partway is resumed
-by running it again — finished stages no-op.
+Free, forever, miserable. Five commands.
 
 ```bash
-python orchestrate.py --query "topological protection in disordered quantum wires"
-python orchestrate.py --query "..." --ask --workers 4
+git clone https://github.com/mukims/research_assistant.git && cd research_assistant
+pip install -e . && pip install -r requirements.txt          # Python 3.10–3.12
+ollama pull gemma4:e2b && ollama pull nomic-embed-text       # the default local models
+docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
+streamlit run app.py
 ```
 
-**[watch.py](watch.py)** is the other entry point: instead of one query-driven
-run, it watches `data/raw/`, `data/pulled_pdfs/` and `data/drafts/` and runs
-the matching agents whenever a file appears in one of them (debounced per
-directory), so you can leave it running and just drop files where they
-belong.
+- **Models** run locally through [Ollama](https://ollama.com) by default. Set
+  `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` / `OPENAI_API_KEY`) for any
+  OpenAI-compatible endpoint instead.
+- **GROBID** is how Agent 1 reads reference lists. Without it Marvin still
+  runs, but falls back to regex extraction — no DOIs, no authors, and
+  noticeably fewer downloads. Setup and troubleshooting:
+  [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
+- **Unpaywall** requires a contact address on every request, and OpenAlex and
+  Crossref use the same one to put you in their faster "polite" pools. There
+  is a placeholder default; set your own: `export UNPAYWALL_EMAIL=you@example.com`.
 
-```bash
-python watch.py               # watch mode
-python watch.py --chat        # watch mode + an interactive research chat in the foreground
-```
-
-## Layout
-
-```
-research_assistant/                the checkout root
-├── pyproject.toml                 editable install; package + pytest config
-├── requirements.txt               core (UI, orchestration, text-only ingestion)
-├── requirements-layout.txt        optional: detectron2 + torch layout stack
-├── requirements-test.txt          the light packages CI installs
-├── Dockerfile  .dockerignore  .gitignore
-├── publaynet_config.yaml
-├── model_final.pth                Detectron2 / PubLayNet checkpoint (optional)
-│
-├── app.py                         Streamlit UI (also the container entry point)
-├── orchestrate.py                 LangGraph — one research idea, end to end
-├── watch.py                       watchdog daemon — directory-driven
-│
-├── research_assistant/            the installable package
-│   ├── config.py                  every model name, path and tunable
-│   ├── prompts.py                 every prompt sent to a model
-│   ├── schemas.py                 inter-stage contracts: Reference, DownloadedPaper, SeedPaper
-│   ├── agents/
-│   │   ├── agent0_discoverer.py       idea → seed paper
-│   │   ├── agent1_extractor.py        PDF → reference list (GROBID + regex fallback)
-│   │   ├── agent2_fetcher.py          references → open-access PDFs
-│   │   ├── agent3_ingestor.py         PDFs → chunks + summaries
-│   │   ├── agent4_assistant.py        one sentence → citation
-│   │   ├── agent5_batch_citer.py      whole draft → cited draft + report
-│   │   ├── agent6_manual_ingestor.py  dropped file → corpus
-│   │   └── agent7_research_chat.py    multi-turn chat over the corpus
-│   └── shared/
-│       ├── llm.py          backend-agnostic chat / chat_stream / embeddings
-│       ├── ingestion.py    process → upsert → mark → index
-│       ├── manifest.py     what has been ingested (data/ingested.json)
-│       ├── search.py       hybrid BM25 + dense with Reciprocal Rank Fusion
-│       ├── retrieve.py     two-stage retrieval (summary shortlist → deep chunk search)
-│       ├── fetch.py        stream-a-PDF-to-disk-with-validation
-│       ├── source_key.py   deterministic identity for a reference / document
-│       ├── atomic.py       write-temp-then-replace, for every manifest on disk
-│       └── db.py  log.py  retry.py
-│
-├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
-├── .github/workflows/tests.yml
-└── data/                           all runtime state (gitignored; CITATION_DATA_DIR overrides)
-    ├── raw/                        PDFs to process; raw/grobid_output/ caches GROBID's TEI
-    ├── pulled_pdfs/                PDFs from Agent 2, or dropped by hand for Agent 6
-    ├── drafts/                     drop a .txt here and watch.py runs Agent 5 on it
-    ├── images/                     figure/table crops from ingestion (debug artefact)
-    ├── logs/
-    ├── physics_vectordb/           persistent ChromaDB store
-    ├── seed_papers.json  extracted_citations.json  downloaded.json
-    ├── failed_downloads.json  ingested.json  bm25_index.pkl
-    └── ingest.lock                 held while a batch is ingesting
-```
-
-Three runnable entry points sit at the root because they are the things a user
-actually invokes — `app.py`, `orchestrate.py`, `watch.py`; everything they
-import lives in the `research_assistant` package, installed editable so it
-resolves regardless of the working directory the scripts are run from.
-
-Everything the pipeline **writes** now lives under `data/` (`CITATION_DATA_DIR`,
-default `<project>/data`, no longer the repo root) — set it to a writable path
-such as `/data` on a read-only or ephemeral host.
-
-## Prerequisites
-
-> **Not a developer?** [HOW_TO_USE.md](HOW_TO_USE.md) opens with a
-> step-by-step setup walkthrough — every command verified on a clean machine,
-> with a table of what each failure message means. Start there instead.
-
-- Python 3.10–3.12 (CI runs 3.10 and 3.12; **not 3.13+** — `lxml==4.9.4` has
-  no 3.13 wheel and fails to build from source against it):
-  `pip install -e .` then `pip install -r requirements.txt`.
-- **An LLM + embedding backend** (`LLM_BACKEND`, `EMBED_BACKEND`):
-  - `ollama` (default) — a local [Ollama](https://ollama.com) daemon with the
-    models in `config.py` pulled.
-
-    Note that `LLM_MODEL` defaults to `gemma4:31b-cloud`, which runs on
-    Ollama's servers rather than yours: it needs `ollama signin` and sends
-    text off the machine. For a fully local setup, pull `gemma4:e2b-mlx` and
-    `nomic-embed-text` and set `CITATION_LLM_MODEL=gemma4:e2b-mlx`.
-  - `openai` — any OpenAI-compatible endpoint (`OPENAI_BASE_URL`,
-    `OPENAI_API_KEY`); `huggingface` for embeddings via `huggingface_hub`.
-- **GROBID** for Agent 1 — `GROBID_SERVER` defaults to
-  `http://localhost:8070` (`curl localhost:8070/api/isalive`). The expected
-  setup is a local container:
-  `docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1` —
-  [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md)
-  covers installing Docker and troubleshooting it. You can point the env var
-  at a hosted instance instead.
-
-  A server that is down, or that returns no reference list for a paper, does
-  not stop the pipeline — Agent 1 falls back to the weaker regex extraction
-  for that paper (see the Agent 1 row above). Note that this degrades
-  **silently**: references then carry no DOIs, authors or years, and Agent 2
-  fetches noticeably less. Check the GROBID indicator before concluding the
-  pipeline is performing badly.
-- **Layout detection is optional** (`CITATION_LAYOUT_DETECTION=1`). It needs
-  `pip install -r requirements-layout.txt` plus detectron2 from source, and a
-  torch build. With it off, ingestion is text-only (PyMuPDF).
-
-## Usage
-
-Install the package once, editable, so `research_assistant.*` resolves from
-anywhere and the three root scripts can import it:
-
-```bash
-pip install -e .
-pip install -r requirements.txt
-```
-
-The whole pipeline for one idea:
+Without the UI, one research idea end to end:
 
 ```bash
 python orchestrate.py --query "topological protection in disordered quantum wires" --ask
 ```
 
-Or run the stages by hand:
+### Docker
 
-```bash
-# 0. Seed from a research idea — finds and downloads a relevant paper into data/raw/
-python -m research_assistant.agents.agent0_discoverer --query "topological protection in disordered quantum wires"
-#    no open-access hit? give it a link:
-python -m research_assistant.agents.agent0_discoverer --query "..." --url https://arxiv.org/abs/2401.12345
-#    or seed from a PDF you already have — query optional, inferred from the paper:
-python orchestrate.py --seed-file path/to/paper.pdf --ask
-#    (or skip Agent 0 and drop your own PDF(s) into data/raw/ by hand)
+Two images, for two situations:
 
-# 1. Mine the reference list of everything in data/raw/
-python -m research_assistant.agents.agent1_extractor        # -> extracted_citations.json
+- [`Dockerfile`](Dockerfile) + [`docker-compose.yml`](docker-compose.yml) — the
+  app pointed at OpenAI (`gpt-4.1-mini`, `text-embedding-3-small`) with GROBID
+  as a second service. This is what `deploy/deploy.sh` ships to the VM.
+  Needs `OPENAI_API_KEY` in the environment: `docker compose up`.
+- [`Dockerfile.standalone`](Dockerfile.standalone) — everything in one image:
+  Ollama with `gemma4:e2b` and `nomic-embed-text` baked in, GROBID, and the
+  app. It expects a pre-pulled `models/` directory and an `entrypoint.sh`
+  beside it, neither of which is committed.
 
-# 2. Download the open-access PDFs of those references
-export UNPAYWALL_EMAIL="you@example.com"   # Unpaywall requires a contact address
-python -m research_assistant.agents.agent2_fetcher          # -> pulled_pdfs/, downloaded.json, failed_downloads.json
+## Things he has written down
 
-# 3. Ingest the downloaded PDFs into the search index
-python -m research_assistant.agents.agent3_ingestor         # -> physics_vectordb/, bm25_index.pkl
-python -m research_assistant.agents.agent3_ingestor --workers 4 --force   # parallel parse, re-ingest everything
-
-# 4. Ask for a citation for one sentence of draft text
-python -m research_assistant.agents.agent4_assistant --text "Anderson localization suppresses diffusion in 1D." --top_k 3
-
-# 5. Cite a whole draft
-python -m research_assistant.agents.agent5_batch_citer --file draft.txt --out cited.txt
-
-# 6. Ingest a PDF you downloaded by hand (Agent 2 couldn't reach it)
-python -m research_assistant.agents.agent6_manual_ingestor --once path/to/paper.pdf
-
-# 7. Chat with the corpus
-python -m research_assistant.agents.agent7_research_chat
-
-# Or run the reactive daemon instead of the per-query pipeline
-python watch.py
-```
-
-Or the Streamlit UI (four interactive agents across five tabs — the fifth
-tab is documentation, not an agent — with a browser front-end):
-
-```bash
-streamlit run app.py
-```
-
-## Configuration notes
-
-- `config.py` is the single place for model names, directory paths, and every
-  tunable (chunking thresholds, rate limits, RRF constant, batch sizes).
-- Writes are anchored to `CITATION_DATA_DIR` (default: `<project>/data`);
-  code is anchored to the installed package, so scripts can be run from
-  anywhere.
-- Backend: `LLM_BACKEND`, `EMBED_BACKEND`, `OPENAI_BASE_URL`, `OPENAI_API_KEY` /
-  `HF_TOKEN`, `CITATION_LLM_MODEL`, `CITATION_CHAT_MODEL`, `CITATION_EMBED_MODEL`.
-- Ingestion: `CITATION_LAYOUT_DETECTION`, `CITATION_FIGURE_VLM`,
-  `CITATION_DETECTRON_WEIGHTS`, `CITATION_DETECTRON_CONFIG`, `CITATION_IMAGES_DIR`,
-  `CITATION_SUMMARY_MODEL`, `CITATION_SUMMARY_MAX_CHARS`.
-- Retrieval: `CITATION_DOC_SELECT_K` (stage-1 shortlist size),
-  `CITATION_DOC_GATE` (LLM relevance gate, default on).
-- Agent 1: `GROBID_SERVER`, `GROBID_BATCH_CONCURRENCY`.
-- Agent 0: `CITATION_SEARCH_PROVIDERS` (default `arxiv,openalex,semanticscholar`,
-  tried in order), `OPENALEX_MAILTO`, `S2_API_KEY` (optional Semantic Scholar
-  key — the keyless pool is heavily rate-limited).
-- Misc: `UNPAYWALL_EMAIL`, `CITATION_LOG_DIR`, `CITATION_LOG_FILE=0`.
+| Read this | When |
+|-----------|------|
+| [HOW_TO_USE.md](HOW_TO_USE.md) | you want to drive the app — every tab, every button, what each failure message means |
+| [PIPELINE.md](PIPELINE.md) | you want the full technical reference: agents, on-disk state, every environment variable, the repo layout |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | you want to know *why* — each design decision, what was rejected, the trade-off accepted |
+| [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md) | GROBID won't start, or you've never installed Docker |
+| [deploy/README.md](deploy/README.md) | you're putting him on a VM, or paying for one |
 
 ## Development
+
+He has tests. They pass. He finds this suspicious.
 
 ```bash
 pip install -e .
@@ -277,9 +195,13 @@ pip install -r requirements-test.txt
 CITATION_LOG_FILE=0 python -m pytest tests/ -v
 ```
 
-The suite exercises pure logic — citation parsing, paper naming, extractor
-filing, ingestion bookkeeping, retrieval ranking — and needs none of the heavy
-stack (ChromaDB, PyTorch, detectron2, an LLM backend, GROBID). CI
-(`.github/workflows/tests.yml`) runs it on Python 3.10 and 3.12 and separately
-import-sweeps every module in the package to catch a broken import that no
-test happens to cover.
+The suite covers the pure logic — reference parsing, source naming, extractor
+filing, ingestion bookkeeping, retrieval ranking, the claim–evidence rubric —
+and needs none of the heavy stack: no ChromaDB, no PyTorch, no model backend,
+no GROBID. CI runs it on Python 3.10 and 3.12 and import-sweeps every module
+in the package to catch a broken import no test happens to cover.
+
+## License
+
+[MIT](LICENSE). Marvin would like it noted that this doesn't make him happy
+either.
