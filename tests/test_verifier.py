@@ -577,3 +577,26 @@ class TestNotJudgedIsFullyAccountedFor(VerifyDraftTestCase):
             self.assertIn(name, totals, f"{name} must be seeded even at zero")
         self.assertEqual(totals["total"] - totals["judged"],
                          sum(totals[name] for name in buckets))
+
+
+class TestVerifierExcludesVlmText(VerifyDraftTestCase):
+    """A verdict rests on the paper's text: figure_description chunks are
+    never retrieved as evidence."""
+
+    def test_hybrid_search_is_called_with_exclude_types(self):
+        seen = {}
+        hits = [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}}]
+
+        def record(*args, **kwargs):
+            seen.update(kwargs)
+            return hits
+
+        self._run(
+            "Graphene conducts well \\cite{cite_1}.",
+            {"Smith 2020": "cite_1"},
+            [("Smith 2020", "a.pdf")],
+            hits,
+            search_side_effect=record,
+        )
+        self.assertEqual(seen["exclude_types"], {"figure_description"})
+        self.assertEqual(seen["doc_filter"], {"a.pdf"})

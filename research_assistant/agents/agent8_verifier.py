@@ -238,9 +238,12 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         # hybrid_search embeds the query, which is a network call under
         # EMBED_BACKEND=openai|huggingface.
         try:
+            # A verdict rests on what the paper says. A figure_description is
+            # a model's reading of a plot (v2, spec §4.6) and is never evidence.
             hits = hybrid_search(
                 entry["claim"], collection, bm25, texts, metadatas,
                 top_k=top_k, doc_filter=documents,
+                exclude_types={"figure_description"},
             )
         except Exception as exc:
             entry["outcome"] = "retrieval_failed"

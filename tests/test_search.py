@@ -239,5 +239,42 @@ class TestQueryTokenizerFollowsThePickle(unittest.TestCase):
         self.assertEqual(self._run(bm25), ["the", "ﬁelds"])
 
 
+class TestExcludeTypes(unittest.TestCase):
+    """A verdict must rest on what the paper says, not on a model's reading of
+    a plot: Agent 8 excludes figure_description chunks from evidence."""
+
+    class _Coll(FakeCollection):
+        def __init__(self, ids):
+            super().__init__(ids)
+            self.where = None
+
+        def query(self, **kwargs):
+            self.where = kwargs.get("where")
+            return super().query(**kwargs)
+
+    def test_sparse_side_drops_excluded_types(self):
+        texts = ["a", "b", "c"]
+        metas = [{"document": "d.pdf", "type": "text_chunk"},
+                 {"document": "d.pdf", "type": "figure_description"},
+                 {"document": "d.pdf", "type": "caption"}]
+        out = hybrid_search("q", FakeCollection([]), FakeBM25([1.0, 3.0, 2.0]), texts, metas,
+                            top_k=3, embeddings_model=FakeEmbeddings(), exclude_types={"figure_description"})
+        self.assertEqual([r["chunk_index"] for r in out], [2, 0])
+
+    def test_dense_where_combines_document_and_type_filters(self):
+        coll = self._Coll([])
+        texts, metas = _corpus(2)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1,
+                      embeddings_model=FakeEmbeddings(), doc_filter={"doc0.pdf"}, exclude_types={"figure_description"})
+        self.assertEqual(coll.where, {"$and": [{"document": {"$in": ["doc0.pdf"]}},
+                                               {"type": {"$nin": ["figure_description"]}}]})
+
+    def test_dense_where_is_none_when_nothing_is_filtered(self):
+        coll = self._Coll([])
+        texts, metas = _corpus(2)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1, embeddings_model=FakeEmbeddings())
+        self.assertIsNone(coll.where)
+
+
 if __name__ == "__main__":
     unittest.main()
