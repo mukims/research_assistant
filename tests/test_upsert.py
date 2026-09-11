@@ -189,5 +189,53 @@ class TestLongChunkDeduplication(UpsertTestCase):
         self.assertEqual(len(self.collection.chunks_for("a.pdf")), 1)
 
 
+class TestPrechunkedEntries(UpsertTestCase):
+    """v2 hands upsert_corpus chunks it has already made."""
+
+    def _chunk(self, document, content, type="text_chunk", embed_text=None, meta=None):
+        return {
+            "document": document, "citation": f"{document} title", "page": 2, "type": type,
+            "content": content, "embed_text": embed_text, "meta": meta or {},
+        }
+
+    def test_prechunked_text_is_stored_verbatim_not_rechunked(self):
+        content = "Para one.\n\nPara two."             # the fake chunker would split on the blank line
+        ing.upsert_corpus([self._chunk("a.pdf", content)])
+        self.assertEqual(self.collection.chunks_for("a.pdf"), [content])
+
+    def test_embed_text_is_embedded_and_content_is_stored(self):
+        seen = []
+        import research_assistant.shared.llm as llm_mod
+        emb = types.SimpleNamespace(embed_documents=lambda texts: (seen.extend(texts), [[0.0] for _ in texts])[1],
+                                    embed_query=lambda t: [0.0])
+        with patch.object(llm_mod, "get_embeddings", lambda *a, **k: emb):
+            ing.upsert_corpus([self._chunk("a.pdf", "stored text", embed_text="Title: T. Section: S. stored text")])
+        self.assertEqual(seen, ["Title: T. Section: S. stored text"])
+        self.assertEqual(self.collection.documents, ["stored text"])
+
+    def test_meta_is_merged_unprefixed(self):
+        ing.upsert_corpus([self._chunk("a.pdf", "x" * 30, meta={"section": "methods", "seq": 3, "described": False})])
+        m = self.collection.metadatas[0]
+        self.assertEqual((m["section"], m["seq"], m["described"]), ("methods", 3, False))
+        self.assertEqual(m["type"], "text_chunk")
+        self.assertEqual(m["citation_source"], "a.pdf title")
+
+    def test_summary_source_feeds_the_summary_index_and_is_not_stored(self):
+        seen = {}
+        with patch.object(ing, "upsert_summaries", lambda per_doc_text, per_doc_citation: seen.update(per_doc_text) or 0):
+            ing.upsert_corpus([
+                self._chunk("a.pdf", "body chunk " * 5),
+                {"document": "a.pdf", "citation": "a.pdf title", "page": 0, "type": "summary_source",
+                 "content": "abstract + intro + conclusion"},
+            ])
+        self.assertEqual(seen, {"a.pdf": "abstract + intro + conclusion"})
+        self.assertEqual(self.collection.chunks_for("a.pdf"), ["body chunk " * 5])
+
+    def test_v1_entries_still_go_through_the_chunker(self):
+        with patch.object(ing, "CHUNK_MIN_LENGTH", 5):
+            ing.upsert_corpus([self._entry("a.pdf", "Para one.\n\nPara two.")])
+        self.assertEqual(self.collection.chunks_for("a.pdf"), ["Para one.", "Para two."])
+
+
 if __name__ == "__main__":
     unittest.main()

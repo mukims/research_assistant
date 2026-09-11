@@ -152,17 +152,22 @@ def clean_text(text):
     """Remove fragmented single-character spacing artifacts from PDF extraction.
 
     Uses pre-compiled regexes and converges early instead of looping a
-    fixed 20 times.
+    fixed 20 times. Preserves paragraph breaks (double newlines).
     """
-    text = _RE_SPACED_PAIR_BOUNDARY.sub(r'\1\2', text)
-    # Iterate until stable (converges in 2-5 passes for typical PDF artefacts)
-    for _ in range(20):
-        new_text = _RE_SPACED_PAIR_STANDALONE.sub(r'\1\2', text)
-        if new_text == text:
-            break
-        text = new_text
-    text = _RE_MULTI_SPACE.sub(' ', text)
-    return text.strip()
+    paragraphs = (text or "").split("\n\n")
+    cleaned_paras = []
+    for p in paragraphs:
+        p = _RE_SPACED_PAIR_BOUNDARY.sub(r'\1\2', p)
+        # Iterate until stable (converges in 2-5 passes for typical PDF artefacts)
+        for _ in range(20):
+            new_p = _RE_SPACED_PAIR_STANDALONE.sub(r'\1\2', p)
+            if new_p == p:
+                break
+            p = new_p
+        p = _RE_MULTI_SPACE.sub(' ', p).strip()
+        if p:
+            cleaned_paras.append(p)
+    return "\n\n".join(cleaned_paras)
 
 
 # ─── VLM call (with retry) ───────────────────────────────────────────────────
@@ -284,6 +289,9 @@ def _get_detectron_model(weights_path=None, config_path=None):
 
 
 EXTRACTION_MODES = ("layout", "text_only")
+
+# v2 entries arrive already chunked; these pass straight through to the store.
+PRECHUNKED_TYPES = ("text_chunk", "caption", "figure_description")
 
 
 def _tag_extraction(corpus: list[dict], mode: str) -> list[dict]:
@@ -561,7 +569,9 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
         col.add(
             ids=[f"sum::{doc}"],
             documents=[summary],
-            embeddings=[embeddings.embed_query(summary)],
+            # A stored summary is a document, not a query: under the v2 nomic
+            # prefixes the two are embedded differently. Identical for v1.
+            embeddings=embeddings.embed_documents([summary]),
             metadatas=[{"document": doc, "citation_source": per_doc_citation.get(doc, "")}],
         )
         made += 1
@@ -614,9 +624,16 @@ def upsert_corpus(corpus: list[dict]):
     total_corpus = []
     page_text_groups = {}  # key: (document, citation, page) → list[str]
 
+    # Per-document text for the summary index. v1 accumulates it from page
+    # groups below; v2 sends one explicit summary_source entry per document.
+    per_doc_text, per_doc_citation = {}, {}
+
     for entry in corpus:
-        if entry["type"] in ["figure", "table"]:
+        if entry["type"] in ["figure", "table"] or entry["type"] in PRECHUNKED_TYPES:
             total_corpus.append(entry)
+        elif entry["type"] == "summary_source":
+            per_doc_text[entry["document"]] = entry.get("content") or ""
+            per_doc_citation.setdefault(entry["document"], entry["citation"])
         elif entry["type"] == "text":
             content = clean_text(entry["content"])
             if len(content) < CHUNK_MIN_LENGTH:
@@ -624,13 +641,12 @@ def upsert_corpus(corpus: list[dict]):
             key = (entry["document"], entry["citation"], entry["page"])
             page_text_groups.setdefault(key, []).append(content)
 
-    # Per-document full text, for the summary index (populated as we chunk).
-    per_doc_text, per_doc_citation = {}, {}
-
     # Chunk each page's concatenated text in one call
     for (doc, cit, page), texts in page_text_groups.items():
         merged = "\n\n".join(texts)
-        per_doc_text[doc] = per_doc_text.get(doc, "") + "\n\n" + merged
+        if doc not in per_doc_text or not per_doc_text[doc].strip():
+            per_doc_text[doc] = ""
+        per_doc_text[doc] = per_doc_text[doc] + "\n\n" + merged
         per_doc_citation.setdefault(doc, cit)
         try:
             docs = chunker.create_documents([merged])
@@ -668,16 +684,17 @@ def upsert_corpus(corpus: list[dict]):
         offset += limit
 
     current_index = get_max_chunk_index(collection)
-    documents, metadatas, ids, seen = [], [], [], set()
+    documents, embed_texts, metadatas, ids, seen = [], [], [], [], set()
 
     for entry in total_corpus:
-        content = entry["content"].strip()
+        is_prechunked = entry.get("type") in PRECHUNKED_TYPES
+        content = entry["content"] if is_prechunked else entry["content"].strip()
         # Compare on the same form that reaches the store: add() truncates to
         # EMBED_MAX_CHARS, so comparing full text against stored text would
         # never match for a long chunk and would re-insert it on every run.
         stored_form = content[:EMBED_MAX_CHARS]
         identity = (entry["document"], stored_form)
-        if identity in seen or identity in existing_chunks or len(content) < CHUNK_MIN_LENGTH:
+        if identity in seen or identity in existing_chunks or len(content.strip()) < CHUNK_MIN_LENGTH:
             continue
         seen.add(identity)
         meta = {
@@ -689,7 +706,13 @@ def upsert_corpus(corpus: list[dict]):
         if "metadata" in entry:
             for k, v in entry["metadata"].items():
                 meta[f"extra_{k}"] = str(v)
-        documents.append(content)
+        # v2: flat metadata under its own names (section, seq, figure_id, …).
+        # Chroma accepts str / int / float / bool values only.
+        for k, v in (entry.get("meta") or {}).items():
+            meta[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
+        documents.append(stored_form)
+        # v2 embeds a contextual header + text; v1 embeds the stored text.
+        embed_texts.append((entry.get("embed_text") or content)[:EMBED_MAX_CHARS])
         metadatas.append(meta)
         ids.append(f"chunk_{current_index}")
         current_index += 1
@@ -698,10 +721,9 @@ def upsert_corpus(corpus: list[dict]):
         logger.info("Embedding and ingesting %d chunks…", len(documents))
         embed_t0 = time.perf_counter()
         for i in range(0, len(documents), EMBED_BATCH_SIZE):
-            b_docs = [d[:EMBED_MAX_CHARS] for d in documents[i : i + EMBED_BATCH_SIZE]]
             collection.add(
-                embeddings=embeddings.embed_documents(b_docs),
-                documents=b_docs,
+                embeddings=embeddings.embed_documents(embed_texts[i : i + EMBED_BATCH_SIZE]),
+                documents=documents[i : i + EMBED_BATCH_SIZE],
                 metadatas=metadatas[i : i + EMBED_BATCH_SIZE],
                 ids=ids[i : i + EMBED_BATCH_SIZE],
             )
