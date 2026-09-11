@@ -209,5 +209,35 @@ class TestFusion(unittest.TestCase):
         self.assertEqual(results[0]["chunk_index"], 20)
 
 
+class TestQueryTokenizerFollowsThePickle(unittest.TestCase):
+    """The query is tokenised the way the index was built."""
+
+    class _RecordingBM25:
+        def __init__(self, version):
+            self.tokenizer_version = version
+            self.seen = None
+
+        def get_scores(self, tokenized_query):
+            self.seen = list(tokenized_query)
+            return np.asarray([1.0, 0.5])
+
+    def _run(self, bm25):
+        texts, metadatas = _corpus(2)
+        hybrid_search("The ﬁelds", FakeCollection([]), bm25, texts, metadatas,
+                      top_k=1, embeddings_model=FakeEmbeddings())
+        return bm25.seen
+
+    def test_v2_pickle_gets_stemmed_normalised_tokens(self):
+        self.assertEqual(self._run(self._RecordingBM25("v2")), ["field"])
+
+    def test_v1_pickle_gets_legacy_tokens(self):
+        self.assertEqual(self._run(self._RecordingBM25("v1")), ["the", "ﬁelds"])
+
+    def test_untagged_object_is_treated_as_v1(self):
+        bm25 = self._RecordingBM25("v1")
+        del bm25.tokenizer_version
+        self.assertEqual(self._run(bm25), ["the", "ﬁelds"])
+
+
 if __name__ == "__main__":
     unittest.main()

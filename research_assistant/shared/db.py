@@ -14,6 +14,7 @@ import pickle
 
 from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.tokenize import TOKENIZER_VERSION
 
 logger = get_logger("db")
 
@@ -81,7 +82,25 @@ def load_search_resources():
 
     logger.info("Loading BM25 index from %s…", BM25_INDEX_PATH)
     with open(BM25_INDEX_PATH, "rb") as f:
-        bm25 = pickle.load(f)
+        payload = pickle.load(f)
+
+    # Two on-disk shapes: a bare BM25Okapi (built before the tokenizer was
+    # versioned, with `\w+`) and a dict carrying the tokenizer tag. The tag is
+    # copied onto the object so hybrid_search can pick the matching query
+    # tokenizer without a second return value.
+    if isinstance(payload, dict) and "bm25" in payload:
+        bm25 = payload["bm25"]
+        version = payload.get("tokenizer", "v1")
+    else:
+        bm25 = payload
+        version = "v1"
+    bm25.tokenizer_version = version
+    if version not in ("v1", TOKENIZER_VERSION):
+        logger.warning(
+            "BM25 index was built with tokenizer %s but this code knows %s — "
+            "keyword recall may be degraded; re-run ingestion to rebuild it.",
+            version, TOKENIZER_VERSION,
+        )
 
     return collection, bm25, texts, metadatas
 

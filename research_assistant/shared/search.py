@@ -8,12 +8,11 @@ singleton instance across many calls (needed for the planned Agent 5's
 per-sentence loop).
 """
 
-import re
-
 import numpy as np
 
 from research_assistant.config import RRF_K, DEFAULT_TOP_K
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.tokenize import tokenize, legacy_tokenize
 
 logger = get_logger("search")
 
@@ -63,8 +62,12 @@ def hybrid_search(
     # discarded — widen the candidate pool so enough survive the filter.
     k_cand = max(60, top_k * 10) if doc_filter else max(15, top_k * 3)
 
-    # 1. Sparse (BM25) retrieval
-    tokenized_query = re.findall(r'\w+', query.lower())
+    # 1. Sparse (BM25) retrieval — tokenised the way the pickle was built
+    # (db.load_search_resources tags the object; an untagged object is v1).
+    if getattr(bm25, "tokenizer_version", "v1") == "v1":
+        tokenized_query = legacy_tokenize(query)
+    else:
+        tokenized_query = tokenize(query)
     bm25_scores = bm25.get_scores(tokenized_query)
 
     # Only the top k_cand matter, so partition instead of sorting the whole

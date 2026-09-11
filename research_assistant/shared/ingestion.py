@@ -70,6 +70,7 @@ from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
 from research_assistant.shared.db import get_max_chunk_index
 from research_assistant.shared import manifest
+from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
 
 logger = get_logger("ingestion")
 
@@ -763,27 +764,37 @@ def rebuild_bm25():
     # Use larger page size to reduce round-trips
     paired, limit, offset = [], 5000, 0
     while True:
-        batch = collection.get(include=["documents"], limit=limit, offset=offset)
+        batch = collection.get(include=["documents", "metadatas"], limit=limit, offset=offset)
         if not batch or not batch["ids"]:
             break
-        for doc, cid in zip(batch["documents"], batch["ids"]):
+        for doc, meta, cid in zip(batch["documents"], batch["metadatas"] or [], batch["ids"]):
             try:
-                paired.append((int(cid.split("_")[1]), doc))
+                idx = int(cid.split("_")[1])
             except (ValueError, IndexError):
-                pass
+                continue
+            # The paper title rides along with every chunk (citation_source),
+            # so a query that names the paper keyword-matches its chunks.
+            title = (meta or {}).get("citation_source") or ""
+            paired.append((idx, doc, title))
         offset += limit
 
     paired.sort(key=lambda x: x[0])
-    texts = [p[1] for p in paired]
-    bm25 = BM25Okapi([re.findall(r'\w+', t.lower()) for t in texts])
+    bm25 = BM25Okapi([tokenize(f"{title} {text}") for _, text, title in paired])
 
     # Atomic: load_search_resources() unpickles this on every query, so a
     # partial write is not a degraded index but an exception on the next
-    # search, recoverable only by re-ingesting.
+    # search, recoverable only by re-ingesting. The header records which
+    # tokenizer built it so search tokenises queries the same way.
+    payload = {
+        "tokenizer": TOKENIZER_VERSION,
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "bm25": bm25,
+    }
     with atomic_write(BM25_INDEX_PATH, binary=True) as f:
-        pickle.dump(bm25, f)
+        pickle.dump(payload, f)
     elapsed = time.perf_counter() - t0
-    logger.info("✓ BM25 index rebuilt (%d documents) in %.1fs.", len(texts), elapsed)
+    logger.info("✓ BM25 index rebuilt (%d documents, tokenizer %s) in %.1fs.",
+                len(paired), TOKENIZER_VERSION, elapsed)
 
 
 # ─── Unified batch ingestion ──────────────────────────────────────────────────
