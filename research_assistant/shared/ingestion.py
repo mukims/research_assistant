@@ -48,6 +48,7 @@ from research_assistant.config import (
     COLLECTION_NAME,
     SUMMARY_COLLECTION_NAME,
     BM25_INDEX_PATH,
+    INDEX_VERSION,
     LAYOUT_DETECTION,
     FIGURE_VLM,
     DETECTRON_WEIGHTS,
@@ -316,21 +317,30 @@ def process_pdf(
     detectron_weights=None,
     images_dir=None,
     detectron_config=None,
+    describe_figures=None,
 ):
     """Extract a single PDF into corpus entries.
 
-    With ``config.LAYOUT_DETECTION`` on: Detectron2 layout detection plus a VLM
-    description of every figure and table. If layout detection is unavailable
-    or fails (due to missing dependencies, invalid config/weights, or runtime
-    errors), it gracefully falls back to text-only extraction with PyMuPDF.
-    With it off (the Hugging Face Space default, and any checkout without
-    detectron2): text-only extraction with PyMuPDF. Both return the same
-    ``list[dict]`` shape.
+    INDEX_VERSION >= 2: GROBID full-text extraction with the PyMuPDF fallback,
+    sentence-window chunks, captions, crops, and — when the run's switch is on
+    — a VLM description of every figure and table (shared.ingest_v2).
 
-    Every entry is tagged with the mode that produced it (``"layout"`` or
-    ``"text_only"``) so ingest_pdfs() can report how the batch was actually
-    extracted — see _tag_extraction().
+    INDEX_VERSION 1: with ``config.LAYOUT_DETECTION`` on, Detectron2 layout
+    detection plus a VLM description of every figure and table; if that is
+    unavailable or fails it falls back to text-only PyMuPDF. With it off:
+    text-only. Both return the same ``list[dict]`` shape.
+
+    Every entry is tagged with the mode that produced it so ingest_pdfs() can
+    report how the batch was actually extracted — see _tag_extraction().
     """
+    if INDEX_VERSION >= 2:
+        from research_assistant.shared.ingest_v2 import process_pdf_v2
+
+        if describe_figures is None:
+            describe_figures = FIGURE_VLM
+        return process_pdf_v2(pdf_path, citation_string,
+                              describe_figures=describe_figures, images_dir=images_dir)
+
     if not LAYOUT_DETECTION:
         return _tag_extraction(_extract_text_only(pdf_path, citation_string), "text_only")
     try:
@@ -828,6 +838,7 @@ def ingest_pdfs(
     skip_ingested: bool = True,
     rebuild_index: bool = True,
     log_prefix: str = "",
+    describe_figures: bool | None = None,
 ) -> dict:
     """Ingest a batch of PDFs: process → upsert → mark → rebuild the BM25 index.
 
@@ -851,21 +862,30 @@ def ingest_pdfs(
         rebuild_index: Rebuild the BM25 index once at the end. Pass False when
                        ingesting several batches and rebuild once yourself.
         log_prefix:    Prefix for log lines, e.g. ``"[Sync] "``.
+        describe_figures: v2 only. The run's figure-analysis switch: describe
+                       every figure and table in every PDF of this batch with
+                       the model, inline. None → config.FIGURE_VLM. Ignored
+                       under INDEX_VERSION 1.
 
     Returns:
         dict: ``{"processed", "skipped", "inserted", "failed"}`` — ``failed``
         is the list of paths that could not be read.
     """
     with _ingest_lock():
-        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
+        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, describe_figures)
 
 
-def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix) -> dict:
+def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, describe_figures=None) -> dict:
     """ingest_pdfs()'s body. Call it through ingest_pdfs(), which holds the lock."""
     if not isinstance(pdfs, dict):
         pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
 
     result = {"processed": 0, "skipped": 0, "inserted": 0, "failed": []}
+    if describe_figures is None:
+        describe_figures = FIGURE_VLM
+    if INDEX_VERSION >= 2:
+        logger.info("%sIndex v%d — figure analysis %s for this run.",
+                    log_prefix, INDEX_VERSION, "ON" if describe_figures else "off")
 
     candidates = {}
     for path, label in pdfs.items():
@@ -896,7 +916,7 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
         logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
         for i, (path, label) in enumerate(candidates.items(), 1):
             logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), os.path.basename(path))
-            entries = process_pdf(path, label)
+            entries = process_pdf(path, label, describe_figures=describe_figures)
             if not entries:
                 scanned_or_empty.append(os.path.basename(path))
             corpus.extend(entries)
@@ -906,7 +926,7 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
         )
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(process_pdf, path, label): path
+                executor.submit(process_pdf, path, label, None, None, None, describe_figures): path
                 for path, label in candidates.items()
             }
             for future in concurrent.futures.as_completed(futures):
@@ -926,14 +946,26 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
     # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for
     # the same reason: a run that silently degraded should say so in its result,
     # not only in a warning somewhere up the log.
-    by_mode = {mode: set() for mode in EXTRACTION_MODES}
+    if INDEX_VERSION >= 2:
+        from research_assistant.shared.ingest_v2 import EXTRACTION_MODES_V2 as modes
+    else:
+        modes = EXTRACTION_MODES
+    by_mode = {mode: set() for mode in modes}
     for entry in corpus:
         docs = by_mode.get(entry.get("extraction"))
         if docs is not None and entry.get("document"):
             docs.add(entry["document"])
     result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}
+    result["described"] = sum(1 for e in corpus if e.get("type") == "figure_description")
 
-    if LAYOUT_DETECTION and by_mode["text_only"]:
+    if INDEX_VERSION >= 2 and by_mode["pymupdf"]:
+        logger.warning(
+            "%s%d of %d document(s) fell back to PyMuPDF extraction — no sections, "
+            "captions or figures for them, and the bibliography may be in the text. "
+            "Check GROBID at the configured GROBID_SERVER.",
+            log_prefix, len(by_mode["pymupdf"]), result["processed"],
+        )
+    elif INDEX_VERSION == 1 and LAYOUT_DETECTION and by_mode["text_only"]:
         logger.warning(
             "%s%d of %d document(s) fell back to text-only extraction — no figures "
             "or tables were indexed for them. See the warnings above for why layout "

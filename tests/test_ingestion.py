@@ -19,7 +19,8 @@ import research_assistant.shared.manifest as manifest_mod
 
 
 def _touch(directory, name):
-    path = os.path.join(directory, name)
+    d = getattr(directory, "name", directory)
+    path = os.path.join(d, name)
     with open(path, "wb") as f:
         f.write(b"%PDF-1.4 fake")
     return path
@@ -697,3 +698,47 @@ class TestConcurrentIngestion(IngestPdfsCase):
             events, ["enter", "exit", "enter", "exit"],
             "ingests overlapped — chunk-id allocation and the BM25 rebuild raced",
         )
+
+
+class TestVersionDispatch(ManifestBackedTestCase):
+    """Under INDEX_VERSION=2 the v2 processor runs, with the run's figure switch."""
+
+    def _v2_entries(self, path, label, describe_figures=False, images_dir=None):
+        key = ing.pdf_key(path)
+        out = [{"document": key, "citation": label, "page": 0, "type": "text_chunk",
+                "content": "c" * 300, "embed_text": "h c", "meta": {"seq": 0}, "extraction": "grobid"}]
+        if describe_figures:
+            out.append({"document": key, "citation": label, "page": 0, "type": "figure_description",
+                        "content": "d" * 300, "embed_text": "h d", "meta": {"extraction": "vlm"},
+                        "extraction": "grobid"})
+        return out
+
+    def test_v2_uses_process_pdf_v2_and_reports_modes(self):
+        pdf = _touch(self.tmp, "a.pdf")
+        with patch.object(ing, "INDEX_VERSION", 2), \
+             patch("research_assistant.shared.ingest_v2.process_pdf_v2", side_effect=self._v2_entries) as v2, \
+             patch.object(ing, "upsert_corpus", return_value=1), patch.object(ing, "rebuild_bm25"):
+            result = ing.ingest_pdfs({pdf: "A"}, describe_figures=True)
+        v2.assert_called_once()
+        self.assertTrue(v2.call_args.kwargs["describe_figures"])
+        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 0})
+        self.assertEqual(result["described"], 1)
+
+    def test_describe_defaults_to_config_figure_vlm(self):
+        pdf = _touch(self.tmp, "a.pdf")
+        with patch.object(ing, "INDEX_VERSION", 2), patch.object(ing, "FIGURE_VLM", True), \
+             patch("research_assistant.shared.ingest_v2.process_pdf_v2", side_effect=self._v2_entries) as v2, \
+             patch.object(ing, "upsert_corpus", return_value=1), patch.object(ing, "rebuild_bm25"):
+            ing.ingest_pdfs({pdf: "A"})
+        self.assertTrue(v2.call_args.kwargs["describe_figures"])
+
+    def test_v1_path_is_untouched(self):
+        pdf = _touch(self.tmp, "a.pdf")
+        with patch.object(ing, "INDEX_VERSION", 1), patch.object(ing, "LAYOUT_DETECTION", False), \
+             patch.object(ing, "_extract_text_only", return_value=[]) as v1, \
+             patch("research_assistant.shared.ingest_v2.process_pdf_v2") as v2, \
+             patch.object(ing, "rebuild_bm25"):
+            result = ing.ingest_pdfs({pdf: "A"})
+        v1.assert_called_once()
+        v2.assert_not_called()
+        self.assertEqual(result["extraction"], {"layout": 0, "text_only": 0})
