@@ -15,7 +15,9 @@ at a time).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
+from research_assistant.shared.extract import Document, Section, Paragraph
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("chunking")
@@ -120,3 +122,85 @@ def pack_windows(paragraphs, target: int, hard_max: int) -> list[tuple[str, int,
     if fresh:
         close(overlap=False)
     return out
+
+
+# ─── Filters ─────────────────────────────────────────────────────────────────
+
+DROP_KINDS = frozenset({"acknowledgements"})
+
+
+def alpha_ratio(s: str) -> float:
+    if not s:
+        return 0.0
+    return sum(c.isalpha() or c.isspace() for c in s) / len(s)
+
+
+def filter_document(doc: Document, min_alpha: float = 0.6, min_section_chars: int = 200) -> Document:
+    """Drop what should never be indexed, then merge sections too small to
+    stand alone into their neighbour (forward; the trailing one backward)."""
+    kept: list[Section] = []
+    for sec in doc.sections:
+        if sec.kind in DROP_KINDS:
+            continue
+        paras = [p for p in sec.paragraphs if alpha_ratio(p.text) >= min_alpha]
+        if not paras:
+            continue
+        kept.append(Section(sec.heading, sec.kind, paras))
+
+    merged: list[Section] = []
+    pending: list[Paragraph] = []
+    for sec in kept:
+        if sum(len(p.text) for p in sec.paragraphs) < min_section_chars:
+            pending.extend(sec.paragraphs)
+            continue
+        merged.append(Section(sec.heading, sec.kind, pending + sec.paragraphs))
+        pending = []
+    if pending:
+        if merged:
+            merged[-1].paragraphs.extend(pending)
+        else:
+            merged.append(Section("", "other", pending))
+
+    abstract = [p for p in doc.abstract if alpha_ratio(p.text) >= min_alpha]
+    return Document(doc.key, doc.title, abstract, merged, doc.figures, doc.extraction, doc.n_bib)
+
+
+# ─── Document → chunks ───────────────────────────────────────────────────────
+
+@dataclass
+class Chunk:
+    text: str
+    type: str                  # "text" | "caption"
+    section: str
+    section_raw: str
+    page_first: int
+    page_last: int
+    seq: int
+    figure_id: str = ""
+    figure_kind: str = ""
+    figure_label: str = ""
+
+
+def chunk_document(doc: Document, target: int, hard_max: int,
+                   min_chars: int = 200, min_alpha: float = 0.6) -> list[Chunk]:
+    doc = filter_document(doc, min_alpha=min_alpha)
+    chunks: list[Chunk] = []
+
+    def emit_text(paragraphs, kind, heading):
+        for text, p0, p1 in pack_windows(paragraphs, target, hard_max):
+            if len(text) < min_chars or alpha_ratio(text) < min_alpha:
+                continue
+            chunks.append(Chunk(text, "text", kind, heading, p0, p1, len(chunks)))
+
+    if doc.abstract:
+        emit_text(doc.abstract, "abstract", "")
+    for sec in doc.sections:
+        emit_text(sec.paragraphs, sec.kind, sec.heading)
+
+    for fig in doc.figures:
+        text = f"{fig.label}: {fig.caption}" if fig.caption else fig.label
+        if not text.strip():
+            continue
+        chunks.append(Chunk(text, "caption", "caption", fig.label, fig.page, fig.page, len(chunks),
+                            figure_id=fig.id, figure_kind=fig.kind, figure_label=fig.label))
+    return chunks
