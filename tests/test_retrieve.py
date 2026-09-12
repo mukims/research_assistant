@@ -66,3 +66,45 @@ class TestGateDocuments(unittest.TestCase):
         with patch.object(rt, "GATE_BATCHED", False), patch.object(rt, "chat", return_value=_reply("YES")) as chat:
             rt.gate_documents("idea", _ranked(3))
         self.assertEqual(chat.call_count, 3)
+
+
+class TestShortlist(unittest.TestCase):
+    def test_dedupe_by_title_keeps_the_higher_score(self):
+        ranked = [{"document": "arxiv_1.pdf", "citation": "Conductance Quantization in Ribbons", "summary": "a", "score": 0.7},
+                  {"document": "doi_1.pdf", "citation": "conductance quantization in ribbons.", "summary": "b", "score": 0.9},
+                  {"document": "d3.pdf", "citation": "Other", "summary": "c", "score": 0.8}]
+        out = rt.dedupe_shortlist(ranked)
+        self.assertEqual([r["document"] for r in out], ["doi_1.pdf", "d3.pdf"])
+
+    def test_keys_are_assigned_in_order(self):
+        sel = _ranked(3)
+        keys = rt.assign_keys(sel)
+        self.assertEqual([r["key"] for r in sel], ["P1", "P2", "P3"])
+        self.assertEqual(keys, {"P1": "Paper 1", "P2": "Paper 2", "P3": "Paper 3"})
+
+
+class TestPassagesPerPaper(unittest.TestCase):
+    def test_one_search_per_paper_restricted_to_it(self):
+        sel = _ranked(2); rt.assign_keys(sel)
+        calls = []
+
+        def fake_search(query, collection, bm25, texts, metadatas, top_k, doc_filter=None, exclude_types=None, **kw):
+            calls.append((top_k, doc_filter, exclude_types))
+            doc = next(iter(doc_filter))
+            return [{"chunk_index": 1, "text": f"chunk of {doc}", "metadata": {"document": doc, "page": 3, "section": "results"}}]
+
+        with patch.object(rt, "load_search_resources", return_value=(None, None, [], [])), \
+             patch.object(rt, "hybrid_search", side_effect=fake_search):
+            out = rt.passages_per_paper("idea", sel, per_paper=4)
+        self.assertEqual(calls, [(4, {"d1.pdf"}, {"figure_description"}), (4, {"d2.pdf"}, {"figure_description"})])
+        self.assertEqual(list(out), ["P1", "P2"])
+        self.assertEqual(out["P1"][0]["key"], "P1")
+
+    def test_format_passages_caps_and_labels(self):
+        hits = [{"text": "A" * 30, "metadata": {"page": 2, "section": "methods"}},
+                {"text": "B" * 30, "metadata": {"page": 5, "section": "results"}}]
+        out = rt.format_passages(hits, max_chars=60)
+        self.assertTrue(out.startswith("(p.2, methods) " + "A" * 30))
+        self.assertLessEqual(len(out), 60 + len("\n\n"))
+        self.assertIn("(p.5, results)", out)
+

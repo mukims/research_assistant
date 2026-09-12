@@ -141,7 +141,68 @@ def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
     return kept
 
 
+# ─── Shortlist → keys → per-paper passages ──────────────────────────────────
+
+
+def _norm_title(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
+
+
+def dedupe_shortlist(ranked: list[dict]) -> list[dict]:
+    """The same paper under two document keys (an arXiv copy and a DOI copy)
+    must not take two slots. Keyed on the normalised title; the higher
+    stage-1 score wins; order is score-descending."""
+    best = {}
+    for r in ranked:
+        k = _norm_title(r.get("citation")) or r["document"]
+        if k not in best or r.get("score", 0) > best[k].get("score", 0):
+            best[k] = r
+    return sorted(best.values(), key=lambda r: -r.get("score", 0))
+
+
+def assign_keys(selected: list[dict]) -> dict:
+    """P1..Pn in shortlist order. Short keys are what a 5B model reproduces
+    exactly, and what check_citation_keys() can verify."""
+    keys = {}
+    for i, r in enumerate(selected, 1):
+        r["key"] = f"P{i}"
+        keys[r["key"]] = r.get("citation") or r["document"]
+    return keys
+
+
+def passages_per_paper(query: str, selected: list[dict], per_paper: int) -> dict:
+    """One restricted hybrid search per shortlisted paper, so every paper on
+    the shortlist is read — the global top-k left four of six unread."""
+    collection, bm25, texts, metadatas = load_search_resources()
+    out = {}
+    for r in selected:
+        hits = hybrid_search(
+            query, collection, bm25, texts, metadatas,
+            top_k=per_paper, doc_filter={r["document"]},
+            exclude_types={"figure_description"},
+        )
+        for h in hits:
+            h["key"] = r["key"]
+        out[r["key"]] = hits
+    return out
+
+
+def format_passages(hits: list[dict], max_chars: int) -> str:
+    parts, total = [], 0
+    for h in hits:
+        m = h.get("metadata") or {}
+        block = f"(p.{m.get('page_first', m.get('page', '?'))}, {m.get('section') or 'text'}) {h.get('text', '')}"
+        room = max_chars - total
+        if room <= 0:
+            break
+        block = block[:room]
+        parts.append(block)
+        total += len(block)
+    return "\n\n".join(parts)
+
+
 # ─── Stage 2 ────────────────────────────────────────────────────────────────
+
 
 
 def deep_search(query: str, documents, top_k: int = DEFAULT_TOP_K) -> list[dict]:
