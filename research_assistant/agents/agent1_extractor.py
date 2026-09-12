@@ -106,7 +106,7 @@ def run_grobid_batch(pdf_dir: str, output_dir: str) -> None:
         input_path=pdf_dir,
         output=output_dir,
         n=GROBID_BATCH_CONCURRENCY,
-        consolidate_citations=1,
+        consolidate_citations=0,
         consolidate_header=True,
         include_raw_citations=True,
         force=True,
