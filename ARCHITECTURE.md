@@ -602,6 +602,50 @@ scope-versus-contradiction distinction are load-bearing, and no unit test
 covers them. `judgement/cases/cases.jsonl` is the only guard. Run the live
 suite (`RUN_LLM_TESTS=1`) before shipping any prompt edit.
 
+### 9.4 The sentence boundary survives citation
+
+`gemma4:e2b` drops the terminal full stop when it appends `\cite{}`. Agent 5
+restores it (`_restore_terminal_punctuation`), because the draft is joined
+with spaces and Agent 8 splits on `[.!?]` + whitespace: a lost stop merged
+two sentences into one claim, and both citations were judged against it.
+Agent 8 still flags any sentence with ≥2 keys and >40 words as
+`compound_sentence` — the signature of a merge that got through.
+
+### 9.5 The rubric is enforced in code
+
+The model's reply is evidence, not verdict. `enforce_rubric()` derives the
+aggregate from the three slot verdicts by the rubric's own Step-3 rules,
+records the model's stated judgement as `model_judgement` and any
+disagreement as `rubric_mismatch`, lists slot verdicts outside their
+vocabulary in `rubric_violations` (treated as *Insufficient* for
+aggregation), and checks `supporting_span` verbatim against the evidence
+(`span_verified`). Any of those caps `confidence` at Medium.
+
+**Why derive rather than reject.** A rejected reply is retried at
+temperature 0 — the same reply — and the citation ends up unjudged. A derived
+verdict with the disagreement on record is more useful, and it is what the
+evaluation set (next) will measure.
+
+### 9.6 Evidence: the top hit with its neighbours, then a second look
+
+Agent 8 retrieves `max(JUDGEMENT_TOP_K, JUDGEMENT_ESCALATE_TOP_K)` hits from
+the cited paper once, wraps each in its adjacent chunks (`expand_neighbours`),
+and judges the top `JUDGEMENT_TOP_K`. If that verdict reports it saw too
+little — `evidence_sufficiency` not *sufficient*, or *Unclear* / *Does not
+support* — it judges once more on the top `JUDGEMENT_ESCALATE_TOP_K`, capped
+at `JUDGEMENT_EVIDENCE_MAX_CHARS`. The second verdict stands; the first is
+kept (`first_judgement`, `first_sufficiency`, `escalated`). At most two calls
+per citation. `figure_description` chunks are never evidence.
+
+**Why.** `hits[0]` alone reported *strength: Insufficient* on a claim whose
+supporting paragraph sat one chunk away in the same paper. The rubric's
+sufficiency field exists to separate a retrieval gap from a citation
+failure; now it drives one.
+
+### 9.7 The rubric as a cacheable prefix
+
+`judgement/prompt.md` puts the rubric and worked examples first and the `## Input` block (`{{CLAIM}}`, `{{CITATION_EVIDENCE}}`) last. On Ollama (`gemma4:e2b`), moving the variable input to the end gives Ollama a 3.7k-token invariant prompt prefix to cache across judgements. Benchmarking the regression suite (`scripts/judge_bench.py`) confirmed accuracy is preserved (6/6 pass) while warm median latency dropped by 35% (68.8s baseline → 44.4s reordered, max 128.5s → 45.9s).
+
 ---
 
 ## 10. Things deliberately not done
