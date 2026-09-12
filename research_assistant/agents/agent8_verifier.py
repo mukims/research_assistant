@@ -35,6 +35,7 @@ from research_assistant.config import (
     LLM_MODEL,
 )
 from research_assistant.judgement.judge import (
+    DERIVED_FIELDS,
     REQUIRED_FIELDS,
     JudgementParseError,
     judge,
@@ -302,6 +303,8 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         # which is exactly the provenance §9.2 leans on to justify
         # re-retrieval.
         entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
+        # Derived by enforce_rubric(); absent from older stubs and records.
+        entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
         logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
         results.append(entry)
 
@@ -335,10 +338,16 @@ def _totals(results) -> dict:
     }
     for judgement in _SEVERITY:
         totals[judgement] = 0
+    totals["rubric_mismatch"] = 0
+    totals["span_unverified"] = 0
     for entry in results:
         totals[entry["outcome"]] = totals.get(entry["outcome"], 0) + 1
         if entry["outcome"] == "judged":
             totals[entry["judgement"]] = totals.get(entry["judgement"], 0) + 1
+            if entry.get("rubric_mismatch"):
+                totals["rubric_mismatch"] += 1
+            if entry.get("span_verified") is False:
+                totals["span_unverified"] += 1
     return totals
 
 
@@ -441,9 +450,20 @@ def _entry_block(entry) -> list:
         f"**Cited source:** {entry['citation_source']} (`{entry['cite_key']}`)\n",
         f"**Confidence:** {entry['confidence']} · "
         f"**Evidence sufficiency:** {entry['evidence_sufficiency']}\n",
+    ]
+    if entry.get("compound_sentence"):
+        block.append("⚠ **Compound sentence:** two or more citations in one long sentence — "
+                     "a lost sentence boundary? This verdict is about the combined claim.\n")
+    if entry.get("rubric_mismatch"):
+        detail = "; ".join(entry.get("rubric_violations") or []) or "aggregate did not follow the slots"
+        block.append(f"⚠ **Rubric:** model said {entry['model_judgement']}; the rules derive "
+                     f"{entry['judgement']} ({detail}).\n")
+    if entry.get("span_verified") is False:
+        block.append("⚠ **Supporting span not found verbatim in the evidence** — treat it as a paraphrase.\n")
+    block.extend([
         "| Slot | Assertion | Verdict |",
         "|------|-----------|---------|",
-    ]
+    ])
     for name in ("finding", "scope", "strength"):
         slot = slots.get(name, {})
         block.append(

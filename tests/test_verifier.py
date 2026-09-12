@@ -620,3 +620,40 @@ class TestCompoundSentenceFlag(unittest.TestCase):
         long = " ".join(["word"] * 60)
         pairs = citation_pairs([f"{long} \\cite{{cite_1}}."], {"cite_1": "A"})
         self.assertFalse(pairs[0]["compound_sentence"])
+
+
+class TestDerivedFieldsInTheRecord(VerifyDraftTestCase):
+    def _verdict_with(self, **extra):
+        v = _verdict()
+        v.update({"model_judgement": v["judgement"], "rubric_mismatch": False,
+                  "rubric_violations": [], "span_verified": True})
+        v.update(extra)
+        return v
+
+    def test_derived_fields_are_merged_and_counted(self):
+        v = self._verdict_with(judgement="Does not support", model_judgement="Supports",
+                               rubric_mismatch=True, span_verified=False, confidence="Medium")
+        draft_path, report = self._run(
+            "Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"}, [("Smith 2020", "a.pdf")],
+            [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}, "chunk_index": 0}],
+            judge_side_effect=lambda c, e, **k: v,
+        )
+        entry = report["results"][0]
+        self.assertEqual(entry["judgement"], "Does not support")
+        self.assertEqual(entry["model_judgement"], "Supports")
+        self.assertTrue(entry["rubric_mismatch"])
+        self.assertFalse(entry["span_verified"])
+        self.assertEqual(report["totals"]["rubric_mismatch"], 1)
+        self.assertEqual(report["totals"]["span_unverified"], 1)
+        md = self._markdown(draft_path)
+        self.assertIn("model said Supports", md)
+        self.assertIn("not found verbatim", md)
+
+    def test_a_verdict_without_derived_fields_still_works(self):
+        # Older stubs and older records have no derived fields.
+        _, report = self._run(
+            "Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"}, [("Smith 2020", "a.pdf")],
+            [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}, "chunk_index": 0}],
+        )
+        self.assertEqual(report["results"][0]["outcome"], "judged")
+        self.assertEqual(report["totals"]["rubric_mismatch"], 0)
