@@ -51,8 +51,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code selectively (avoid copying the 7GB models directory)
-COPY app.py watch.py orchestrate.py publaynet_config.yaml pyproject.toml README.md ./
+COPY app.py watch.py orchestrate.py publaynet_config.yaml pyproject.toml README.md HOW_TO_USE.md ./
 COPY research_assistant ./research_assistant
+COPY scripts ./scripts
 
 # Editable install so research_assistant package resolves everywhere
 RUN pip install --no-cache-dir -e .
@@ -61,6 +62,7 @@ RUN pip install --no-cache-dir -e .
 ENV CITATION_DATA_DIR=/home/user/data \
     CITATION_LAYOUT_DETECTION=0 \
     CITATION_LOG_FILE=0 \
+    CITATION_INDEX_VERSION=2 \
     LLM_BACKEND=ollama \
     CITATION_EMBED_BACKEND=ollama \
     CITATION_LLM_MODEL=gemma4:e2b \
