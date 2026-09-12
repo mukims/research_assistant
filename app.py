@@ -417,6 +417,182 @@ def _render_shortlist(selected):
             st.write(r.get("summary", ""))
 
 
+def _render_seed_citation_audit(final):
+    seed_path = final.get("seed_path")
+    audit = final.get("citation_audit")
+
+    # If audit has not been run yet, offer an explicit button when a seed PDF is available
+    if not audit and seed_path and os.path.exists(seed_path):
+        from research_assistant.shared.seed_audit import find_tei_for_seed
+
+        if find_tei_for_seed(seed_path):
+            with st.container(border=True):
+                st.markdown("###### 🔍 In-Text Citation Audit")
+                st.caption(
+                    "Audit whether the references cited inside this uploaded paper actually support "
+                    "the statements made in the paper's text."
+                )
+                if st.button(
+                    "Audit Seed Paper Citations",
+                    key="btn_run_seed_audit",
+                    type="secondary",
+                ):
+                    with st.status(
+                        "Auditing in-text citations from seed paper…", expanded=True
+                    ) as status:
+                        from research_assistant.shared.seed_audit import audit_seed_citations
+
+                        cached_res = get_cached_search_resources(_get_resources_mtime())
+                        audit_res = audit_seed_citations(seed_path, search_resources=cached_res)
+                        final["citation_audit"] = audit_res
+                        st.session_state["build_result"] = final
+                        status.update(label="Citation audit complete!", state="complete")
+                        st.rerun()
+
+    if not audit:
+        return
+
+    totals = audit.get("totals") or {}
+    results = audit.get("results") or []
+
+    if not results:
+        if audit.get("error"):
+            st.info(f"Seed citation audit: {audit['error']}")
+        return
+
+    with st.container(border=True):
+        st.markdown("##### 🔍 Uploaded Paper Citation Audit")
+        st.caption(
+            "Verifies whether the references cited inside the uploaded paper support "
+            "the statements made in its text, evaluated with the Gemma 4 judgement rubric."
+        )
+
+        # Top metric row
+        cols = st.columns(5)
+        cols[0].metric("Citations Found", totals.get("total", len(results)))
+        cols[1].metric("Supports 🟢", totals.get("Supports", 0))
+        cols[2].metric("Partially 🟡", totals.get("Partially supports", 0))
+        needs_rev = totals.get("Contradicts", 0) + totals.get("Does not support", 0)
+        cols[3].metric("Need Review 🔴", needs_rev)
+        cols[4].metric("Paywalled / Unchecked ⚪", totals.get("not_downloaded", 0))
+
+        # Filter tabs
+        supp_count = totals.get("Supports", 0) + totals.get("Partially supports", 0)
+        rev_count = needs_rev + totals.get("Unclear / insufficient evidence", 0)
+        pw_count = totals.get("not_downloaded", 0)
+
+        tab_supported, tab_review, tab_paywalled, tab_all = st.tabs([
+            f"Supported ({supp_count})",
+            f"Need Review ({rev_count})",
+            f"Paywalled / Not In Corpus ({pw_count})",
+            f"All Citations ({len(results)})",
+        ])
+
+        def _render_claim_item(item):
+            ref_info = item.get("ref") or {}
+            ref_num = f"[{ref_info.get('index') or '?'}]"
+            ref_title = ref_info.get("title") or item.get("cite_text", "Unknown reference")
+            ref_yr = f"({ref_info.get('year')})" if ref_info.get("year") else ""
+            ref_auth = (
+                (", ".join(ref_info.get("authors", [])[:2]) + " et al.")
+                if ref_info.get("authors")
+                else ""
+            )
+
+            judgement = item.get("judgement", "Unclear")
+            if judgement == "Supports":
+                badge = "🟢 Supports"
+            elif judgement == "Partially supports":
+                badge = "🟡 Partially Supports"
+            elif judgement == "Contradicts":
+                badge = "🔴 Contradicts"
+            elif judgement == "Does not support":
+                badge = "🟠 Does Not Support"
+            elif item.get("outcome") == "not_downloaded":
+                badge = "⚪ Paywalled / Not In Corpus"
+            else:
+                badge = "⚪ Unclear / Insufficient Evidence"
+
+            header = f"{badge}  ·  {ref_num} {ref_auth} {ref_yr} · *{ref_title[:55]}*"
+            with st.expander(header):
+                st.markdown("**Original Statement in Uploaded Paper:**")
+                st.info(f"\"{item.get('sentence') or item.get('claim')}\"")
+
+                st.markdown("**Cited Reference:**")
+                st.write(f"{ref_num} **{ref_title}** {ref_yr}  \n*{ref_auth}*")
+                if ref_info.get("doi"):
+                    st.caption(f"DOI: `{ref_info['doi']}`")
+
+                if item.get("outcome") == "judged":
+                    st.markdown(
+                        f"**Verdict:** `{judgement}` (Confidence: {item.get('confidence', 'Medium')})"
+                    )
+                    if item.get("supporting_span"):
+                        st.markdown("**Verbatim Evidence from Cited Paper:**")
+                        st.success(f"\"{item['supporting_span']}\"")
+                    if item.get("reason"):
+                        st.markdown(f"**Reasoning:** {item['reason']}")
+                elif item.get("outcome") == "not_downloaded":
+                    st.warning(
+                        "⚠️ This reference paper was not open-access or could not be downloaded, "
+                        "so its full text is not in the local library.",
+                        icon="🔒",
+                    )
+                else:
+                    st.caption(f"Status: {item.get('reason') or item.get('outcome', 'Unclear')}")
+
+        with tab_supported:
+            supp_items = [
+                r for r in results if r.get("judgement") in ("Supports", "Partially supports")
+            ]
+            if supp_items:
+                for it in supp_items:
+                    _render_claim_item(it)
+            else:
+                st.caption("No supported citations to display.")
+
+        with tab_review:
+            rev_items = [
+                r
+                for r in results
+                if r.get("judgement")
+                in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
+            ]
+            if rev_items:
+                for it in rev_items:
+                    _render_claim_item(it)
+            else:
+                st.caption("No citations flagged for review.")
+
+        with tab_paywalled:
+            pw_items = [r for r in results if r.get("outcome") == "not_downloaded"]
+            if pw_items:
+                st.caption(
+                    "These references were cited in the uploaded paper but could not be downloaded "
+                    "(paywalled, books, or 404)."
+                )
+                for it in pw_items:
+                    _render_claim_item(it)
+            else:
+                st.caption("All cited references were downloaded and verified!")
+
+        with tab_all:
+            for it in results:
+                _render_claim_item(it)
+
+        if seed_path and os.path.exists(seed_path):
+            if st.button("🔄 Re-run Seed Citation Audit", key="btn_rerun_seed_audit"):
+                with st.status("Re-auditing in-text citations from seed paper…", expanded=True) as status:
+                    from research_assistant.shared.seed_audit import audit_seed_citations
+
+                    cached_res = get_cached_search_resources(_get_resources_mtime())
+                    audit_res = audit_seed_citations(seed_path, search_resources=cached_res)
+                    final["citation_audit"] = audit_res
+                    st.session_state["build_result"] = final
+                    status.update(label="Citation audit complete!", state="complete")
+                    st.rerun()
+
+
 def _render_build(final, query):
     if final.get("batch_uploaded"):
         staged = final["batch_uploaded"]
@@ -448,6 +624,7 @@ def _render_build(final, query):
                 "Corpus updated with uploaded papers. Switch to **Research chat** or **Cite a draft** to query them.",
                 icon="✍️",
             )
+        _render_seed_citation_audit(final)
         return
 
     # Show whatever the run produced — seed, downloads — even if it stopped early.
@@ -484,6 +661,8 @@ def _render_build(final, query):
         st.info(
             "Corpus updated. Switch to **Cite a draft** to query it.", icon="✍️"
         )
+
+    _render_seed_citation_audit(final)
 
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -684,15 +863,20 @@ with tab_build:
                 placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
                 help="If provided, used to synthesize an answer across the papers at the end.",
             )
-            c1, c2, c3 = st.columns(3)
-            ask = c1.toggle("Answer my query at the end", value=True)
-            force = c2.toggle("Force re-run every stage", value=False)
+            c1, c2, c3, c4 = st.columns(4)
+            ask = c1.toggle("Answer query", value=True)
+            force = c2.toggle("Force re-run", value=False)
             describe_figures = c3.toggle(
-                "Analyse figures and tables with the model",
+                "Analyse figures",
                 value=config.FIGURE_VLM,
                 help="One choice for this whole run: every figure and table in every paper "
                      "is described by the model and the description joins the corpus. "
                      "Adds roughly a minute per figure on CPU.",
+            )
+            audit_citations = c4.toggle(
+                "Audit citations",
+                value=True,
+                help="Audit in-text citations in uploaded paper against fetched references using Gemma 4.",
             )
             submitted = st.form_submit_button("Process and Index Paper(s)", type="primary")
 
@@ -852,15 +1036,20 @@ with tab_build:
                 help="Used when the search finds no open-access PDF. "
                      "Accepts an arXiv link or a direct .pdf URL.",
             )
-            c1, c2, c3 = st.columns(3)
-            ask = c1.toggle("Answer my query at the end", value=True)
-            force = c2.toggle("Force re-run every stage", value=False)
+            c1, c2, c3, c4 = st.columns(4)
+            ask = c1.toggle("Answer query", value=True)
+            force = c2.toggle("Force re-run", value=False)
             describe_figures = c3.toggle(
-                "Analyse figures and tables with the model",
+                "Analyse figures",
                 value=config.FIGURE_VLM,
                 help="One choice for this whole run: every figure and table in every paper "
                      "is described by the model and the description joins the corpus. "
                      "Adds roughly a minute per figure on CPU.",
+            )
+            audit_citations = c4.toggle(
+                "Audit citations",
+                value=True,
+                help="Audit in-text citations in seed paper against fetched references using Gemma 4.",
             )
             submitted = st.form_submit_button("Build corpus", type="primary")
 
@@ -885,6 +1074,7 @@ with tab_build:
             "seed_url": seed_url_val,
             "seed_file": seed_file_path,
             "describe_figures": describe_figures,
+            "audit_citations": audit_citations,
         }
 
         # Filled progressively as nodes complete, so the seed + downloads show

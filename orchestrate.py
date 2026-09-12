@@ -75,6 +75,8 @@ class PipelineState(_Inputs, total=False):
     references_ok: bool
     extraction: Optional[dict]
     answer: Optional[dict]
+    citation_audit: Optional[dict]
+    audit_citations: Optional[bool]
     stopped: Optional[str]   # reason the run ended early, if it did
     # v2: the run's figure-analysis switch. None → config.FIGURE_VLM.
     describe_figures: Optional[bool]
@@ -196,7 +198,22 @@ def respond(state: PipelineState) -> dict:
         pipeline_status.add_event("✍️ Formulating related-work synthesis…")
         result = retrieve.research_answer(state["query"])
         pipeline_status.add_event("✅ Related-work synthesis complete")
-        return {"answer": result}
+
+        audit_result = None
+        if state.get("audit_citations") and state.get("seed_path"):
+            try:
+                from research_assistant.shared import seed_audit
+                pipeline_status.add_event("🔍 Auditing in-text citations from seed paper…")
+                audit_result = seed_audit.audit_seed_citations(state["seed_path"])
+                pipeline_status.add_event("✅ Seed citation audit complete")
+            except Exception as e:
+                logger.warning("Seed citation audit encountered an error: %s", e)
+                audit_result = {"error": str(e), "totals": {"total": 0, "judged": 0}, "results": []}
+
+        out = {"answer": result}
+        if audit_result is not None:
+            out["citation_audit"] = audit_result
+        return out
 
 
 def fallback(state: PipelineState) -> dict:
@@ -270,6 +287,7 @@ def run(
     seed_url: str | None = None,
     seed_file: str | None = None,
     describe_figures: bool | None = None,
+    audit_citations: bool = False,
 ) -> int:
     app = build_graph()
     thread_key = query or (os.path.abspath(seed_file) if seed_file else "") or (seed_url or "") or "run"
@@ -298,6 +316,7 @@ def run(
                 "seed_url": seed_url,
                 "seed_file": seed_file,
                 "describe_figures": describe_figures,
+                "audit_citations": audit_citations,
             },
             config=config,
             stream_mode="values",
@@ -392,6 +411,10 @@ def main():
         "--describe-figures", action="store_true", default=None,
         help="Index v2: analyse every figure and table with the model during this run.",
     )
+    parser.add_argument(
+        "--audit-citations", action="store_true", default=False,
+        help="Audit in-text citations from the seed paper against fetched references.",
+    )
     args = parser.parse_args()
 
     if not args.query and not args.seed_file and not args.seed_url:
@@ -401,6 +424,7 @@ def main():
         args.query, workers=args.workers, force=args.force, ask=args.ask,
         seed_url=args.seed_url, seed_file=args.seed_file,
         describe_figures=args.describe_figures,
+        audit_citations=args.audit_citations,
     ))
 
 
