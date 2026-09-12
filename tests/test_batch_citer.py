@@ -238,5 +238,56 @@ class TestRunBatchCiter(unittest.TestCase):
             self.assertFalse(os.path.exists(report_path))
 
 
+from research_assistant.agents.agent5_batch_citer import _restore_terminal_punctuation, split_into_sentences
+
+
+class TestTerminalPunctuationSurvivesCitation(unittest.TestCase):
+    """gemma4:e2b drops the full stop when it appends \cite{}. The draft is
+    joined with spaces and Agent 8 splits on [.!?]+whitespace, so a lost stop
+    merges two sentences into one claim. Seen 2026-09-12."""
+
+    def test_dropped_full_stop_is_restored_after_the_cite(self):
+        self.assertEqual(
+            _restore_terminal_punctuation("Films are good.", "Films are good \\cite{cite_1}"),
+            "Films are good \\cite{cite_1}.",
+        )
+
+    def test_question_mark_is_restored(self):
+        self.assertEqual(_restore_terminal_punctuation("Is it so?", "Is it so \\cite{a}"), "Is it so \\cite{a}?")
+
+    def test_already_terminated_after_the_cite_is_unchanged(self):
+        self.assertEqual(_restore_terminal_punctuation("Films are good.", "Films are good \\cite{a}."),
+                         "Films are good \\cite{a}.")
+
+    def test_terminated_before_a_trailing_cite_is_unchanged(self):
+        self.assertEqual(_restore_terminal_punctuation("Films are good.", "Films are good. \\cite{a}"),
+                         "Films are good. \\cite{a}")
+
+    def test_multiple_trailing_cites(self):
+        self.assertEqual(_restore_terminal_punctuation("X holds.", "X holds \\cite{a} \\cite{b}"),
+                         "X holds \\cite{a} \\cite{b}.")
+
+    def test_original_without_terminal_punctuation_is_left_alone(self):
+        self.assertEqual(_restore_terminal_punctuation("a heading", "a heading \\cite{a}"), "a heading \\cite{a}")
+
+    def test_trailing_whitespace_is_trimmed(self):
+        self.assertEqual(_restore_terminal_punctuation("Done.", "Done \\cite{a}   "), "Done \\cite{a}.")
+
+    def test_the_rejoined_draft_splits_back_into_two_sentences(self):
+        a = _restore_terminal_punctuation("First claim here.", "First claim here \\cite{cite_1}")
+        b = _restore_terminal_punctuation("Second claim here.", "Second claim here \\cite{cite_2}")
+        self.assertEqual(len(split_into_sentences(" ".join([a, b]))), 2)
+
+
+class TestCiteSentenceKeepsPunctuation(unittest.TestCase):
+    def test_model_reply_without_full_stop_is_repaired(self):
+        import research_assistant.agents.agent5_batch_citer as a5
+        reply = ChatResult(content="CITED: Films are good \\cite{cite_1}\nREASON: because.")
+        with patch.object(a5, "chat", return_value=reply):
+            cited, reason = a5._cite_sentence_with_reasoning("Films are good.", "--- Context (Cite Key: cite_1) ---\nx")
+        self.assertEqual(cited, "Films are good \\cite{cite_1}.")
+        self.assertEqual(reason, "because.")
+
+
 if __name__ == "__main__":
     unittest.main()

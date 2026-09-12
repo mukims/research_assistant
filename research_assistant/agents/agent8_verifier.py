@@ -97,6 +97,13 @@ def resolve_documents(collection, citation_source: str, cache: dict) -> set:
     return documents
 
 
+# A "sentence" carrying two or more cite keys and more words than any real
+# sentence has is almost always two sentences whose boundary was lost when
+# the citation was inserted. Both verdicts on it are then about the wrong
+# claim; say so in the record.
+COMPOUND_WORDS = 40
+
+
 def citation_pairs(sentences: list, key_to_source: dict) -> list:
     """One record per (sentence, cited source) pair, in draft order.
 
@@ -109,6 +116,13 @@ def citation_pairs(sentences: list, key_to_source: dict) -> list:
         if not keys:
             continue
         claim = strip_citations(sentence)
+        compound = len(keys) >= 2 and len(claim.split()) > COMPOUND_WORDS
+        if compound:
+            logger.warning(
+                "Sentence %d carries %d citations across %d words — a lost sentence "
+                "boundary? Both verdicts will be about the combined claim.",
+                index + 1, len(keys), len(claim.split()),
+            )
         for key in sorted(keys):
             source = key_to_source.get(key)
             pairs.append({
@@ -117,6 +131,7 @@ def citation_pairs(sentences: list, key_to_source: dict) -> list:
                 "claim": claim,
                 "cite_key": key,
                 "citation_source": source,
+                "compound_sentence": compound,
                 # Agent 5 already warns when the model invents a key; this is
                 # where that shows up per sentence instead of once per run.
                 "outcome": None if source else "orphaned",

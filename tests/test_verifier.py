@@ -600,3 +600,23 @@ class TestVerifierExcludesVlmText(VerifyDraftTestCase):
         )
         self.assertEqual(seen["exclude_types"], {"figure_description"})
         self.assertEqual(seen["doc_filter"], {"a.pdf"})
+
+
+class TestCompoundSentenceFlag(unittest.TestCase):
+    """Two cite keys in one long 'sentence' is the signature of a merged
+    boundary. Flag it so a reader can distrust both verdicts."""
+
+    def test_two_keys_and_many_words_are_flagged(self):
+        long = " ".join(["word"] * 45)
+        pairs = citation_pairs([f"{long} \\cite{{cite_1}} more {long} \\cite{{cite_2}}"], {"cite_1": "A", "cite_2": "B"})
+        self.assertEqual(len(pairs), 2)
+        self.assertTrue(all(p["compound_sentence"] for p in pairs))
+
+    def test_two_keys_in_a_short_sentence_are_not_flagged(self):
+        pairs = citation_pairs(["Both agree \\cite{cite_1} \\cite{cite_2}."], {"cite_1": "A", "cite_2": "B"})
+        self.assertFalse(any(p["compound_sentence"] for p in pairs))
+
+    def test_one_key_is_never_flagged(self):
+        long = " ".join(["word"] * 60)
+        pairs = citation_pairs([f"{long} \\cite{{cite_1}}."], {"cite_1": "A"})
+        self.assertFalse(pairs[0]["compound_sentence"])

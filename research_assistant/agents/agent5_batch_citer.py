@@ -45,6 +45,36 @@ def split_into_sentences(text):
 
 _CITE_RE = re.compile(r"\\cite\{([^}]*)\}")
 
+# One or more \cite{...} groups at the very end of a sentence, with the
+# whitespace before them.
+_TRAILING_CITES_RE = re.compile(r"(?:\s*\\cite\{[^}]*\})+\s*$")
+_TERMINAL = ".!?"
+
+
+def _restore_terminal_punctuation(original: str, cited: str) -> str:
+    r"""Give the cited sentence back the full stop the model dropped.
+
+    gemma4:e2b writes "… films \cite{cite_1}" for "… films." — no terminal
+    punctuation. run_batch_citer joins sentences with a space, and Agent 8's
+    split_into_sentences needs [.!?] before whitespace, so the next sentence
+    is swallowed into this one and both citations get judged against a
+    two-sentence claim. Restore the original's terminator after the cite.
+
+    Left alone: a cited sentence that already ends in [.!?], or that ends in
+    [.!?] immediately before a trailing \cite{} group ("… films. \cite{a}"),
+    and any original that had no terminator to restore.
+    """
+    original = original.rstrip()
+    if not original or original[-1] not in _TERMINAL:
+        return cited
+    stripped = cited.rstrip()
+    if stripped and stripped[-1] in _TERMINAL:
+        return stripped
+    core = _TRAILING_CITES_RE.sub("", stripped)
+    if core and core[-1] in _TERMINAL:
+        return stripped
+    return stripped + original[-1]
+
 
 def _cite_keys(text: str) -> set[str]:
     """Return the set of citation keys actually present in *text*.
@@ -139,7 +169,7 @@ def _cite_sentence_with_reasoning(sentence, context_str):
         # Try to extract reasoning from non-formatted response
         reasoning = " ".join(raw.split("\n")[1:]).strip()
 
-    return cited_sentence, reasoning
+    return _restore_terminal_punctuation(sentence, cited_sentence), reasoning
 
 
 def _generate_report(
