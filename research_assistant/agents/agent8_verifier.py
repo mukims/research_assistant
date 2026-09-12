@@ -29,7 +29,10 @@ from research_assistant.agents.agent5_batch_citer import (
     split_into_sentences,
 )
 from research_assistant.config import (
+    JUDGEMENT_ESCALATE_TOP_K,
+    JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_MODEL,
+    JUDGEMENT_NEIGHBOUR_WINDOW,
     JUDGEMENT_TOP_K,
     LLM_BACKEND,
     LLM_MODEL,
@@ -43,7 +46,7 @@ from research_assistant.judgement.judge import (
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
-from research_assistant.shared.search import hybrid_search
+from research_assistant.shared.search import expand_neighbours, hybrid_search
 
 logger = get_logger("agent8")
 
@@ -189,6 +192,33 @@ def _warn_if_context_is_tight():
     )
 
 
+_HIT_SEPARATOR = "\n\n[…]\n\n"
+
+
+def assemble_evidence(hits, max_chars: int) -> str:
+    """The text the judge sees: each hit wrapped in its neighbours, hits in
+    rank order, separated, de-duplicated, capped from the tail so the top hit
+    is never the one cut."""
+    parts, seen = [], set()
+    for h in hits:
+        block = "\n".join(p for p in (h.get("context_before", ""), h["text"], h.get("context_after", "")) if p)
+        if block in seen:
+            continue
+        seen.add(block)
+        parts.append(block)
+    out = _HIT_SEPARATOR.join(parts)
+    return out[:max_chars]
+
+
+def needs_escalation(verdict: dict) -> bool:
+    """The first verdict says it did not see enough — by its own sufficiency
+    rating, or by landing on a judgement that more evidence could overturn."""
+    return (
+        verdict.get("evidence_sufficiency") != "sufficient"
+        or verdict.get("judgement") in ("Unclear / insufficient evidence", "Does not support")
+    )
+
+
 def verify_draft(draft_path, citations_path=None, top_k=None,
                  search_resources=None) -> dict:
     """Judge every citation in *draft_path* against its cited source.
@@ -219,6 +249,8 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
     collection, bm25, texts, metadatas = search_resources
 
     top_k = top_k or JUDGEMENT_TOP_K
+    escalate_k = JUDGEMENT_ESCALATE_TOP_K if JUDGEMENT_ESCALATE_TOP_K > top_k else 0
+    retrieve_k = max(top_k, escalate_k)
     sentences = split_into_sentences(draft_text)
     pairs = citation_pairs(sentences, invert_citation_mapping(mapping))
 
@@ -258,7 +290,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             # a model's reading of a plot (v2, spec §4.6) and is never evidence.
             hits = hybrid_search(
                 entry["claim"], collection, bm25, texts, metadatas,
-                top_k=top_k, doc_filter=documents,
+                top_k=retrieve_k, doc_filter=documents,
                 exclude_types={"figure_description"},
             )
         except Exception as exc:
@@ -275,9 +307,23 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             results.append(entry)
             continue
 
-        entry["evidence"] = hits[0]["text"]
+        expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+        entry["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
+        entry["evidence_hits"] = min(top_k, len(hits))
+        entry["escalated"] = False
         try:
             verdict = _judge_once(entry["claim"], entry["evidence"])
+            # Second look, once, only when the first verdict says it saw too
+            # little and there is more of this paper to show it.
+            if escalate_k and len(hits) > top_k and needs_escalation(verdict):
+                entry["first_judgement"] = verdict["judgement"]
+                entry["first_sufficiency"] = verdict["evidence_sufficiency"]
+                entry["evidence"] = assemble_evidence(hits[:escalate_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
+                entry["evidence_hits"] = min(escalate_k, len(hits))
+                entry["escalated"] = True
+                logger.info(" -> %s on %d hit(s), sufficiency %s — judging again with %d hit(s).",
+                            verdict["judgement"], top_k, verdict["evidence_sufficiency"], entry["evidence_hits"])
+                verdict = _judge_once(entry["claim"], entry["evidence"])
         except JudgementParseError as exc:
             entry["outcome"] = "parse_failed"
             entry["raw"] = exc.raw
@@ -314,6 +360,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         "generated": datetime.now().isoformat(timespec="seconds"),
         "model": _judgement_model(),
         "top_k": top_k,
+        "escalate_top_k": escalate_k,
         "results": results,
         "totals": _totals(results),
     }
@@ -451,6 +498,10 @@ def _entry_block(entry) -> list:
         f"**Confidence:** {entry['confidence']} · "
         f"**Evidence sufficiency:** {entry['evidence_sufficiency']}\n",
     ]
+    if entry.get("escalated"):
+        block.append(f"↻ **Escalated:** first verdict {entry['first_judgement']} "
+                     f"(sufficiency {entry['first_sufficiency']}) on the top hit; "
+                     f"re-judged on {entry['evidence_hits']} hits.\n")
     if entry.get("compound_sentence"):
         block.append("⚠ **Compound sentence:** two or more citations in one long sentence — "
                      "a lost sentence boundary? This verdict is about the combined claim.\n")

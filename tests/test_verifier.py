@@ -657,3 +657,118 @@ class TestDerivedFieldsInTheRecord(VerifyDraftTestCase):
         )
         self.assertEqual(report["results"][0]["outcome"], "judged")
         self.assertEqual(report["totals"]["rubric_mismatch"], 0)
+
+
+from research_assistant.agents.agent8_verifier import assemble_evidence, needs_escalation
+
+
+def _hit(i, text, doc="a.pdf", before="", after=""):
+    return {"chunk_index": i, "text": text, "metadata": {"document": doc},
+            "context_before": before, "context_after": after}
+
+
+class TestAssembleEvidence(unittest.TestCase):
+    def test_neighbours_wrap_the_hit_and_hits_are_separated(self):
+        out = assemble_evidence([_hit(1, "MID", before="PRE", after="POST"), _hit(5, "SECOND")], max_chars=10_000)
+        self.assertEqual(out, "PRE\nMID\nPOST\n\n[…]\n\nSECOND")
+
+    def test_cap_truncates_the_tail_not_the_top_hit(self):
+        out = assemble_evidence([_hit(1, "A" * 50), _hit(2, "B" * 50)], max_chars=60)
+        self.assertTrue(out.startswith("A" * 50))
+        self.assertLessEqual(len(out), 60)
+
+    def test_duplicate_text_is_not_repeated(self):
+        out = assemble_evidence([_hit(1, "same"), _hit(2, "same")], max_chars=1000)
+        self.assertEqual(out, "same")
+
+
+class TestNeedsEscalation(unittest.TestCase):
+    def test_insufficient_or_partial_sufficiency_escalates(self):
+        self.assertTrue(needs_escalation({"judgement": "Supports", "evidence_sufficiency": "partial"}))
+        self.assertTrue(needs_escalation({"judgement": "Supports", "evidence_sufficiency": "insufficient"}))
+
+    def test_unclear_or_does_not_support_escalates_even_when_sufficient(self):
+        self.assertTrue(needs_escalation({"judgement": "Unclear / insufficient evidence", "evidence_sufficiency": "sufficient"}))
+        self.assertTrue(needs_escalation({"judgement": "Does not support", "evidence_sufficiency": "sufficient"}))
+
+    def test_supported_and_sufficient_does_not(self):
+        self.assertFalse(needs_escalation({"judgement": "Supports", "evidence_sufficiency": "sufficient"}))
+        self.assertFalse(needs_escalation({"judgement": "Contradicts", "evidence_sufficiency": "sufficient"}))
+
+
+class TestEscalation(VerifyDraftTestCase):
+    HITS = [
+        {"chunk_index": 10, "text": "first hit", "metadata": {"document": "a.pdf"}},
+        {"chunk_index": 20, "text": "second hit", "metadata": {"document": "a.pdf"}},
+        {"chunk_index": 30, "text": "third hit", "metadata": {"document": "a.pdf"}},
+    ]
+
+    def _resources(self):
+        # texts/metadatas long enough for chunk_index 10/20/30 and their neighbours
+        texts = [f"t{i}" for i in range(40)]
+        metas = [{"document": "a.pdf"} for _ in range(40)]
+        return texts, metas
+
+    def _run_with(self, judge_replies):
+        calls = []
+
+        def fake_judge(claim, evidence, **kw):
+            calls.append(evidence)
+            reply = judge_replies[min(len(calls) - 1, len(judge_replies) - 1)]
+            return reply
+
+        draft_path = self._write("Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"})
+        texts, metas = self._resources()
+        import research_assistant.agents.agent8_verifier as a8
+        with patch.object(a8, "hybrid_search", return_value=[dict(h) for h in self.HITS]) as hs, \
+             patch.object(a8, "judge", side_effect=fake_judge):
+            report = verify_draft(draft_path, search_resources=(FakeCollection([("Smith 2020", "a.pdf")]), None, texts, metas))
+        return report, calls, hs
+
+    def test_retrieves_the_escalation_budget_in_one_search(self):
+        _, _, hs = self._run_with([_verdict()])
+        self.assertEqual(hs.call_args.kwargs["top_k"], 3)          # max(JUDGEMENT_TOP_K=1, ESCALATE_TOP_K=3)
+        self.assertEqual(hs.call_args.kwargs["exclude_types"], {"figure_description"})
+
+    def test_sufficient_first_verdict_judges_once_on_the_top_hit_with_neighbours(self):
+        report, calls, _ = self._run_with([_verdict()])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("first hit", calls[0])
+        self.assertIn("t9", calls[0]); self.assertIn("t11", calls[0])     # neighbours of chunk 10
+        self.assertNotIn("second hit", calls[0])
+        e = report["results"][0]
+        self.assertFalse(e["escalated"]); self.assertEqual(e["evidence_hits"], 1)
+        self.assertEqual(e["evidence"], calls[0])
+
+    def test_insufficient_first_verdict_escalates_once_and_keeps_both(self):
+        first = _verdict(judgement="Unclear / insufficient evidence"); first["evidence_sufficiency"] = "insufficient"
+        second = _verdict(judgement="Supports")
+        report, calls, _ = self._run_with([first, second])
+        self.assertEqual(len(calls), 2)
+        for t in ("first hit", "second hit", "third hit"):
+            self.assertIn(t, calls[1])
+        e = report["results"][0]
+        self.assertTrue(e["escalated"]); self.assertEqual(e["evidence_hits"], 3)
+        self.assertEqual(e["judgement"], "Supports")
+        self.assertEqual(e["first_judgement"], "Unclear / insufficient evidence")
+        self.assertEqual(e["first_sufficiency"], "insufficient")
+        self.assertEqual(e["evidence"], calls[1])
+
+    def test_no_escalation_when_there_is_nothing_more_to_show(self):
+        first = _verdict(judgement="Does not support"); first["evidence_sufficiency"] = "insufficient"
+        draft_path = self._write("Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"})
+        texts, metas = self._resources()
+        import research_assistant.agents.agent8_verifier as a8
+        with patch.object(a8, "hybrid_search", return_value=[dict(self.HITS[0])]), \
+             patch.object(a8, "judge", return_value=first) as j:
+            report = verify_draft(draft_path, search_resources=(FakeCollection([("Smith 2020", "a.pdf")]), None, texts, metas))
+        self.assertEqual(j.call_count, 1)
+        self.assertFalse(report["results"][0]["escalated"])
+
+    def test_escalation_disabled_by_config(self):
+        first = _verdict(judgement="Does not support"); first["evidence_sufficiency"] = "insufficient"
+        import research_assistant.agents.agent8_verifier as a8
+        with patch.object(a8, "JUDGEMENT_ESCALATE_TOP_K", 0):
+            report, calls, hs = self._run_with([first])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(hs.call_args.kwargs["top_k"], 1)

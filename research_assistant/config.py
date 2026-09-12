@@ -165,6 +165,15 @@ JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL", "") or None
 JUDGEMENT_TEMPERATURE = 0.0
 # Chunks judged per cited source. 1 = judge the single best-matching chunk.
 JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 1)
+# Evidence escalation. The top JUDGEMENT_TOP_K hit(s), each with
+# JUDGEMENT_NEIGHBOUR_WINDOW adjacent chunks, are judged first. If that
+# verdict reports it did not see enough (sufficiency != sufficient, or
+# Unclear / Does not support), the top JUDGEMENT_ESCALATE_TOP_K hits are
+# judged once more. 0 disables the second look. The assembled evidence is
+# capped so prompt (~3.8k tokens) + evidence stays inside num_ctx below.
+JUDGEMENT_ESCALATE_TOP_K     = _env_int("CITATION_JUDGEMENT_ESCALATE_TOP_K", 3)
+JUDGEMENT_NEIGHBOUR_WINDOW   = _env_int("CITATION_JUDGEMENT_NEIGHBOUR_WINDOW", 1)
+JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS", 6000)
 # The prompt is ~3,760 tokens. _ollama_chat sends no options, so a local run
 # would otherwise use the model default (commonly 4096, sometimes 2048) and
 # Ollama would truncate — silently, from the tail, which is exactly where the
