@@ -92,6 +92,8 @@ def _banner(title: str) -> None:
 
 
 def discover(state: PipelineState) -> dict:
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     query = (state.get("query") or "").strip()
     force = state.get("force", False)
     seed_url = (state.get("seed_url") or "").strip()
@@ -139,6 +141,8 @@ def discover(state: PipelineState) -> dict:
 
 
 def ingest_seed(state: PipelineState) -> dict:
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     _banner("ingest_seed — indexing the seed paper itself")
     label = state.get("seed_label") or os.path.basename(state.get("seed_path", "seed"))
     with pipeline_status.track_stage("ingest_seed", "Indexing seed paper", current_step=2, total_steps=5):
@@ -155,6 +159,8 @@ def ingest_seed(state: PipelineState) -> dict:
 
 
 def extract(state: PipelineState) -> dict:
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     _banner("extract — mining the seed's reference list")
     with pipeline_status.track_stage("extract", "Extracting reference list", current_step=3, total_steps=5, detail="Mining reference list from seed paper"):
         result = agent1_extractor.run_extractor()
@@ -174,6 +180,8 @@ def extract(state: PipelineState) -> dict:
 
 
 def fetch(state: PipelineState) -> dict:
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     _banner("fetch — downloading the referenced papers (Agent 2)")
     with pipeline_status.track_stage("fetch", "Fetching referenced papers", current_step=4, total_steps=5, detail="Downloading open-access reference PDFs"):
         agent2_fetcher.fetch_papers()
@@ -181,6 +189,8 @@ def fetch(state: PipelineState) -> dict:
 
 
 def ingest_refs(state: PipelineState) -> dict:
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     _banner("ingest_refs — ingesting the reference PDFs (Agent 3)")
     with pipeline_status.track_stage("ingest_refs", "Ingesting and summarizing papers", current_step=5, total_steps=5, detail="Ingesting referenced papers into corpus"):
         agent3_ingestor.run_ingestor(
@@ -191,6 +201,8 @@ def ingest_refs(state: PipelineState) -> dict:
 
 
 def respond(state: PipelineState) -> dict:
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     _banner("respond — related-work synthesis for the query")
     from research_assistant.shared import retrieve  # imported here so corpus-building stays light
 
@@ -218,6 +230,8 @@ def respond(state: PipelineState) -> dict:
 
 def fallback(state: PipelineState) -> dict:
     """No seed paper — answer the query from the model's own knowledge."""
+    if pipeline_status.is_cancel_requested():
+        return {"stopped": "Pipeline stopped by user via UI"}
     _banner("fallback — no corpus, answering from general knowledge")
     from research_assistant.prompts import NO_CORPUS_FALLBACK
     from research_assistant.shared.llm import chat
@@ -239,6 +253,8 @@ def fallback(state: PipelineState) -> dict:
 
 
 def _after_discover(state: PipelineState) -> str:
+    if state.get("stopped"):
+        return END
     if state.get("seed_path"):
         return "ingest_seed"
     # No paper to build on. Answer from general knowledge if the caller wanted
@@ -247,10 +263,14 @@ def _after_discover(state: PipelineState) -> str:
 
 
 def _after_extract(state: PipelineState) -> str:
+    if state.get("stopped"):
+        return END
     return "fetch" if state.get("references_ok") else END
 
 
 def _after_ingest_refs(state: PipelineState) -> str:
+    if state.get("stopped"):
+        return END
     return "respond" if state.get("ask") else END
 
 
@@ -322,6 +342,8 @@ def run(
             stream_mode="values",
         ):
             final = update
+            if pipeline_status.is_cancel_requested() or final.get("stopped"):
+                break
     except BaseException as exc:
         if pipeline_status.is_cancellation(exc):
             pipeline_status.add_event("⚠️ Pipeline cancelled (session reloaded or stopped)")
@@ -344,14 +366,15 @@ def run(
         raise
 
     stopped = final.get("stopped")
-    if stopped:
-        logger.warning("Pipeline stopped: %s", stopped)
-        pipeline_status.add_event(f"⚠️ Pipeline stopped early: {stopped[:60]}")
+    if stopped or pipeline_status.is_cancel_requested():
+        stop_reason = stopped or "Pipeline stopped by user via UI"
+        logger.warning("Pipeline stopped: %s", stop_reason)
+        pipeline_status.add_event(f"⚠️ Pipeline stopped early: {stop_reason[:60]}")
         pipeline_status.set_status(
             active=False,
             stage="idle",
             stage_label="Idle",
-            detail=f"Stopped: {stopped[:60]}",
+            detail=f"Stopped: {stop_reason[:60]}",
         )
     else:
         effective_query = final.get("query") or query or final.get("seed_label") or "paper"

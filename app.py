@@ -676,6 +676,9 @@ def _render_sidebar_pipeline_status():
 
         if status.get("active", False):
             st.info("⚡ **Pipeline Active**")
+            if st.button("⏹️ Stop Pipeline", key="sidebar_stop_pipeline_btn", type="secondary", use_container_width=True, help="Immediately halt the active pipeline safely"):
+                pipeline_status.request_cancel("User stopped pipeline via sidebar")
+                st.rerun()
             stage_lbl = status.get("stage_label") or status.get("stage") or "Processing"
             try:
                 curr_step = int(status.get("current_step") or 1)
@@ -795,7 +798,13 @@ def _render_tab1_live_status():
         active_status = pipeline_status.get_status()
         if active_status.get("active", False) or _is_ingest_locked():
             with st.container(border=True):
-                st.markdown("#### ⚡ Pipeline Active on Server")
+                col_title, col_stop = st.columns([3, 1])
+                with col_title:
+                    st.markdown("#### ⚡ Pipeline Active on Server")
+                with col_stop:
+                    if st.button("⏹️ Stop Pipeline", key="tab1_stop_pipeline_btn", type="secondary", use_container_width=True, help="Immediately halt the active pipeline safely"):
+                        pipeline_status.request_cancel("User stopped pipeline via Tab 1")
+                        st.rerun()
                 st_stage = active_status.get("stage_label") or "Indexing papers"
                 try:
                     st_step = int(active_status.get("current_step") or 1)
@@ -944,9 +953,14 @@ with tab_build:
                                                          describe_figures=describe_figures)
                         finally:
                             unreg_batch()
-                        batch_progress.progress(1.0, text="Ingestion complete!")
-                        if ingest_res.get("described"):
-                            st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
+                        if pipeline_status.is_cancel_requested():
+                            batch_progress.progress(1.0, text="Ingestion stopped by user.")
+                            status.update(label="Ingestion stopped by user", state="error")
+                            st.warning("Batch ingestion stopped by user.", icon="⏹️")
+                        else:
+                            batch_progress.progress(1.0, text="Ingestion complete!")
+                            if ingest_res.get("described"):
+                                st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
                         scanned_empty = ingest_res.get("scanned_or_empty", [])
                         inserted = ingest_res.get("inserted", 0)
                         processed = ingest_res.get("processed", len(candidates))
@@ -1146,6 +1160,8 @@ with tab_build:
             final = {}
             try:
                 for update in graph.stream(inputs, cfg, stream_mode="updates"):
+                    if pipeline_status.is_cancel_requested():
+                        break
                     for node, payload in update.items():
                         icon, label = STEPS.get(node, ("•", node))
                         st.write(f"{icon} {label}")
@@ -1156,30 +1172,38 @@ with tab_build:
                             with live.container():
                                 effective_display_q = final.get("query") or q
                                 _render_seed_and_downloads(effective_display_q, final)
-                final = graph.get_state(cfg).values
-                prog_bar.progress(1.0, text="Pipeline complete!")
-                if final.get("stopped"):
-                    status.update(label="Stopped early", state="error")
-                    pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail=f"Stopped: {final['stopped'][:60]}",
-                    )
+                        if payload and payload.get("stopped"):
+                            break
+                    if pipeline_status.is_cancel_requested():
+                        break
+                if pipeline_status.is_cancel_requested():
+                    status.update(label="Pipeline stopped by user", state="error")
+                    st.warning("Pipeline execution stopped by user.", icon="⏹️")
                 else:
-                    status.update(label="Done", state="complete")
-                    import time
-                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail="Pipeline complete",
-                        last_completed_at=now_iso,
-                        last_summary=f"Completed {display_q[:40]}",
-                    )
+                    final = graph.get_state(cfg).values
+                    prog_bar.progress(1.0, text="Pipeline complete!")
+                    if final.get("stopped"):
+                        status.update(label="Stopped early", state="error")
+                        pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
+                        pipeline_status.set_status(
+                            active=False,
+                            stage="idle",
+                            stage_label="Idle",
+                            detail=f"Stopped: {final['stopped'][:60]}",
+                        )
+                    else:
+                        status.update(label="Done", state="complete")
+                        import time
+                        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                        pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
+                        pipeline_status.set_status(
+                            active=False,
+                            stage="idle",
+                            stage_label="Idle",
+                            detail="Pipeline complete",
+                            last_completed_at=now_iso,
+                            last_summary=f"Completed {display_q[:40]}",
+                        )
             except BaseException as e:  # noqa: BLE001
                 if pipeline_status.is_cancellation(e):
                     try:

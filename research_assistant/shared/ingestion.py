@@ -571,6 +571,9 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
         pipeline_status.add_event(f"📝 Generating summaries for {total_to_sum} paper(s) with {model_name}…")
 
     for idx, doc in enumerate(to_summarize, 1):
+        if pipeline_status.is_cancel_requested():
+            logger.info("Summary generation stopped early by user request at %d/%d", idx, total_to_sum)
+            break
         pipeline_status.update_progress(
             item_current=idx,
             item_total=total_to_sum,
@@ -751,6 +754,9 @@ def upsert_corpus(corpus: list[dict]):
         pipeline_status.add_event(f"🧠 Embedding {len(documents)} chunks into ChromaDB…")
         embed_t0 = time.perf_counter()
         for i in range(0, len(documents), EMBED_BATCH_SIZE):
+            if pipeline_status.is_cancel_requested():
+                logger.info("Embedding stopped early by user request at chunk %d/%d", i, len(documents))
+                break
             collection.add(
                 embeddings=embeddings.embed_documents(embed_texts[i : i + EMBED_BATCH_SIZE]),
                 documents=documents[i : i + EMBED_BATCH_SIZE],
@@ -812,6 +818,10 @@ def pdf_key(pdf_path: str) -> str:
 
 def rebuild_bm25():
     """Rebuild the BM25 index from the entire ChromaDB collection."""
+    if pipeline_status.is_cancel_requested():
+        logger.info("rebuild_bm25 skipped because cancellation was requested")
+        return
+
     import chromadb
     from rank_bm25 import BM25Okapi
 
@@ -969,6 +979,10 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
         if workers <= 1:
             logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
             for i, (path, label) in enumerate(candidates.items(), 1):
+                if pipeline_status.is_cancel_requested():
+                    logger.info("%sIngestion stopped early by user request at PDF %d/%d", log_prefix, i, len(candidates))
+                    pipeline_status.add_event(f"⏹️ Ingestion stopped by user ({i-1}/{len(candidates)} processed)")
+                    break
                 name = os.path.basename(path)
                 pipeline_status.update_progress(
                     item_current=i,
@@ -992,6 +1006,12 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
                 }
                 completed_count = 0
                 for future in concurrent.futures.as_completed(futures):
+                    if pipeline_status.is_cancel_requested():
+                        logger.info("%sIngestion stopped early by user request (cancelling pending jobs)", log_prefix)
+                        for f in futures:
+                            f.cancel()
+                        pipeline_status.add_event(f"⏹️ Ingestion stopped by user ({completed_count}/{len(candidates)} processed)")
+                        break
                     path, label = futures[future]
                     name = os.path.basename(path)
                     completed_count += 1
@@ -1058,8 +1078,17 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
         # on is also in candidates, and marking it too would hide the crash: only
         # --force (which reprocesses everything) would ever recover it.
         failed_paths = set(result["failed"])
-        marked = [path for path in candidates if path not in failed_paths]
-        manifest.add_many(pdf_key(path) for path in marked)
+        if pipeline_status.is_cancel_requested():
+            docs_in_corpus = {entry.get("document") for entry in corpus if entry.get("document")}
+            marked = [path for path in candidates if path not in failed_paths and pdf_key(path) in docs_in_corpus]
+        else:
+            marked = [path for path in candidates if path not in failed_paths]
+        if marked:
+            manifest.add_many(pdf_key(path) for path in marked)
+
+        if pipeline_status.is_cancel_requested():
+            logger.info("%sIngestion stopped early by user request.", log_prefix)
+            return result
 
         # Rebuilding is only worthwhile when the collection actually changed, but
         # the index must also exist for search to work at all.

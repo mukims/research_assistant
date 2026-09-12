@@ -29,15 +29,20 @@ from research_assistant.shared.log import get_logger
 logger = get_logger("pipeline_status")
 
 
+class PipelineCancelledError(Exception):
+    """Raised when a pipeline stage or step is stopped by the user."""
+    pass
+
+
 def is_cancellation(exc: BaseException) -> bool:
     """Return True if exc represents a user cancel, interrupt, or Streamlit rerun/stop."""
-    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, PipelineCancelledError)):
         return True
     cls_name = type(exc).__name__
-    if cls_name in ("StopException", "RerunException", "ScriptControlException"):
+    if cls_name in ("StopException", "RerunException", "ScriptControlException", "PipelineCancelledError"):
         return True
     for base in type(exc).__mro__:
-        if base.__name__ == "ScriptControlException":
+        if base.__name__ in ("ScriptControlException", "PipelineCancelledError"):
             return True
     return False
 
@@ -88,6 +93,7 @@ DEFAULT_STATUS: dict[str, Any] = {
     "pid": None,
     "last_completed_at": "",
     "last_summary": "",
+    "cancel_requested": False,
 }
 
 STATUS_PATH_OVERRIDE: Optional[str] = None
@@ -423,6 +429,8 @@ def set_status(**kwargs) -> dict[str, Any]:
                 status["started_at"] = _now_iso()
             if "pid" not in kwargs:
                 status["pid"] = os.getpid()
+            if "cancel_requested" not in kwargs:
+                status["cancel_requested"] = False
         elif now_active:
             if not status.get("started_at"):
                 status["started_at"] = kwargs.get("started_at") or _now_iso()
@@ -531,6 +539,45 @@ def clear_status(keep_events: bool = True) -> dict[str, Any]:
     return result
 
 
+def request_cancel(reason: str = "User requested stop via UI") -> dict[str, Any]:
+    """Flag pipeline cancellation and immediately transition to stopping/idle state."""
+    with _status_lock():
+        status = _load_status_from_disk()
+        status["cancel_requested"] = True
+        status["active"] = False
+        status["stage"] = "idle"
+        status["stage_label"] = "Idle"
+        status["detail"] = f"Stopped: {reason}"
+        status["pid"] = None
+        events = list(status.get("recent_events", []))
+        events.append(f"⏹️ Pipeline stopped by user via UI ({reason})")
+        status["recent_events"] = events[-MAX_RECENT_EVENTS:]
+        status["updated_at"] = _now_iso()
+        _persist_status_locked(status)
+        result = dict(status)
+    _notify_callbacks(result)
+    logger.info("Pipeline cancellation requested: %s", reason)
+    return result
+
+
+def is_cancel_requested() -> bool:
+    """Return True if pipeline cancellation was requested."""
+    status = _load_status_from_disk()
+    return bool(status.get("cancel_requested", False))
+
+
+def clear_cancel_request() -> None:
+    """Clear the cancellation flag."""
+    with _status_lock():
+        status = _load_status_from_disk()
+        if status.get("cancel_requested"):
+            status["cancel_requested"] = False
+            status["updated_at"] = _now_iso()
+            _persist_status_locked(status)
+            result = dict(status)
+            _notify_callbacks(result)
+
+
 @contextlib.contextmanager
 def track_stage(
     stage: str,
@@ -546,6 +593,11 @@ def track_stage(
     meta_step, meta_label = STAGE_METADATA.get(stage, (0, stage.replace("_", " ").capitalize()))
     eff_step = current_step if current_step is not None else meta_step
     eff_label = stage_label or meta_label
+
+    if is_cancel_requested():
+        logger.info("track_stage('%s') skipped because cancellation was requested", stage)
+        yield
+        return
 
     set_status(
         active=True,
@@ -576,7 +628,11 @@ def track_stage(
         stop_heartbeat.set()
         if hb_thread.is_alive():
             hb_thread.join(timeout=1.0)
-        if isinstance(exc, KeyboardInterrupt):
+        if isinstance(exc, PipelineCancelledError):
+            err_msg = f"⏹️ {eff_label} stopped by user via UI"
+            detail_msg = f"Stopped in {eff_label}"
+            logger.info("%s: %s", eff_label, err_msg)
+        elif isinstance(exc, KeyboardInterrupt):
             err_msg = f"⚠️ {eff_label} cancelled by user (SIGINT)"
             detail_msg = f"Cancelled in {eff_label}"
             logger.info("%s: %s", eff_label, err_msg)
@@ -615,7 +671,14 @@ def track_stage(
         stop_heartbeat.set()
         if hb_thread.is_alive():
             hb_thread.join(timeout=1.0)
-        if mark_idle_on_exit:
+        if is_cancel_requested():
+            set_status(
+                active=False,
+                stage="idle",
+                stage_label="Idle",
+                detail="Pipeline stopped",
+            )
+        elif mark_idle_on_exit:
             summary = last_summary or (f"+{item_total} papers indexed" if item_total else "Stage completed")
             set_status(
                 active=False,

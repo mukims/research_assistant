@@ -332,6 +332,11 @@ def fetch_papers():
         last_summary=f"+{len(downloaded)} papers fetched",
     ):
         for i, (key, ref) in enumerate(remaining, start=1):
+            if pipeline_status.is_cancel_requested():
+                logger.info("Fetch cancelled by user via UI at paper %d/%d", i, len(remaining))
+                pipeline_status.add_event(f"⏹️ Fetch stopped by user ({len(downloaded)} downloaded)")
+                break
+
             label = (ref.get("title") or ref.get("raw_reference") or key)[:70]
             logger.info("[%d/%d] %s", i, len(remaining), label)
             pipeline_status.update_progress(
@@ -431,6 +436,10 @@ def fetch_papers():
                 )
 
             _checkpoint(downloaded, failed)
+
+        if pipeline_status.is_cancel_requested():
+            logger.info("Fetch aborted early due to user stop request.")
+            return
 
         manual = [r for r in failed.values() if r.get("doi")]
         pipeline_status.add_event(

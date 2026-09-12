@@ -884,5 +884,72 @@ def test_app_does_not_unlink_raw_dir(tmp_path, monkeypatch):
             os.unlink(raw_paper)
 
 
+def test_request_cancel_and_is_cancel_requested(temp_status_file):
+    assert pipeline_status.is_cancel_requested() is False
+
+    # Request cancel
+    res = pipeline_status.request_cancel("User stopped test")
+    assert res["cancel_requested"] is True
+    assert res["active"] is False
+    assert res["stage"] == "idle"
+    assert "Stopped: User stopped test" in res["detail"]
+    assert any("⏹️ Pipeline stopped by user via UI (User stopped test)" in ev for ev in res["recent_events"])
+    assert pipeline_status.is_cancel_requested() is True
+
+    # Clear cancel request
+    pipeline_status.clear_cancel_request()
+    assert pipeline_status.is_cancel_requested() is False
+
+
+def test_fresh_active_clears_cancel_requested(temp_status_file):
+    pipeline_status.request_cancel("Testing clear on start")
+    assert pipeline_status.is_cancel_requested() is True
+
+    # Starting a new active run should auto-clear cancel_requested
+    new_res = pipeline_status.set_status(active=True, stage="discover")
+    assert new_res["active"] is True
+    assert new_res["cancel_requested"] is False
+    assert pipeline_status.is_cancel_requested() is False
+
+
+def test_track_stage_skips_when_cancel_requested(temp_status_file):
+    pipeline_status.request_cancel("Pre-cancel")
+    executed = False
+    with pipeline_status.track_stage("ingest_seed", "Indexing seed paper"):
+        executed = True
+
+    assert executed is True
+    st = pipeline_status.get_status()
+    # Stage should NOT have set active=True
+    assert st["active"] is False
+    assert st["stage"] == "idle"
+
+
+def test_track_stage_cancelled_during_execution(temp_status_file):
+    pipeline_status.clear_status()
+    with pipeline_status.track_stage("fetch", "Fetching referenced papers"):
+        assert pipeline_status.get_status()["active"] is True
+        pipeline_status.request_cancel("Stop during fetch")
+
+    st = pipeline_status.get_status()
+    assert st["active"] is False
+    assert st["stage"] == "idle"
+    assert st["cancel_requested"] is True
+
+
+def test_pipeline_cancelled_error_handling(temp_status_file):
+    pipeline_status.clear_status()
+    with pytest.raises(pipeline_status.PipelineCancelledError):
+        with pipeline_status.track_stage("ingest_seed", "Indexing seed paper"):
+            raise pipeline_status.PipelineCancelledError("Halt")
+
+    st = pipeline_status.get_status()
+    assert st["active"] is False
+    assert st["stage"] == "idle"
+    assert any("⏹️ Indexing seed paper stopped by user via UI" in ev for ev in st["recent_events"])
+    assert not any("❌ Error" in ev for ev in st["recent_events"])
+
+
+
 
 
