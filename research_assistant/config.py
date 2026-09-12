@@ -195,6 +195,19 @@ DOC_GATE         = _env_bool("CITATION_DOC_GATE", True)
 # summary. Falls back to per-summary calls when the reply cannot be aligned.
 GATE_BATCHED     = _env_bool("CITATION_GATE_BATCHED", True)
 
+# ─── Synthesis (Tab 1 related work) ───────────────────────────────────────────
+# map_reduce: per-paper notes, then one synthesis over the notes (1 + N + 1
+# calls). single: one call over per-paper passages. Both at a low
+# temperature — the model's default of 1.0 is for creative writing, not for a
+# grounded overview. The reduce runs at 8k context (as the judge does) so
+# eight papers' notes plus a 600-token answer fit.
+SYNTHESIS_MODE                = os.environ.get("CITATION_SYNTHESIS_MODE", "map_reduce").lower()
+SYNTHESIS_PER_PAPER_CHUNKS    = _env_int("CITATION_SYNTHESIS_PER_PAPER_CHUNKS", 4)
+SYNTHESIS_PER_PAPER_MAX_CHARS = _env_int("CITATION_SYNTHESIS_PER_PAPER_MAX_CHARS", 5000)
+SYNTHESIS_TEMPERATURE         = float(os.environ.get("CITATION_SYNTHESIS_TEMPERATURE", "0.2"))
+SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": 8192}
+
+
 
 # ─── Orchestrator Tunables ────────────────────────────────────────────────────
 PDF_COOLDOWN_SECONDS     = 30

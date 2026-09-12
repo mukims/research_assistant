@@ -22,17 +22,25 @@ from research_assistant.config import (
     DOC_GATE,
     GATE_BATCHED,
     DEFAULT_TOP_K,
+    CHAT_OLLAMA_OPTIONS,
+    SYNTHESIS_MODE,
+    SYNTHESIS_PER_PAPER_CHUNKS,
+    SYNTHESIS_PER_PAPER_MAX_CHARS,
+    SYNTHESIS_TEMPERATURE,
+    SYNTHESIS_OLLAMA_OPTIONS,
 )
 from research_assistant.prompts import (
     DOC_RELEVANCE_GATE,
     DOC_RELEVANCE_GATE_BATCH,
-    RESEARCH_CHAT_SYSTEM,
-    RELATED_WORK_USER,
+    SYNTHESIS_SYSTEM,
+    PAPER_NOTES_USER,
+    SYNTHESIS_USER,
 )
 from research_assistant.shared.db import load_search_resources
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.search import hybrid_search
+
 
 logger = get_logger("retrieve")
 
@@ -215,55 +223,141 @@ def deep_search(query: str, documents, top_k: int = DEFAULT_TOP_K) -> list[dict]
 
 
 
+# ─── Map: notes per paper ───────────────────────────────────────────────────
+
+
+def paper_notes(query: str, key: str, title: str, hits: list[dict]):
+    """One call over one paper's passages. Returns (notes, relevant)."""
+    passages = format_passages(hits, SYNTHESIS_PER_PAPER_MAX_CHARS)
+    text = chat(
+        [{"role": "system", "content": SYNTHESIS_SYSTEM},
+         {"role": "user", "content": PAPER_NOTES_USER.format(query=query, key=key, title=title, passages=passages)}],
+        temperature=SYNTHESIS_TEMPERATURE, options=CHAT_OLLAMA_OPTIONS,
+    ).content.strip()
+    relevant = not text.lower().startswith("not relevant")
+    return text, relevant
+
+
+# ─── Reduce: the synthesis ──────────────────────────────────────────────────
+
+
+def synthesise(query: str, material: str, n: int) -> str:
+    return chat(
+        [{"role": "system", "content": SYNTHESIS_SYSTEM},
+         {"role": "user", "content": SYNTHESIS_USER.format(query=query, n=n, material=material)}],
+        temperature=SYNTHESIS_TEMPERATURE, options=SYNTHESIS_OLLAMA_OPTIONS,
+    ).content.strip()
+
+
+_KEY_GROUP_RE = re.compile(r"\[(P\d+(?:\s*,\s*P\d+)*)\]")
+
+
+def check_citation_keys(text: str, valid_keys):
+    """Keys the synthesis cites, in first-use order, and the ones that are
+    not on the shortlist — a 5B model can invent a [P7] as easily as a fact."""
+    used = []
+    for m in _KEY_GROUP_RE.finditer(text or ""):
+        for k in re.split(r"\s*,\s*", m.group(1)):
+            if k not in used:
+                used.append(k)
+    unknown = [k for k in used if k not in valid_keys]
+    return used, unknown
+
+
 # ─── End to end ─────────────────────────────────────────────────────────────
 
 
-def research_answer(query: str, top_k: int = DEFAULT_TOP_K) -> dict | None:
-    """Full pipeline: shortlist papers → deep search → related-work synthesis.
+def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = None, on_progress=None) -> dict | None:
+    """Shortlist papers → read each one → synthesise, citing by key.
 
-    Returns a dict shaped like agent4_assistant.suggest_citation's output
-    (``suggestion`` / ``citations`` / ``passages``) plus ``selected`` — the
-    stage-1 shortlist with summaries — or None when the corpus is empty.
+    Returns None when the corpus is empty. Otherwise a dict shaped as before
+    (``suggestion`` / ``citations`` / ``passages`` / ``selected``) plus
+    ``mode``, ``keys`` (key → title), ``notes`` (map_reduce only),
+    ``unverified_citations`` (keys not on the shortlist), ``irrelevant_cited``
+    and ``timings``. ``on_progress(stage, payload)`` is called with
+    ``shortlist``, ``notes`` (once per paper) and ``synthesis``.
     """
-    from research_assistant.shared.llm import chat
+    mode = (mode or SYNTHESIS_MODE).lower()
+    if mode not in ("map_reduce", "single"):
+        logger.warning("Unknown synthesis mode %r — using map_reduce.", mode)
+        mode = "map_reduce"
 
+    def emit(stage, payload):
+        if on_progress:
+            try:
+                on_progress(stage, payload)
+            except Exception as exc:                # noqa: BLE001 — progress must never break the answer
+                logger.debug("on_progress raised: %s", exc)
+
+    t_start = time.perf_counter()
     ranked = rank_documents(query)
     if not ranked:
         return None
 
+    t0 = time.perf_counter()
     selected = gate_documents(query, ranked) if DOC_GATE else ranked
-    docs = [r["document"] for r in selected]
+    selected = dedupe_shortlist(selected)
+    keys = assign_keys(selected)
+    t_gate = time.perf_counter() - t0
+    emit("shortlist", {"papers": [{"key": r["key"], "citation": keys[r["key"]]} for r in selected]})
 
+    per_paper = SYNTHESIS_PER_PAPER_CHUNKS if mode == "map_reduce" else 2
     try:
-        passages = deep_search(query, docs, top_k=max(top_k, len(docs)))
+        passages = passages_per_paper(query, selected, per_paper)
     except Exception as e:
-        logger.warning("Deep search unavailable (%s) — using summaries only.", e)
-        passages = []
+        logger.warning("Per-paper retrieval unavailable (%s) — using summaries only.", e)
+        passages = {}
+    all_hits = [h for r in selected for h in passages.get(r["key"], [])]
 
-    context = ""
-    cites = []
-    for i, p in enumerate(passages, 1):
-        m = p.get("metadata") or {}
-        cit = m.get("citation_source", "Unknown")
-        if cit not in cites:
-            cites.append(cit)
-        context += f"[{cit}] (from {m.get('document', '?')}, p.{m.get('page', '?')})\n"
-        context += (p.get("text") or "") + "\n\n"
-
-    # Fall back to the summaries themselves if stage 2 found no chunks.
-    if not context:
+    notes, t_map = [], 0.0
+    if mode == "map_reduce":
+        t0 = time.perf_counter()
         for r in selected:
-            cites.append(r["citation"])
-            context += f"[{r['citation']}]\n{r['summary']}\n\n"
+            key, title = r["key"], keys[r["key"]]
+            hits = passages.get(key) or []
+            t1 = time.perf_counter()
+            if hits:
+                try:
+                    text, relevant = paper_notes(query, key, title, hits)
+                except Exception as e:
+                    logger.warning("Notes failed for %s (%s) — using its summary.", key, e)
+                    text, relevant, hits = r.get("summary", ""), True, []
+            else:
+                text, relevant = r.get("summary", ""), True
+            note = {"key": key, "document": r["document"], "citation": title, "notes": text,
+                    "relevant": relevant, "passages_used": len(hits), "seconds": round(time.perf_counter() - t1, 1)}
+            notes.append(note)
+            emit("notes", note)
+        t_map = time.perf_counter() - t0
+        material = "\n\n".join(f"[{n['key']}] {n['citation']}\n{n['notes']}" for n in notes)
+    else:
+        blocks = []
+        for r in selected:
+            hits = passages.get(r["key"]) or []
+            body = format_passages(hits, SYNTHESIS_PER_PAPER_MAX_CHARS) if hits else r.get("summary", "")
+            blocks.append(f"[{r['key']}] {keys[r['key']]}\n{body}")
+        material = "\n\n".join(blocks)
 
-    answer = chat([
-        {"role": "system", "content": RESEARCH_CHAT_SYSTEM},
-        {"role": "user", "content": RELATED_WORK_USER.format(query=query, context=context)},
-    ]).content
+    t0 = time.perf_counter()
+    answer = synthesise(query, material, len(selected))
+    t_reduce = time.perf_counter() - t0
+    emit("synthesis", {"seconds": round(t_reduce, 1)})
+
+    used, unknown = check_citation_keys(answer, set(keys))
+    irrelevant = {n["key"] for n in notes if not n["relevant"]}
+    citations = [keys[k] for k in used if k in keys]
 
     return {
         "suggestion": answer,
-        "citations": cites,
-        "passages": passages,
+        "citations": citations,
+        "passages": all_hits,
         "selected": selected,
+        "mode": mode,
+        "keys": keys,
+        "notes": notes,
+        "unverified_citations": unknown,
+        "irrelevant_cited": [k for k in used if k in irrelevant],
+        "timings": {"gate": round(t_gate, 1), "map": round(t_map, 1), "reduce": round(t_reduce, 1),
+                    "total": round(time.perf_counter() - t_start, 1)},
     }
+

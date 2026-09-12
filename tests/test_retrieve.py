@@ -108,3 +108,116 @@ class TestPassagesPerPaper(unittest.TestCase):
         self.assertLessEqual(len(out), 60 + len("\n\n"))
         self.assertIn("(p.5, results)", out)
 
+
+class TestCitationKeys(unittest.TestCase):
+    def test_used_in_order_and_unknown(self):
+        used, unknown = rt.check_citation_keys("A [P2]. B [P1, P3]. C [P2] and [P9].", {"P1", "P2", "P3"})
+        self.assertEqual(used, ["P2", "P1", "P3", "P9"])
+        self.assertEqual(unknown, ["P9"])
+
+    def test_no_keys(self):
+        self.assertEqual(rt.check_citation_keys("no citations here", {"P1"}), ([], []))
+
+
+class ResearchAnswerTestCase(unittest.TestCase):
+    """Stubs: stage 1 returns three papers, retrieval returns one chunk per
+    paper, the model returns canned notes and a canned synthesis."""
+
+    def setUp(self):
+        self.ranked = _ranked(3)
+        p = patch.object(rt, "rank_documents", return_value=[dict(r) for r in self.ranked]); p.start(); self.addCleanup(p.stop)
+        p = patch.object(rt, "DOC_GATE", False); p.start(); self.addCleanup(p.stop)
+        p = patch.object(rt, "load_search_resources", return_value=(None, None, [], [])); p.start(); self.addCleanup(p.stop)
+
+        def fake_search(query, collection, bm25, texts, metadatas, top_k, doc_filter=None, exclude_types=None, **kw):
+            doc = next(iter(doc_filter))
+            return [{"chunk_index": 1, "text": f"chunk of {doc}", "metadata": {"document": doc, "citation_source": f"Paper {doc[1]}", "page": 1}}]
+        p = patch.object(rt, "hybrid_search", side_effect=fake_search); p.start(); self.addCleanup(p.stop)
+        self.calls = []
+
+        def fake_chat(messages, model=None, images=None, temperature=None, options=None):
+            content = messages[-1]["content"]
+            self.calls.append({"content": content, "temperature": temperature, "options": options})
+            if "Paper P2" in content and "Write notes" in content:
+                return _reply("Not relevant: it is about something else.")
+            if "Write notes" in content:
+                key = content.split("Paper ")[1].split(":")[0]
+                return _reply(f"Establishes: result of {key}. Method: simulation. Limits: none stated.")
+            return _reply("### What is established\nX [P1]. Y [P3].\n### Where the papers differ\nNone.\n### The gap\nZ [P1, P7].")
+        p = patch.object(rt, "chat", side_effect=fake_chat); p.start(); self.addCleanup(p.stop)
+
+
+class TestMapReduce(ResearchAnswerTestCase):
+    def test_reads_every_paper_then_synthesises(self):
+        events = []
+        out = rt.research_answer("idea", mode="map_reduce", on_progress=lambda stage, payload: events.append(stage))
+        self.assertEqual(out["mode"], "map_reduce")
+        self.assertEqual(len(self.calls), 4)                                  # 3 notes + 1 synthesis
+        self.assertTrue(all(c["temperature"] == rt.SYNTHESIS_TEMPERATURE for c in self.calls))
+        self.assertEqual(self.calls[-1]["options"], rt.SYNTHESIS_OLLAMA_OPTIONS)
+        self.assertEqual(self.calls[0]["options"], rt.CHAT_OLLAMA_OPTIONS)
+        self.assertEqual([n["key"] for n in out["notes"]], ["P1", "P2", "P3"])
+        self.assertFalse(out["notes"][1]["relevant"])
+        self.assertEqual(out["keys"], {"P1": "Paper 1", "P2": "Paper 2", "P3": "Paper 3"})
+        self.assertEqual(out["citations"], ["Paper 1", "Paper 3"])
+        self.assertEqual(out["unverified_citations"], ["P7"])
+        self.assertEqual(out["irrelevant_cited"], [])
+        self.assertEqual(len(out["passages"]), 3)
+        self.assertEqual(events, ["shortlist", "notes", "notes", "notes", "synthesis"])
+        for k in ("gate", "map", "reduce", "total"):
+            self.assertIn(k, out["timings"])
+        self.assertTrue(out["suggestion"].startswith("### What is established"))
+        self.assertEqual([s["key"] for s in out["selected"]], ["P1", "P2", "P3"])
+
+    def test_notes_call_carries_the_papers_passages_and_key(self):
+        rt.research_answer("idea", mode="map_reduce")
+        first = self.calls[0]["content"]
+        self.assertIn("Paper P1: Paper 1", first); self.assertIn("chunk of d1.pdf", first); self.assertNotIn("chunk of d2.pdf", first)
+
+    def test_irrelevant_paper_that_is_cited_is_flagged(self):
+        def synth_cites_p2(messages, **kw):
+            content = messages[-1]["content"]
+            if "Write notes" in content:
+                return _reply("Not relevant: x.") if "Paper P2" in content else _reply("Establishes: r.")
+            return _reply("### What is established\nX [P2].\n### Where the papers differ\nNone.\n### The gap\nG.")
+        with patch.object(rt, "chat", side_effect=synth_cites_p2):
+            out = rt.research_answer("idea", mode="map_reduce")
+        self.assertEqual(out["irrelevant_cited"], ["P2"])
+
+    def test_a_failed_notes_call_uses_the_summary(self):
+        def flaky(messages, **kw):
+            content = messages[-1]["content"]
+            if "Paper P1" in content and "Write notes" in content:
+                raise RuntimeError("down")
+            if "Write notes" in content:
+                return _reply("Establishes: r.")
+            return _reply("### What is established\nX [P1].\n### Where the papers differ\nNone.\n### The gap\nG.")
+        with patch.object(rt, "chat", side_effect=flaky):
+            out = rt.research_answer("idea", mode="map_reduce")
+        self.assertEqual(out["notes"][0]["notes"], "summary 1")
+        self.assertTrue(out["notes"][0]["relevant"])
+        self.assertEqual(out["notes"][0]["passages_used"], 0)
+
+
+class TestSingle(ResearchAnswerTestCase):
+    def test_one_call_over_per_paper_passages(self):
+        out = rt.research_answer("idea", mode="single")
+        self.assertEqual(out["mode"], "single")
+        self.assertEqual(len(self.calls), 1)
+        content = self.calls[0]["content"]
+        for doc in ("d1.pdf", "d2.pdf", "d3.pdf"):
+            self.assertIn(f"chunk of {doc}", content)
+        self.assertIn("[P2]", content)
+        self.assertEqual(out["notes"], [])
+        self.assertEqual(out["citations"], ["Paper 1", "Paper 3"])
+
+    def test_empty_corpus_returns_none(self):
+        with patch.object(rt, "rank_documents", return_value=[]):
+            self.assertIsNone(rt.research_answer("idea"))
+
+    def test_deep_search_still_exists_for_other_callers(self):
+        with patch.object(rt, "hybrid_search", return_value=[]) as hs:
+            rt.deep_search("q", ["d1.pdf"], top_k=2)
+        self.assertEqual(hs.call_args.kwargs["doc_filter"], {"d1.pdf"})
+
+

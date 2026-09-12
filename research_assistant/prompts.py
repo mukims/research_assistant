@@ -141,3 +141,49 @@ RELATED_WORK_USER = (
     "one or two sentences on where this idea might still add something. Use "
     "only the provided sources.\n\n{context}"
 )
+
+
+# ─── Synthesis (Tab 1 / orchestrate respond) ────────────────────────────────
+# Map: one call per shortlisted paper over its own passages. Reduce: one call
+# over the notes. Both cite by short key ([P3]); retrieve.check_citation_keys
+# verifies every key against the shortlist afterwards.
+SYNTHESIS_SYSTEM = (
+    "You are a physicist writing the related-work section of a research "
+    "proposal. You write from the material you are given and nothing else. "
+    "Every factual sentence carries at least one citation key in square "
+    "brackets, e.g. [P2] or [P1, P4]. You never cite a key for something its "
+    "material does not say, and when the material does not cover something "
+    "you say so instead of filling the gap from memory."
+)
+
+PAPER_NOTES_USER = (
+    "Research idea: {query}\n\n"
+    "Paper {key}: {title}\n"
+    "Passages from this paper:\n{passages}\n\n"
+    "Write notes on this paper for the idea above, at most 150 words, as "
+    "three short labelled parts:\n"
+    "Establishes: the specific result(s) in the passages that bear on the "
+    "idea — with the system, conditions and numbers when given.\n"
+    "Method: how (experiment, simulation, theory; the setup or model).\n"
+    "Limits: a stated limitation, assumption or open question, or 'none stated'.\n"
+    "If the passages do not bear on the idea at all, write only: "
+    "Not relevant: <one sentence why>.\n"
+    "Refer to the paper as {key}. Use only the passages."
+)
+
+SYNTHESIS_USER = (
+    "Research idea: {query}\n\n"
+    "Material on {n} papers (each cited by its key):\n{material}\n\n"
+    "Write a related-work synthesis of 350-500 words with exactly these headings:\n"
+    "### What is established\n"
+    "Group by theme. Every sentence cites the keys it rests on.\n"
+    "### Where the papers differ\n"
+    "Conditions, systems, magnitudes or conclusions that disagree or do not "
+    "overlap — cite both sides. If none, say so in one sentence.\n"
+    "### The gap\n"
+    "State concretely what none of the material covers that the idea needs — "
+    "the system, regime, quantity or comparison — and what evidence would "
+    "close it. Do not describe the idea's value in general terms.\n"
+    "Use only the material. A paper marked 'Not relevant' is not cited."
+)
+
