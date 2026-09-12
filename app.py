@@ -18,6 +18,7 @@ import streamlit as st
 
 from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
+from research_assistant.shared import pipeline_status
 
 st.set_page_config(page_title="Research Assistant", page_icon="📚", layout="wide")
 os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -73,20 +74,7 @@ def _get_resources_mtime() -> float:
 
 
 def _is_ingest_locked() -> bool:
-    lock_path = getattr(config, "INGEST_LOCK_PATH", "/mnt/disks/data/ingest.lock")
-    if not os.path.exists(lock_path):
-        return False
-    try:
-        import fcntl
-        with open(lock_path, "a") as f:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(f, fcntl.LOCK_UN)
-                return False
-            except OSError:
-                return True
-    except Exception:
-        return False
+    return pipeline_status._is_ingest_locked()
 
 
 # ─── Data helpers ───────────────────────────────────────────────────────────
@@ -500,7 +488,94 @@ def _render_build(final, query):
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
+@st.fragment(run_every="3s")
+def _render_sidebar_pipeline_status():
+    try:
+        from datetime import datetime, timezone
+
+        status = pipeline_status.get_status()
+
+        if status.get("active", False):
+            st.info("⚡ **Pipeline Active**")
+            stage_lbl = status.get("stage_label") or status.get("stage") or "Processing"
+            try:
+                curr_step = int(status.get("current_step") or 1)
+                tot_steps = int(status.get("total_steps") or 5)
+            except (ValueError, TypeError):
+                curr_step, tot_steps = 1, 5
+            st.markdown(f"**Stage:** {stage_lbl} (Step {curr_step}/{tot_steps})")
+
+            curr_item = status.get("current_item_name", "")
+            if curr_item:
+                st.markdown(f"**Current:** `{curr_item[:60]}`")
+
+            try:
+                item_c = int(status.get("item_current") or 0)
+                item_t = int(status.get("item_total") or 0)
+            except (ValueError, TypeError):
+                item_c, item_t = 0, 0
+            if item_t > 0:
+                pct = min(1.0, max(0.0, item_c / item_t))
+                st.progress(pct, text=f"{item_c} / {item_t} papers ({int(pct * 100)}%)")
+            else:
+                pct = min(1.0, max(0.0, curr_step / max(1, tot_steps)))
+                st.progress(pct, text=f"Step {curr_step} of {tot_steps}")
+
+            started_at = status.get("started_at")
+            if started_at:
+                try:
+                    start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    elapsed_sec = int((datetime.now(timezone.utc) - start_dt).total_seconds())
+                    if elapsed_sec >= 60:
+                        mins = elapsed_sec // 60
+                        secs = elapsed_sec % 60
+                        st.caption(f"⏱️ Elapsed: {mins}m {secs}s")
+                    else:
+                        st.caption(f"⏱️ Elapsed: {max(0, elapsed_sec)}s")
+                except Exception:
+                    pass
+
+            detail = status.get("detail", "")
+            if detail:
+                st.caption(f"⚙️ {detail}")
+
+            events = status.get("recent_events", [])
+            with st.expander("📋 Live Activity Log", expanded=False):
+                if events:
+                    for ev in reversed(events):
+                        st.markdown(f"- {ev}")
+                else:
+                    st.caption("No events recorded yet.")
+        else:
+            st.markdown("🟢 **Pipeline: Idle** (Ready for new papers)")
+            last_completed = status.get("last_completed_at")
+            if last_completed:
+                try:
+                    comp_dt = datetime.fromisoformat(last_completed.replace("Z", "+00:00"))
+                    time_str = comp_dt.strftime("%H:%M UTC")
+                    summary = (status.get("last_summary") or "").strip()
+                    if summary.startswith("(") and summary.endswith(")"):
+                        summary = summary[1:-1].strip()
+                    summary_part = f" ({summary})" if summary else ""
+                    st.caption(f"Last run completed: {time_str}{summary_part}")
+                except Exception:
+                    pass
+            events = status.get("recent_events", [])
+            if events:
+                with st.expander("📋 Recent Activity Log", expanded=False):
+                    for ev in reversed(events):
+                        st.caption(ev)
+    except Exception as exc:
+        st.caption("Pipeline status temporarily unavailable")
+
+
 with st.sidebar:
+    st.subheader("Pipeline Status")
+    _render_sidebar_pipeline_status()
+    st.divider()
+
     st.subheader("Corpus")
     chunks, papers = _corpus_stats()
     c1, c2 = st.columns(2)
@@ -535,15 +610,52 @@ tab_build, tab_cite, tab_batch, tab_chat, tab_help = st.tabs(
 )
 
 
+@st.fragment(run_every="3s")
+def _render_tab1_live_status():
+    try:
+        active_status = pipeline_status.get_status()
+        if active_status.get("active", False) or _is_ingest_locked():
+            with st.container(border=True):
+                st.markdown("#### ⚡ Pipeline Active on Server")
+                st_stage = active_status.get("stage_label") or "Indexing papers"
+                try:
+                    st_step = int(active_status.get("current_step") or 1)
+                    st_total = int(active_status.get("total_steps") or 5)
+                except (ValueError, TypeError):
+                    st_step, st_total = 1, 5
+                st.markdown(f"**Stage:** {st_stage} (Step {st_step}/{st_total})")
+                if active_status.get("current_item_name"):
+                    st.markdown(f"**Working on:** `{active_status['current_item_name'][:70]}`")
+                if active_status.get("detail"):
+                    st.caption(f"⚙️ {active_status['detail']}")
+                try:
+                    item_c = int(active_status.get("item_current") or 0)
+                    item_t = int(active_status.get("item_total") or 0)
+                except (ValueError, TypeError):
+                    item_c, item_t = 0, 0
+                if item_t > 0:
+                    pct = min(1.0, max(0.0, item_c / item_t))
+                    st.progress(pct, text=f"{item_c} / {item_t} papers ({int(pct * 100)}%)")
+                else:
+                    pct = min(1.0, max(0.0, st_step / max(1, st_total)))
+                    st.progress(pct, text=f"Step {st_step} of {st_total}")
+                st.info(
+                    "⏳ Another paper indexing process is actively running on the server. "
+                    "Your upload or pipeline request will queue safely once the active job finishes.",
+                    icon="ℹ️",
+                )
+                if active_status.get("recent_events"):
+                    with st.expander("📋 Live Activity Log", expanded=False):
+                        for ev in reversed(active_status["recent_events"][-5:]):
+                            st.write(ev)
+    except Exception:
+        pass
+
+
 # ─── Tab 1: build a corpus ─────────────────────────────────────────────────
 
 with tab_build:
-    if _is_ingest_locked():
-        st.info(
-            "⏳ **Server Busy**: Another paper indexing process is actively running on the server. "
-            "Your upload or pipeline request will queue safely once the active job finishes.",
-            icon="ℹ️",
-        )
+    _render_tab1_live_status()
 
     source_type = st.radio(
         "Start pipeline from",
@@ -605,17 +717,50 @@ with tab_build:
                     st.session_state.pop("build_result", None)
                     st.session_state.pop("build_query", None)
                     with st.status(f"Ingesting {len(staged)} research papers into corpus…", expanded=True) as status:
+                        batch_progress = st.progress(0.0, text=f"Preparing to ingest {len(staged)} papers…")
                         candidates = {}
                         for p in staged:
                             title_lbl = p.get("title") or p.get("key") or os.path.basename(p["path"])
                             candidates[p["path"]] = title_lbl
                             st.write(f"📄 Found: **{title_lbl}** (`{p.get('filename', os.path.basename(p['path']))}`)")
 
+                        batch_progress.progress(0.2, text="Parsing and chunking papers…")
                         st.write("⚙️ Parsing text chunks, computing embeddings, and building vector index…")
                         from research_assistant.shared.ingestion import ingest_pdfs
 
-                        ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force,
-                                                 describe_figures=describe_figures)
+                        def _on_batch_progress(st_data):
+                            try:
+                                try:
+                                    ic = int(st_data.get("item_current") or 0)
+                                    it = int(st_data.get("item_total") or 0)
+                                except (ValueError, TypeError):
+                                    ic, it = 0, 0
+                                if it > 0:
+                                    frac = min(1.0, max(0.0, ic / it))
+                                    p_val = 0.2 + 0.75 * frac
+                                    txt = f"Ingesting: {ic}/{it} papers ({int(frac * 100)}%)"
+                                    if st_data.get("detail"):
+                                        txt += f" · {st_data['detail'][:40]}"
+                                    batch_progress.progress(min(0.98, max(0.0, p_val)), text=txt)
+                            except Exception:
+                                pass
+
+                        unreg_batch = pipeline_status.register_progress_callback(_on_batch_progress)
+                        try:
+                            with pipeline_status.track_stage(
+                                "ingest_refs",
+                                f"Ingesting {len(staged)} uploaded papers",
+                                current_step=5,
+                                total_steps=5,
+                                item_total=len(candidates),
+                                mark_idle_on_exit=True,
+                                last_summary=f"+{len(candidates)} uploaded papers indexed",
+                            ):
+                                ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force,
+                                                         describe_figures=describe_figures)
+                        finally:
+                            unreg_batch()
+                        batch_progress.progress(1.0, text="Ingestion complete!")
                         if ingest_res.get("described"):
                             st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
                         scanned_empty = ingest_res.get("scanned_or_empty", [])
@@ -747,26 +892,128 @@ with tab_build:
         live = st.empty()
 
         with st.status("Running the pipeline…", expanded=True) as status:
+            prog_bar = st.progress(0.0, text="Starting pipeline…")
+            stage_ranges = {
+                "discover": (0.0, 0.2),
+                "ingest_seed": (0.2, 0.4),
+                "extract": (0.4, 0.6),
+                "fetch": (0.6, 0.8),
+                "ingest_refs": (0.8, 0.95),
+                "respond": (0.95, 1.0),
+                "fallback": (0.95, 1.0),
+            }
+
+            def _on_pipeline_progress(st_data):
+                try:
+                    st_stage = st_data.get("stage", "discover")
+                    p_low, p_high = stage_ranges.get(st_stage, (0.0, 0.2))
+                    try:
+                        ic = int(st_data.get("item_current") or 0)
+                        it = int(st_data.get("item_total") or 0)
+                        cs = int(st_data.get("current_step") or 1)
+                        ts = int(st_data.get("total_steps") or 5)
+                    except (ValueError, TypeError):
+                        ic, it, cs, ts = 0, 0, 1, 5
+                    lbl = st_data.get("stage_label") or st_stage
+                    if it > 0:
+                        frac = min(1.0, max(0.0, ic / it))
+                        val = p_low + (p_high - p_low) * frac
+                        txt = f"Step {cs}/{ts}: {lbl} — {ic}/{it} papers ({int(frac * 100)}%)"
+                    else:
+                        val = p_low + (p_high - p_low) * 0.25
+                        txt = f"Step {cs}/{ts}: {lbl}"
+                    detail = st_data.get("detail")
+                    if detail:
+                        txt += f" · {detail[:40]}"
+                    prog_bar.progress(min(0.98, max(0.0, val)), text=txt)
+                    curr_item = st_data.get("current_item_name")
+                    if curr_item:
+                        status.update(label=f"Pipeline: {lbl} — {curr_item[:40]}")
+                except Exception:
+                    pass
+
+            unreg_pipeline = pipeline_status.register_progress_callback(_on_pipeline_progress)
+
+            node_weights = {
+                "discover": (1, 0.2),
+                "ingest_seed": (2, 0.4),
+                "extract": (3, 0.6),
+                "fetch": (4, 0.8),
+                "ingest_refs": (5, 0.95),
+                "respond": (5, 1.0),
+                "fallback": (5, 1.0),
+            }
+            display_q = q or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
+            pipeline_status.set_status(
+                active=True,
+                stage="discover",
+                stage_label="Finding seed paper",
+                current_step=1,
+                total_steps=5,
+                detail=f"Starting pipeline for: {display_q[:50]}",
+            )
+            pipeline_status.add_event(f"🚀 Pipeline started for: {display_q[:40]}")
             final = {}
             try:
                 for update in graph.stream(inputs, cfg, stream_mode="updates"):
                     for node, payload in update.items():
                         icon, label = STEPS.get(node, ("•", node))
                         st.write(f"{icon} {label}")
+                        step_num, progress_val = node_weights.get(node, (1, 0.2))
+                        prog_bar.progress(progress_val, text=f"Step {step_num}/5: {label}")
                         final.update(payload or {})
                         if node in ("discover", "ingest_seed", "extract", "fetch", "ingest_refs"):
                             with live.container():
                                 effective_display_q = final.get("query") or q
                                 _render_seed_and_downloads(effective_display_q, final)
                 final = graph.get_state(cfg).values
+                prog_bar.progress(1.0, text="Pipeline complete!")
                 if final.get("stopped"):
                     status.update(label="Stopped early", state="error")
+                    pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail=f"Stopped: {final['stopped'][:60]}",
+                    )
                 else:
                     status.update(label="Done", state="complete")
-            except Exception as e:  # noqa: BLE001
+                    import time
+                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail="Pipeline complete",
+                        last_completed_at=now_iso,
+                        last_summary=f"Completed {display_q[:40]}",
+                    )
+            except BaseException as e:  # noqa: BLE001
                 status.update(label="Pipeline failed", state="error")
-                st.exception(e)
+                if isinstance(e, KeyboardInterrupt):
+                    pipeline_status.add_event("⚠️ Pipeline cancelled by user (SIGINT)")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail="Pipeline cancelled by user",
+                    )
+                else:
+                    pipeline_status.add_event(f"❌ Pipeline failed: {e}")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail=f"Pipeline failed: {e}",
+                    )
+                if isinstance(e, Exception):
+                    st.exception(e)
+                else:
+                    raise
             finally:
+                unreg_pipeline()
                 # Agent 0 has copied the paper into RAW_DIR under its own key by
                 # now, so the staging copy has served its purpose either way.
                 if seed_file_path:

@@ -45,6 +45,7 @@ from research_assistant.config import (
 from research_assistant.schemas import Reference
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger
+from research_assistant.shared import pipeline_status
 
 logger = get_logger("agent1")
 
@@ -567,91 +568,127 @@ def run_extractor() -> dict:
     """
     os.makedirs(XML_OUTPUT_DIR, exist_ok=True)
 
-    pdfs = sorted(glob.glob(os.path.join(RAW_DIR, "*.pdf")))
-    if not pdfs:
-        logger.info("No PDFs found in %s.", RAW_DIR)
-        return {"reference_count": 0, "processed": 0, "failed": 0}
+    standalone = not pipeline_status.get_status().get("active")
+    with pipeline_status.track_stage(
+        "extract",
+        "Extracting reference list",
+        current_step=3,
+        total_steps=5,
+        detail="Extracting reference list from papers",
+        mark_idle_on_exit=standalone,
+        last_summary="Extracted references",
+    ):
+        pdfs = sorted(glob.glob(os.path.join(RAW_DIR, "*.pdf")))
+        if not pdfs:
+            logger.info("No PDFs found in %s.", RAW_DIR)
+            pipeline_status.update_progress(item_current=0, item_total=0, detail="No PDFs found in raw directory")
+            return {"reference_count": 0, "processed": 0, "failed": 0}
 
-    grobid_ok = grobid_alive()
-    if grobid_ok:
-        try:
-            run_grobid_batch(RAW_DIR, XML_OUTPUT_DIR)
-        except Exception as exc:  # noqa: BLE001 — any client failure means fall back
+        pipeline_status.update_progress(
+            item_current=0,
+            item_total=len(pdfs),
+            detail=f"Checking GROBID server for {len(pdfs)} PDF(s)…",
+        )
+        grobid_ok = grobid_alive()
+        if grobid_ok:
+            pipeline_status.add_event(f"📖 Querying GROBID server for reference extraction ({len(pdfs)} PDF(s))…")
+            pipeline_status.update_progress(detail="Querying GROBID batch endpoint…")
+            try:
+                run_grobid_batch(RAW_DIR, XML_OUTPUT_DIR)
+            except Exception as exc:  # noqa: BLE001 — any client failure means fall back
+                logger.warning(
+                    "GROBID batch failed (%s) — falling back to pattern-based "
+                    "extraction for all %d PDF(s).", exc, len(pdfs),
+                )
+                grobid_ok = False
+                pipeline_status.add_event("⚠️ GROBID batch failed, falling back to regex extraction")
+        else:
             logger.warning(
-                "GROBID batch failed (%s) — falling back to pattern-based "
-                "extraction for all %d PDF(s).", exc, len(pdfs),
+                "GROBID at %s is not responding — falling back to pattern-based "
+                "extraction for all %d PDF(s). References will lack DOIs, authors "
+                "and years; Agent 2 will resolve what it can via Crossref.",
+                GROBID_SERVER, len(pdfs),
             )
-            grobid_ok = False
-    else:
-        logger.warning(
-            "GROBID at %s is not responding — falling back to pattern-based "
-            "extraction for all %d PDF(s). References will lack DOIs, authors "
-            "and years; Agent 2 will resolve what it can via Crossref.",
-            GROBID_SERVER, len(pdfs),
+            pipeline_status.add_event("⚠️ GROBID offline, using pattern-based reference extraction")
+
+        processed_dir = os.path.join(RAW_DIR, "processed")
+        failed_dir = os.path.join(RAW_DIR, "failed")
+        os.makedirs(processed_dir, exist_ok=True)
+
+        articles, all_references = [], []
+        by_method = {"grobid": 0, "regex": 0, "none": 0}
+
+        for i, pdf in enumerate(pdfs, 1):
+            name = os.path.basename(pdf)
+            pipeline_status.update_progress(
+                item_current=i,
+                item_total=len(pdfs),
+                current_item_name=name,
+                detail=f"Extracting references [{i}/{len(pdfs)}]: {name}",
+            )
+            references, method = extract_references(pdf, grobid_ok)
+            by_method[method] += 1
+
+            if grobid_ok:
+                # method describes only where the *references* came from. GROBID
+                # may have processed this PDF fine (TEI header, title, authors,
+                # DOI all present) while finding no reference list, in which case
+                # extract_references reports "regex" or "none" here — but the
+                # citing paper's own metadata is still sitting on disk and must
+                # not be dropped just because this PDF's method wasn't "grobid".
+                # _article_from_grobid() itself checks os.path.exists(tei_path),
+                # so this is a no-op — not a wasted lookup — when GROBID never
+                # produced a TEI for this PDF at all.
+                article = _article_from_grobid(pdf)
+                if article:
+                    articles.append(article)
+
+            if references:
+                all_references.extend(references)
+                logger.info("%s: %d reference(s) via %s.", name, len(references), method)
+                _file_away(pdf, processed_dir, name)
+            else:
+                # Nothing came out: a scan with no text layer, an unrecognised
+                # reference format, or no reference list at all. Filing it under
+                # processed/ would claim a success it did not have.
+                logger.warning("%s: no references extracted — filing under failed/.", name)
+                _file_away(pdf, failed_dir, name)
+
+        reference_dicts = [r.to_dict() for r in all_references]
+        payload = {
+            # Citing papers' own title/DOI/authors from parse_article_metadata().
+            # Nothing downstream reads this today, but recorded data should not
+            # be dropped silently just because it is not yet consumed.
+            "articles": articles,
+            "references": reference_dicts,
+            "summary": summarise(reference_dicts),
+            "extraction": by_method,
+        }
+        # Atomic: Agent 2 reads this back as its work list, and a truncated write
+        # would strand the whole reference chain behind a JSONDecodeError.
+        atomic_write_json(EXTRACTED_CITATIONS_PATH, payload, ensure_ascii=False)
+
+        pipeline_status.add_event(
+            f"📖 Extracted {len(all_references)} references ({by_method['grobid']} via GROBID, {by_method['regex']} via regex)"
+        )
+        pipeline_status.update_progress(
+            item_current=len(pdfs),
+            item_total=len(pdfs),
+            detail=f"Extracted {len(all_references)} references across {len(pdfs)} paper(s)",
         )
 
-    processed_dir = os.path.join(RAW_DIR, "processed")
-    failed_dir = os.path.join(RAW_DIR, "failed")
-    os.makedirs(processed_dir, exist_ok=True)
+        logger.info(
+            "Wrote %d reference(s) from %d PDF(s) (%d via GROBID, %d via patterns, "
+            "%d yielded nothing) to %s.",
+            len(all_references), len(pdfs), by_method["grobid"], by_method["regex"],
+            by_method["none"], EXTRACTED_CITATIONS_PATH,
+        )
+        return {
+            "reference_count": len(all_references),
+            "processed": by_method["grobid"] + by_method["regex"],
+            "failed": by_method["none"],
+        }
 
-    articles, all_references = [], []
-    by_method = {"grobid": 0, "regex": 0, "none": 0}
-
-    for pdf in pdfs:
-        references, method = extract_references(pdf, grobid_ok)
-        by_method[method] += 1
-        name = os.path.basename(pdf)
-
-        if grobid_ok:
-            # method describes only where the *references* came from. GROBID
-            # may have processed this PDF fine (TEI header, title, authors,
-            # DOI all present) while finding no reference list, in which case
-            # extract_references reports "regex" or "none" here — but the
-            # citing paper's own metadata is still sitting on disk and must
-            # not be dropped just because this PDF's method wasn't "grobid".
-            # _article_from_grobid() itself checks os.path.exists(tei_path),
-            # so this is a no-op — not a wasted lookup — when GROBID never
-            # produced a TEI for this PDF at all.
-            article = _article_from_grobid(pdf)
-            if article:
-                articles.append(article)
-
-        if references:
-            all_references.extend(references)
-            logger.info("%s: %d reference(s) via %s.", name, len(references), method)
-            _file_away(pdf, processed_dir, name)
-        else:
-            # Nothing came out: a scan with no text layer, an unrecognised
-            # reference format, or no reference list at all. Filing it under
-            # processed/ would claim a success it did not have.
-            logger.warning("%s: no references extracted — filing under failed/.", name)
-            _file_away(pdf, failed_dir, name)
-
-    reference_dicts = [r.to_dict() for r in all_references]
-    payload = {
-        # Citing papers' own title/DOI/authors from parse_article_metadata().
-        # Nothing downstream reads this today, but recorded data should not
-        # be dropped silently just because it is not yet consumed.
-        "articles": articles,
-        "references": reference_dicts,
-        "summary": summarise(reference_dicts),
-        "extraction": by_method,
-    }
-    # Atomic: Agent 2 reads this back as its work list, and a truncated write
-    # would strand the whole reference chain behind a JSONDecodeError.
-    atomic_write_json(EXTRACTED_CITATIONS_PATH, payload, ensure_ascii=False)
-
-    logger.info(
-        "Wrote %d reference(s) from %d PDF(s) (%d via GROBID, %d via patterns, "
-        "%d yielded nothing) to %s.",
-        len(all_references), len(pdfs), by_method["grobid"], by_method["regex"],
-        by_method["none"], EXTRACTED_CITATIONS_PATH,
-    )
-    return {
-        "reference_count": len(all_references),
-        "processed": by_method["grobid"] + by_method["regex"],
-        "failed": by_method["none"],
-    }
 
 
 if __name__ == "__main__":

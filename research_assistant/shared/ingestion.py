@@ -72,6 +72,7 @@ from research_assistant.shared.retry import retry
 from research_assistant.shared.db import get_max_chunk_index
 from research_assistant.shared import manifest
 from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
+from research_assistant.shared import pipeline_status
 
 logger = get_logger("ingestion")
 
@@ -563,9 +564,20 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
 
     embeddings = get_embeddings()
     made = 0
-    for doc, text in per_doc_text.items():
-        if doc in have or not text.strip():
-            continue
+    to_summarize = [doc for doc, text in per_doc_text.items() if doc not in have and text.strip()]
+    total_to_sum = len(to_summarize)
+    model_name = SUMMARY_MODEL or "Qwen2.5"
+    if total_to_sum:
+        pipeline_status.add_event(f"📝 Generating summaries for {total_to_sum} paper(s) with {model_name}…")
+
+    for idx, doc in enumerate(to_summarize, 1):
+        pipeline_status.update_progress(
+            item_current=idx,
+            item_total=total_to_sum,
+            current_item_name=doc,
+            detail=f"Generating summary with {model_name} ({idx}/{total_to_sum})",
+        )
+        text = per_doc_text[doc]
         try:
             summary = chat(
                 [{"role": "user", "content": DOCUMENT_SUMMARY.format(text=text[:SUMMARY_MAX_CHARS])}],
@@ -587,6 +599,7 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
         made += 1
 
     if made:
+        pipeline_status.add_event(f"✓ Generated {made} paper summaries with {model_name}")
         logger.info("✓ Wrote %d document summary/-ies.", made)
     return made
 
@@ -729,6 +742,13 @@ def upsert_corpus(corpus: list[dict]):
 
     if documents:
         logger.info("Embedding and ingesting %d chunks…", len(documents))
+        pipeline_status.update_progress(
+            item_current=0,
+            item_total=len(documents),
+            current_item_name="ChromaDB Vectors",
+            detail=f"Embedding {len(documents)} chunks",
+        )
+        pipeline_status.add_event(f"🧠 Embedding {len(documents)} chunks into ChromaDB…")
         embed_t0 = time.perf_counter()
         for i in range(0, len(documents), EMBED_BATCH_SIZE):
             collection.add(
@@ -737,8 +757,15 @@ def upsert_corpus(corpus: list[dict]):
                 metadatas=metadatas[i : i + EMBED_BATCH_SIZE],
                 ids=ids[i : i + EMBED_BATCH_SIZE],
             )
+            batch_end = min(i + EMBED_BATCH_SIZE, len(documents))
+            pipeline_status.update_progress(
+                item_current=batch_end,
+                item_total=len(documents),
+                detail=f"Embedding {len(documents)} chunks ({batch_end}/{len(documents)})",
+            )
         elapsed = time.perf_counter() - t0
         embed_elapsed = time.perf_counter() - embed_t0
+        pipeline_status.add_event(f"✅ Embedded and indexed {len(documents)} chunks")
         logger.info(
             "✓ Ingested %d chunks into ChromaDB in %.1fs (embed: %.1fs, total: %.1fs)",
             len(documents), elapsed, embed_elapsed, elapsed,
@@ -790,6 +817,11 @@ def rebuild_bm25():
 
     t0 = time.perf_counter()
     logger.info("Rebuilding BM25 index…")
+    pipeline_status.update_progress(
+        current_item_name="BM25 Index",
+        detail="Rebuilding BM25 keyword index…",
+    )
+    pipeline_status.add_event("📚 Rebuilding BM25 index…")
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
     collection = chroma_client.get_collection(name=COLLECTION_NAME)
 
@@ -825,6 +857,7 @@ def rebuild_bm25():
     with atomic_write(BM25_INDEX_PATH, binary=True) as f:
         pickle.dump(payload, f)
     elapsed = time.perf_counter() - t0
+    pipeline_status.add_event(f"✅ BM25 index rebuilt ({len(paired)} chunks)")
     logger.info("✓ BM25 index rebuilt (%d documents, tokenizer %s) in %.1fs.",
                 len(paired), TOKENIZER_VERSION, elapsed)
 
@@ -908,91 +941,165 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
 
     if not candidates:
         logger.info("%sNothing to ingest.", log_prefix)
+        if result["skipped"]:
+            pipeline_status.add_event(f"ℹ️ All {result['skipped']} PDF(s) already indexed into corpus")
+            pipeline_status.update_progress(
+                item_current=0,
+                item_total=0,
+                detail=f"All {result['skipped']} PDF(s) already ingested, skipping",
+            )
         return result
 
-    corpus = []
-    scanned_or_empty = []
-    if workers <= 1:
-        logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
-        for i, (path, label) in enumerate(candidates.items(), 1):
-            logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), os.path.basename(path))
-            entries = process_pdf(path, label, describe_figures=describe_figures)
-            if not entries:
-                scanned_or_empty.append(os.path.basename(path))
-            corpus.extend(entries)
-    else:
-        logger.info(
-            "%sProcessing %d PDF(s) with %d workers…", log_prefix, len(candidates), workers
-        )
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(process_pdf, path, label, None, None, None, describe_figures): path
-                for path, label in candidates.items()
-            }
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    entries = future.result()
-                    if not entries:
-                        scanned_or_empty.append(os.path.basename(futures[future]))
-                    corpus.extend(entries)
-                except Exception as e:
-                    logger.error("%sWorker failed on %s: %s", log_prefix, futures[future], e)
-                    result["failed"].append(futures[future])
-
-    result["processed"] = len(candidates)
-    result["scanned_or_empty"] = scanned_or_empty
-
-    # How the batch was actually extracted, counted per document rather than
-    # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for
-    # the same reason: a run that silently degraded should say so in its result,
-    # not only in a warning somewhere up the log.
-    if INDEX_VERSION >= 2:
-        from research_assistant.shared.ingest_v2 import EXTRACTION_MODES_V2 as modes
-    else:
-        modes = EXTRACTION_MODES
-    by_mode = {mode: set() for mode in modes}
-    for entry in corpus:
-        docs = by_mode.get(entry.get("extraction"))
-        if docs is not None and entry.get("document"):
-            docs.add(entry["document"])
-    result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}
-    result["described"] = sum(1 for e in corpus if e.get("type") == "figure_description")
-
-    if INDEX_VERSION >= 2 and by_mode["pymupdf"]:
-        logger.warning(
-            "%s%d of %d document(s) fell back to PyMuPDF extraction — no sections, "
-            "captions or figures for them, and the bibliography may be in the text. "
-            "Check GROBID at the configured GROBID_SERVER.",
-            log_prefix, len(by_mode["pymupdf"]), result["processed"],
-        )
-    elif INDEX_VERSION == 1 and LAYOUT_DETECTION and by_mode["text_only"]:
-        logger.warning(
-            "%s%d of %d document(s) fell back to text-only extraction — no figures "
-            "or tables were indexed for them. See the warnings above for why layout "
-            "detection failed, or set CITATION_LAYOUT_DETECTION=0 if text-only is "
-            "what you intended.",
-            log_prefix, len(by_mode["text_only"]), result["processed"],
+    standalone = not pipeline_status.get_status().get("active")
+    if standalone:
+        pipeline_status.set_status(
+            active=True,
+            stage="ingest_refs",
+            stage_label="Ingesting and summarizing papers",
+            current_step=5,
+            total_steps=5,
+            item_total=len(candidates),
+            item_current=0,
+            detail=f"Starting ingestion of {len(candidates)} PDF(s)",
         )
 
-    if corpus:
-        result["inserted"] = upsert_corpus(corpus)
-        logger.info("%sInserted %d new chunk(s).", log_prefix, result["inserted"])
-    else:
-        logger.info("%sNo content extracted from the processed PDF(s).", log_prefix)
+    try:
+        corpus = []
+        scanned_or_empty = []
+        if workers <= 1:
+            logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
+            for i, (path, label) in enumerate(candidates.items(), 1):
+                name = os.path.basename(path)
+                pipeline_status.update_progress(
+                    item_current=i,
+                    item_total=len(candidates),
+                    current_item_name=label or name,
+                    detail=f"Parsing PDF [{i}/{len(candidates)}]: {name}",
+                )
+                logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), name)
+                entries = process_pdf(path, label, describe_figures=describe_figures)
+                if not entries:
+                    scanned_or_empty.append(name)
+                corpus.extend(entries)
+        else:
+            logger.info(
+                "%sProcessing %d PDF(s) with %d workers…", log_prefix, len(candidates), workers
+            )
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(process_pdf, path, label, None, None, None, describe_figures): (path, label)
+                    for path, label in candidates.items()
+                }
+                completed_count = 0
+                for future in concurrent.futures.as_completed(futures):
+                    path, label = futures[future]
+                    name = os.path.basename(path)
+                    completed_count += 1
+                    pipeline_status.update_progress(
+                        item_current=completed_count,
+                        item_total=len(candidates),
+                        current_item_name=label or name,
+                        detail=f"Parsed [{completed_count}/{len(candidates)}]: {name}",
+                    )
+                    try:
+                        entries = future.result()
+                        if not entries:
+                            scanned_or_empty.append(name)
+                        corpus.extend(entries)
+                    except Exception as e:
+                        logger.error("%sWorker failed on %s: %s", log_prefix, path, e)
+                        result["failed"].append(path)
 
-    # Mark every PDF that was attempted and did not fail, including ones that
-    # yielded nothing. A corrupt, empty, or duplicate paper produces no new
-    # chunks, and without a mark it would be re-parsed on every single run for
-    # the rest of time — that part is deliberate. But a path a worker crashed
-    # on is also in candidates, and marking it too would hide the crash: only
-    # --force (which reprocesses everything) would ever recover it.
-    failed_paths = set(result["failed"])
-    marked = [path for path in candidates if path not in failed_paths]
-    manifest.add_many(pdf_key(path) for path in marked)
+        result["processed"] = len(candidates)
+        result["scanned_or_empty"] = scanned_or_empty
 
-    # Rebuilding is only worthwhile when the collection actually changed, but
-    # the index must also exist for search to work at all.
-    if rebuild_index and (result["inserted"] or not os.path.exists(BM25_INDEX_PATH)):
-        rebuild_bm25()
+        # How the batch was actually extracted, counted per document rather than
+        # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for
+        # the same reason: a run that silently degraded should say so in its result,
+        # not only in a warning somewhere up the log.
+        if INDEX_VERSION >= 2:
+            from research_assistant.shared.ingest_v2 import EXTRACTION_MODES_V2 as modes
+        else:
+            modes = EXTRACTION_MODES
+        by_mode = {mode: set() for mode in modes}
+        for entry in corpus:
+            docs = by_mode.get(entry.get("extraction"))
+            if docs is not None and entry.get("document"):
+                docs.add(entry["document"])
+        result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}
+        result["described"] = sum(1 for e in corpus if e.get("type") == "figure_description")
 
-    return result
+        if INDEX_VERSION >= 2 and by_mode["pymupdf"]:
+            logger.warning(
+                "%s%d of %d document(s) fell back to PyMuPDF extraction — no sections, "
+                "captions or figures for them, and the bibliography may be in the text. "
+                "Check GROBID at the configured GROBID_SERVER.",
+                log_prefix, len(by_mode["pymupdf"]), result["processed"],
+            )
+        elif INDEX_VERSION == 1 and LAYOUT_DETECTION and by_mode["text_only"]:
+            logger.warning(
+                "%s%d of %d document(s) fell back to text-only extraction — no figures "
+                "or tables were indexed for them. See the warnings above for why layout "
+                "detection failed, or set CITATION_LAYOUT_DETECTION=0 if text-only is "
+                "what you intended.",
+                log_prefix, len(by_mode["text_only"]), result["processed"],
+            )
+
+        if corpus:
+            result["inserted"] = upsert_corpus(corpus)
+            logger.info("%sInserted %d new chunk(s).", log_prefix, result["inserted"])
+        else:
+            logger.info("%sNo content extracted from the processed PDF(s).", log_prefix)
+
+        # Mark every PDF that was attempted and did not fail, including ones that
+        # yielded nothing. A corrupt, empty, or duplicate paper produces no new
+        # chunks, and without a mark it would be re-parsed on every single run for
+        # the rest of time — that part is deliberate. But a path a worker crashed
+        # on is also in candidates, and marking it too would hide the crash: only
+        # --force (which reprocesses everything) would ever recover it.
+        failed_paths = set(result["failed"])
+        marked = [path for path in candidates if path not in failed_paths]
+        manifest.add_many(pdf_key(path) for path in marked)
+
+        # Rebuilding is only worthwhile when the collection actually changed, but
+        # the index must also exist for search to work at all.
+        if rebuild_index and (result["inserted"] or not os.path.exists(BM25_INDEX_PATH)):
+            rebuild_bm25()
+
+        pipeline_status.add_event(
+            f"✅ Ingested {result['processed']} PDFs ({result['inserted']} chunks)"
+        )
+        pipeline_status.update_progress(
+            item_current=len(candidates),
+            item_total=len(candidates),
+            detail=f"Ingestion batch complete: {result['processed']} processed, {result['inserted']} chunks inserted",
+        )
+        if standalone:
+            pipeline_status.set_status(
+                active=False,
+                stage="idle",
+                stage_label="Idle",
+                detail="Ingestion complete",
+                last_completed_at=pipeline_status._now_iso(),
+                last_summary=f"+{result['processed']} papers ingested",
+            )
+        return result
+    except BaseException as exc:
+        if standalone:
+            if isinstance(exc, KeyboardInterrupt):
+                pipeline_status.add_event("⚠️ Ingestion cancelled by user")
+                pipeline_status.set_status(
+                    active=False,
+                    stage="idle",
+                    stage_label="Idle",
+                    detail="Ingestion cancelled by user",
+                )
+            else:
+                pipeline_status.add_event(f"❌ Ingestion failed: {exc}")
+                pipeline_status.set_status(
+                    active=False,
+                    stage="idle",
+                    stage_label="Idle",
+                    detail=f"Ingestion failed: {exc}",
+                )
+        raise

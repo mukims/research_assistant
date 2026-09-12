@@ -37,6 +37,7 @@ from research_assistant.shared.log import get_logger
 from research_assistant.shared.source_key import source_key, normalise_doi, is_authoritative
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for
+from research_assistant.shared import pipeline_status
 
 logger = get_logger("agent2")
 
@@ -319,92 +320,134 @@ def fetch_papers():
     if retrying:
         logger.info("Retrying %d that previously failed for a transient reason.", retrying)
 
-    for i, (key, ref) in enumerate(remaining, start=1):
-        label = (ref.get("title") or ref.get("raw_reference") or key)[:70]
-        logger.info("[%d/%d] %s", i, len(remaining), label)
+    standalone = not pipeline_status.get_status().get("active")
+    with pipeline_status.track_stage(
+        "fetch",
+        "Fetching referenced papers",
+        current_step=4,
+        total_steps=5,
+        item_total=len(remaining),
+        detail=f"0/{len(remaining)} papers checked ({len(downloaded)} downloaded, {len(failed)} unavailable)",
+        mark_idle_on_exit=standalone,
+        last_summary=f"+{len(downloaded)} papers fetched",
+    ):
+        for i, (key, ref) in enumerate(remaining, start=1):
+            label = (ref.get("title") or ref.get("raw_reference") or key)[:70]
+            logger.info("[%d/%d] %s", i, len(remaining), label)
+            pipeline_status.update_progress(
+                item_current=i,
+                item_total=len(remaining),
+                current_item_name=label,
+                detail=f"Checking [{i}/{len(remaining)}]: {label[:50]} ({len(downloaded)} downloaded)",
+            )
 
-        dest = os.path.join(PULLED_PDFS_DIR, filename_for(key))
-        reasons = []
-        saved = False
-        doi = how = None
-        provider = None
+            dest = os.path.join(PULLED_PDFS_DIR, filename_for(key))
+            reasons = []
+            saved = False
+            doi = how = None
+            provider = None
 
-        try:
-            doi, how = resolve_doi(ref)
+            try:
+                doi, how = resolve_doi(ref)
 
-            if doi:
-                saved, reason = try_unpaywall(doi, dest)
-                if saved:
-                    provider = "unpaywall"
+                if doi:
+                    saved, reason = try_unpaywall(doi, dest)
+                    if saved:
+                        provider = "unpaywall"
+                    else:
+                        reasons.append(reason)
+                        time.sleep(UNPAYWALL_SLEEP)
                 else:
-                    reasons.append(reason)
-                    time.sleep(UNPAYWALL_SLEEP)
+                    reasons.append("no DOI resolved")
+
+                # Europe PMC carries free full text for much of the biomedical
+                # literature that Unpaywall's best_oa_location does not surface, so
+                # it belongs between Unpaywall and the arXiv preprint fallback.
+                if not saved and doi:
+                    saved, reason = try_europepmc(doi, ref, dest)
+                    if saved:
+                        provider = "europepmc"
+                    else:
+                        reasons.append(reason)
+
+                if not saved:
+                    saved, reason = try_arxiv(ref, dest)
+                    if saved:
+                        provider = "arxiv"
+                    else:
+                        reasons.append(reason)
+                    time.sleep(ARXIV_RATE_LIMIT)
+
+            except Exception as exc:
+                logger.exception("Unhandled error on %s", key)
+                reasons.append(str(exc))
+
+            if saved:
+                downloaded[key] = DownloadedPaper(
+                    key=key,
+                    path=dest,
+                    provider=provider,
+                    fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    title=ref.get("title"),
+                    raw_reference=ref.get("raw_reference"),
+                    doi=doi,
+                    arxiv_id=ref.get("arxiv_id"),
+                    doi_source=how,
+                    authoritative=is_authoritative(key),
+                    cited_by=ref.get("source_file"),
+                    xml_id=ref.get("xml_id"),
+                ).to_dict()
+                failed.pop(key, None)   # a retry that worked is no longer a failure
+                logger.info("    saved -> %s", os.path.basename(dest))
+                pipeline_status.add_event(f"✅ Downloaded ({provider or 'oa'}): {label[:50]}")
+                pipeline_status.update_progress(
+                    item_current=i,
+                    item_total=len(remaining),
+                    current_item_name=label,
+                    detail=f"Downloaded {len(downloaded)} / Unavailable {len(failed)}",
+                )
             else:
-                reasons.append("no DOI resolved")
+                reason_str = " | ".join(r for r in reasons if r) or "fetch failed"
+                record = {
+                    "key": key,
+                    "doi": doi,
+                    "doi_source": how,
+                    "authoritative": is_authoritative(key),
+                    "title": ref.get("title"),
+                    "cited_by": ref.get("source_file"),
+                    "xml_id": ref.get("xml_id"),
+                    "raw_reference": ref.get("raw_reference"),
+                    "reason": reason_str,
+                }
+                failed[key] = record
+                logger.info("    unavailable: %s", record["reason"])
+                reason_short = reason_str[:35]
+                pipeline_status.add_event(f"⚠️ {label[:45]} ({reason_short})")
+                pipeline_status.update_progress(
+                    item_current=i,
+                    item_total=len(remaining),
+                    current_item_name=label,
+                    detail=f"Downloaded {len(downloaded)} / Unavailable {len(failed)}",
+                )
 
-            # Europe PMC carries free full text for much of the biomedical
-            # literature that Unpaywall's best_oa_location does not surface, so
-            # it belongs between Unpaywall and the arXiv preprint fallback.
-            if not saved and doi:
-                saved, reason = try_europepmc(doi, ref, dest)
-                if saved:
-                    provider = "europepmc"
-                else:
-                    reasons.append(reason)
+            _checkpoint(downloaded, failed)
 
-            if not saved:
-                saved, reason = try_arxiv(ref, dest)
-                if saved:
-                    provider = "arxiv"
-                else:
-                    reasons.append(reason)
-                time.sleep(ARXIV_RATE_LIMIT)
+        manual = [r for r in failed.values() if r.get("doi")]
+        pipeline_status.add_event(
+            f"🌐 Fetch complete: {len(downloaded)} downloaded, {len(failed)} unavailable"
+        )
+        pipeline_status.update_progress(
+            item_current=len(remaining),
+            item_total=len(remaining),
+            detail=f"Fetch complete: {len(downloaded)} downloaded, {len(failed)} unavailable",
+        )
+        logger.info(
+            "Done. %d downloaded, %d unavailable (%d have a DOI and can be fetched by hand).",
+            len(downloaded),
+            len(failed),
+            len(manual),
+        )
 
-        except Exception as exc:
-            logger.exception("Unhandled error on %s", key)
-            reasons.append(str(exc))
-
-        if saved:
-            downloaded[key] = DownloadedPaper(
-                key=key,
-                path=dest,
-                provider=provider,
-                fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                title=ref.get("title"),
-                raw_reference=ref.get("raw_reference"),
-                doi=doi,
-                arxiv_id=ref.get("arxiv_id"),
-                doi_source=how,
-                authoritative=is_authoritative(key),
-                cited_by=ref.get("source_file"),
-                xml_id=ref.get("xml_id"),
-            ).to_dict()
-            failed.pop(key, None)   # a retry that worked is no longer a failure
-            logger.info("    saved -> %s", os.path.basename(dest))
-        else:
-            record = {
-                "key": key,
-                "doi": doi,
-                "doi_source": how,
-                "authoritative": is_authoritative(key),
-                "title": ref.get("title"),
-                "cited_by": ref.get("source_file"),
-                "xml_id": ref.get("xml_id"),
-                "raw_reference": ref.get("raw_reference"),
-                "reason": " | ".join(r for r in reasons if r) or "fetch failed",
-            }
-            failed[key] = record
-            logger.info("    unavailable: %s", record["reason"])
-
-        _checkpoint(downloaded, failed)
-
-    manual = [r for r in failed.values() if r.get("doi")]
-    logger.info(
-        "Done. %d downloaded, %d unavailable (%d have a DOI and can be fetched by hand).",
-        len(downloaded),
-        len(failed),
-        len(manual),
-    )
 
 
 if __name__ == "__main__":

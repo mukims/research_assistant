@@ -23,3 +23,5 @@ model_final.pth
 # Local secrets — never commit
 .env
 .claude/
+.agents/
+ORIGINAL_REQUEST.md

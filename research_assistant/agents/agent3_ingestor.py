@@ -14,6 +14,7 @@ from research_assistant.config import DOWNLOADED_JSON_PATH, PULLED_PDFS_DIR
 from research_assistant.schemas import DownloadedPaper, SchemaError
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.ingestion import ingest_pdfs
+from research_assistant.shared import pipeline_status
 
 logger = get_logger("agent3")
 
@@ -50,35 +51,48 @@ def run_ingestor(workers: int = 1, force: bool = False, describe_figures: bool |
         force:   Re-process PDFs even if they are already recorded as ingested.
         describe_figures: v2 — analyse every figure and table with the model for this run (None → config).
     """
-    if not os.path.exists(DOWNLOADED_JSON_PATH):
+    standalone = not pipeline_status.get_status().get("active")
+    with pipeline_status.track_stage(
+        "ingest_refs",
+        "Ingesting and summarizing papers",
+        current_step=5,
+        total_steps=5,
+        detail="Ingesting referenced papers into corpus",
+        mark_idle_on_exit=standalone,
+    ):
+        if not os.path.exists(DOWNLOADED_JSON_PATH):
+            logger.info(
+                "No download manifest at %s — run Agent 2 (python agent2_fetcher.py) "
+                "first to fetch papers.", DOWNLOADED_JSON_PATH,
+            )
+            pipeline_status.update_progress(detail="No download manifest found")
+            return
+
+        with open(DOWNLOADED_JSON_PATH, "r") as f:
+            downloaded = json.load(f)
+
+        if not downloaded:
+            logger.info("Download manifest is empty — nothing to ingest.")
+            pipeline_status.update_progress(detail="Download manifest is empty")
+            return
+
+        if force:
+            logger.info("--force: re-processing all PDFs regardless of ingestion status.")
+
+        pdfs = _pdfs_from_manifest(downloaded)
+        if not pdfs:
+            logger.info("No usable PDF paths in the download manifest — nothing to ingest.")
+            pipeline_status.update_progress(detail="No usable PDF paths in download manifest")
+            return
+
+        result = ingest_pdfs(pdfs, workers=workers, skip_ingested=not force, describe_figures=describe_figures)
+
         logger.info(
-            "No download manifest at %s — run Agent 2 (python agent2_fetcher.py) "
-            "first to fetch papers.", DOWNLOADED_JSON_PATH,
+            "Done. Processed %d, skipped %d, inserted %d chunk(s), %d unreadable.",
+            result["processed"], result["skipped"], result["inserted"], len(result["failed"]),
         )
-        return
+        return result
 
-    with open(DOWNLOADED_JSON_PATH, "r") as f:
-        downloaded = json.load(f)
-
-    if not downloaded:
-        logger.info("Download manifest is empty — nothing to ingest.")
-        return
-
-    if force:
-        logger.info("--force: re-processing all PDFs regardless of ingestion status.")
-
-    pdfs = _pdfs_from_manifest(downloaded)
-    if not pdfs:
-        logger.info("No usable PDF paths in the download manifest — nothing to ingest.")
-        return
-
-    result = ingest_pdfs(pdfs, workers=workers, skip_ingested=not force, describe_figures=describe_figures)
-
-    logger.info(
-        "Done. Processed %d, skipped %d, inserted %d chunk(s), %d unreadable.",
-        result["processed"], result["skipped"], result["inserted"], len(result["failed"]),
-    )
-    return result
 
 
 if __name__ == "__main__":

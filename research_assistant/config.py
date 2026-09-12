@@ -102,6 +102,8 @@ FAILED_DOWNLOADS_PATH    = os.path.join(DATA_DIR, "failed_downloads.json")
 # downloaded.json.
 SEED_PAPERS_PATH         = os.path.join(DATA_DIR, "seed_papers.json")
 INGESTED_MANIFEST_PATH   = os.path.join(DATA_DIR, f"ingested{_INDEX_SUFFIX}.json")
+PIPELINE_STATUS_PATH     = os.path.join(DATA_DIR, "pipeline_status.json")
+INGEST_LOCK_PATH         = os.path.join(DATA_DIR, "ingest.lock")
 
 # ─── Detectron2 / layout detection ──────────────────────────────────────────
 # Layout detection (figure/table crops + a VLM description of each) is the

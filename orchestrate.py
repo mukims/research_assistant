@@ -36,6 +36,7 @@ import argparse
 import hashlib
 import multiprocessing
 import os
+import time
 from typing import Optional, TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -47,6 +48,7 @@ from research_assistant.agents import (
 from research_assistant.config import GROBID_SERVER
 from research_assistant.shared.ingestion import ingest_pdfs
 from research_assistant.shared.log import get_logger
+from research_assistant.shared import pipeline_status
 
 logger = get_logger("orchestrate")
 
@@ -93,87 +95,108 @@ def discover(state: PipelineState) -> dict:
     seed_url = (state.get("seed_url") or "").strip()
     seed_file = (state.get("seed_file") or "").strip()
 
-    if seed_file:
-        _banner("discover — seeding from uploaded / local PDF")
-        path = agent0_discoverer.discover_from_file(query, seed_file, force=force)
-        fail = f"could not load seed PDF ({os.path.basename(seed_file)}) — file is missing or not a valid PDF"
-    elif seed_url:
-        _banner("discover — seeding from the supplied link")
-        path = agent0_discoverer.discover_from_url(query, seed_url, force=force)
-        fail = f"could not download a PDF from {seed_url}"
-    else:
-        _banner("discover — finding a seed paper")
-        path = agent0_discoverer.discover(query, force=force)
-        fail = (
-            "no open-access PDF found for that query — supply an arXiv or "
-            "open-access PDF link or upload a PDF to seed from directly"
-        )
-
-    if not path:
-        return {"seed_path": None, "stopped": fail}
-
-    seed = agent0_discoverer.get_seed(query) or {}
-    if not seed:
-        seed, q = agent0_discoverer.get_seed_by_path(path)
-        if q:
-            query = q
+    with pipeline_status.track_stage("discover", "Finding seed paper", current_step=1, total_steps=5):
+        if seed_file:
+            _banner("discover — seeding from uploaded / local PDF")
+            pipeline_status.update_progress(detail=f"Loading uploaded PDF: {os.path.basename(seed_file)}", current_item_name=os.path.basename(seed_file))
+            path = agent0_discoverer.discover_from_file(query, seed_file, force=force)
+            fail = f"could not load seed PDF ({os.path.basename(seed_file)}) — file is missing or not a valid PDF"
+        elif seed_url:
+            _banner("discover — seeding from the supplied link")
+            pipeline_status.update_progress(detail=f"Downloading from link: {seed_url[:60]}", current_item_name=seed_url)
+            path = agent0_discoverer.discover_from_url(query, seed_url, force=force)
+            fail = f"could not download a PDF from {seed_url}"
         else:
-            seed = {}
+            _banner("discover — finding a seed paper")
+            pipeline_status.update_progress(detail=f"Searching literature for: {query[:50]}", current_item_name=query)
+            path = agent0_discoverer.discover(query, force=force)
+            fail = (
+                "no open-access PDF found for that query — supply an arXiv or "
+                "open-access PDF link or upload a PDF to seed from directly"
+            )
 
-    label = seed.get("title") or seed.get("key") or os.path.basename(path)
-    result = {"seed_path": path, "seed_label": label}
-    if query and query != state.get("query"):
-        result["query"] = query
-    return result
+        if not path:
+            pipeline_status.add_event(f"⚠️ No open-access seed PDF found for query: {query[:40]}")
+            return {"seed_path": None, "stopped": fail}
+
+        seed = agent0_discoverer.get_seed(query) or {}
+        if not seed:
+            seed, q = agent0_discoverer.get_seed_by_path(path)
+            if q:
+                query = q
+            else:
+                seed = {}
+
+        label = seed.get("title") or seed.get("key") or os.path.basename(path)
+        pipeline_status.add_event(f"✅ Found seed paper: {label[:60]}")
+        pipeline_status.update_progress(current_item_name=label, detail=f"Seed paper identified: {label[:60]}")
+        result = {"seed_path": path, "seed_label": label}
+        if query and query != state.get("query"):
+            result["query"] = query
+        return result
 
 
 def ingest_seed(state: PipelineState) -> dict:
     _banner("ingest_seed — indexing the seed paper itself")
-    ingest_pdfs(
-        {state["seed_path"]: state["seed_label"]},
-        workers=state.get("workers", 1),
-        skip_ingested=not state.get("force", False),
-        describe_figures=state.get("describe_figures"),
-    )
-    return {}
+    label = state.get("seed_label") or os.path.basename(state.get("seed_path", "seed"))
+    with pipeline_status.track_stage("ingest_seed", "Indexing seed paper", current_step=2, total_steps=5):
+        pipeline_status.update_progress(current_item_name=label, detail=f"Indexing seed paper: {label[:60]}")
+        pipeline_status.add_event(f"📥 Indexing seed paper: {label[:60]}")
+        ingest_pdfs(
+            {state["seed_path"]: state["seed_label"]},
+            workers=state.get("workers", 1),
+            skip_ingested=not state.get("force", False),
+            describe_figures=state.get("describe_figures"),
+        )
+        pipeline_status.add_event(f"✅ Seed paper indexed: {label[:60]}")
+        return {}
 
 
 def extract(state: PipelineState) -> dict:
     _banner("extract — mining the seed's reference list")
-    result = agent1_extractor.run_extractor()
+    with pipeline_status.track_stage("extract", "Extracting reference list", current_step=3, total_steps=5, detail="Mining reference list from seed paper"):
+        result = agent1_extractor.run_extractor()
 
-    if not result or not result.get("reference_count"):
-        # Both strategies came up empty: GROBID down *and* no recognisable numbered
-        # reference list. There is nothing to fetch, so stop — but say which failed.
-        return {"references_ok": False, "stopped": (
-            "No references could be extracted from the seed paper. GROBID at "
-            f"{GROBID_SERVER} is unreachable and pattern-based extraction found no "
-            "numbered reference list — the PDF may be a scan with no text layer. "
-            f"Check: curl {GROBID_SERVER}/api/isalive")}
-    return {"references_ok": True, "extraction": result}
+        if not result or not result.get("reference_count"):
+            # Both strategies came up empty: GROBID down *and* no recognisable numbered
+            # reference list. There is nothing to fetch, so stop — but say which failed.
+            fail_msg = (
+                "No references could be extracted from the seed paper. GROBID at "
+                f"{GROBID_SERVER} is unreachable and pattern-based extraction found no "
+                "numbered reference list — the PDF may be a scan with no text layer. "
+                f"Check: curl {GROBID_SERVER}/api/isalive"
+            )
+            pipeline_status.add_event("⚠️ No references extracted from seed paper")
+            return {"references_ok": False, "stopped": fail_msg}
+        return {"references_ok": True, "extraction": result}
 
 
 def fetch(state: PipelineState) -> dict:
     _banner("fetch — downloading the referenced papers (Agent 2)")
-    agent2_fetcher.fetch_papers()
-    return {}
+    with pipeline_status.track_stage("fetch", "Fetching referenced papers", current_step=4, total_steps=5, detail="Downloading open-access reference PDFs"):
+        agent2_fetcher.fetch_papers()
+        return {}
 
 
 def ingest_refs(state: PipelineState) -> dict:
     _banner("ingest_refs — ingesting the reference PDFs (Agent 3)")
-    agent3_ingestor.run_ingestor(
-        workers=state.get("workers", 1), force=state.get("force", False),
-        describe_figures=state.get("describe_figures"),
-    )
-    return {}
+    with pipeline_status.track_stage("ingest_refs", "Ingesting and summarizing papers", current_step=5, total_steps=5, detail="Ingesting referenced papers into corpus"):
+        agent3_ingestor.run_ingestor(
+            workers=state.get("workers", 1), force=state.get("force", False),
+            describe_figures=state.get("describe_figures"),
+        )
+        return {}
 
 
 def respond(state: PipelineState) -> dict:
     _banner("respond — related-work synthesis for the query")
     from research_assistant.shared import retrieve  # imported here so corpus-building stays light
 
-    result = retrieve.research_answer(state["query"])
-    return {"answer": result}
+    with pipeline_status.track_stage("respond", "Synthesizing answer", current_step=5, total_steps=5, detail=f"Synthesizing related-work response for: {state.get('query', '')[:50]}"):
+        pipeline_status.add_event("✍️ Formulating related-work synthesis…")
+        result = retrieve.research_answer(state["query"])
+        pipeline_status.add_event("✅ Related-work synthesis complete")
+        return {"answer": result}
 
 
 def fallback(state: PipelineState) -> dict:
@@ -182,14 +205,17 @@ def fallback(state: PipelineState) -> dict:
     from research_assistant.prompts import NO_CORPUS_FALLBACK
     from research_assistant.shared.llm import chat
 
-    try:
-        text = chat(
-            [{"role": "user", "content": NO_CORPUS_FALLBACK.format(query=state["query"])}]
-        ).content
-    except Exception as e:  # noqa: BLE001
-        logger.error("Fallback answer failed: %s", e)
-        return {}
-    return {"answer": {"suggestion": text, "citations": [], "passages": [], "ungrounded": True}}
+    with pipeline_status.track_stage("respond", "Synthesizing fallback answer", current_step=5, total_steps=5, detail="Generating ungrounded answer from general knowledge"):
+        pipeline_status.add_event("💭 Generating ungrounded fallback answer…")
+        try:
+            text = chat(
+                [{"role": "user", "content": NO_CORPUS_FALLBACK.format(query=state["query"])}]
+            ).content
+        except Exception as e:  # noqa: BLE001
+            logger.error("Fallback answer failed: %s", e)
+            return {}
+        return {"answer": {"suggestion": text, "citations": [], "passages": [], "ungrounded": True}}
+
 
 
 # ─── Edges ───────────────────────────────────────────────────────────────────
@@ -250,25 +276,74 @@ def run(
     thread_id = hashlib.sha1(thread_key.encode()).hexdigest()[:12]
     config = {"configurable": {"thread_id": thread_id}}
 
+    query_display = query or (os.path.basename(seed_file) if seed_file else "") or (seed_url or "") or "topic"
+    pipeline_status.set_status(
+        active=True,
+        stage="discover",
+        stage_label="Finding seed paper",
+        current_step=1,
+        total_steps=5,
+        detail=f"Starting pipeline for: {query_display[:60]}",
+    )
+    pipeline_status.add_event(f"🚀 Pipeline started for: {query_display[:50]}")
+
     final: PipelineState = {}
-    for update in app.stream(
-        {
-            "query": query,
-            "workers": workers,
-            "force": force,
-            "ask": ask,
-            "seed_url": seed_url,
-            "seed_file": seed_file,
-            "describe_figures": describe_figures,
-        },
-        config=config,
-        stream_mode="values",
-    ):
-        final = update
+    try:
+        for update in app.stream(
+            {
+                "query": query,
+                "workers": workers,
+                "force": force,
+                "ask": ask,
+                "seed_url": seed_url,
+                "seed_file": seed_file,
+                "describe_figures": describe_figures,
+            },
+            config=config,
+            stream_mode="values",
+        ):
+            final = update
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            pipeline_status.add_event("⚠️ Pipeline cancelled by user (SIGINT)")
+            pipeline_status.set_status(
+                active=False,
+                stage="idle",
+                stage_label="Idle",
+                detail="Pipeline cancelled by user",
+            )
+        else:
+            pipeline_status.add_event(f"❌ Pipeline failed: {exc}")
+            pipeline_status.set_status(
+                active=False,
+                stage="idle",
+                stage_label="Idle",
+                detail=f"Pipeline failed: {exc}",
+            )
+        raise
 
     stopped = final.get("stopped")
     if stopped:
         logger.warning("Pipeline stopped: %s", stopped)
+        pipeline_status.add_event(f"⚠️ Pipeline stopped early: {stopped[:60]}")
+        pipeline_status.set_status(
+            active=False,
+            stage="idle",
+            stage_label="Idle",
+            detail=f"Stopped: {stopped[:60]}",
+        )
+    else:
+        effective_query = final.get("query") or query or final.get("seed_label") or "paper"
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        pipeline_status.add_event(f"✅ Pipeline completed: {effective_query[:40]}")
+        pipeline_status.set_status(
+            active=False,
+            stage="idle",
+            stage_label="Idle",
+            detail="Pipeline completed successfully",
+            last_completed_at=now_iso,
+            last_summary=f"Completed query: {effective_query[:40]}",
+        )
 
     result = final.get("answer")
     if result:
@@ -287,6 +362,7 @@ def run(
     effective_query = final.get("query") or query or final.get("seed_label") or "paper"
     logger.info("Pipeline complete for: %s", effective_query)
     return 1 if stopped else 0
+
 
 
 def main():
