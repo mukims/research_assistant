@@ -114,10 +114,11 @@ the code:
   paragraph. Every verdict Agent 8 hands down is made from a single retrieved
   passage (`CITATION_JUDGEMENT_TOP_K=1`). He is fast and cheap, and he knows
   exactly what that costs.
-- **He answers short by design.** The synthesis prompt asks for "a short
-  related-work overview" and "one or two sentences on where this idea might
-  still add something". That last part — the gap, the thing worth doing next —
-  is what you actually came for, and it's the part he does least well.
+- **He used to answer short by design.** The synthesis now reads every paper
+  it shortlists and is asked for the argument — what's established, where the
+  papers disagree, the gap — rather than a headline list. Whether the gap it
+  names is the right one is still yours to judge.
+
 
 The first of those is being fixed: `CITATION_INDEX_VERSION=2` builds a second index from GROBID full text with proper chunks and captions, beside the old one — see `PIPELINE.md`.
 

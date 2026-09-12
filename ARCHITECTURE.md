@@ -364,10 +364,7 @@ because both are "inverse problems in physics". A one-token LLM judgment
 ("could this be relevant prior work, even loosely?") removes those. It falls
 back to the top-1 summary if it rejects everything, so a query never dead-ends.
 
-**Trade-off.** `DOC_SELECT_K` (default 6) sequential LLM calls per query. On a
-fast local model or a paid API this is sub-second; on a free hosted pool it can
-add 30–60 s, so `CITATION_DOC_GATE=0` turns it off (keeping the similarity
-shortlist).
+**Trade-off.** `DOC_SELECT_K` (default 6) summaries are gated in one batched call (`CITATION_GATE_BATCHED=1`); a reply that cannot be aligned to the summaries falls back to one call per summary. `CITATION_DOC_GATE=0` turns the gate off.
 
 ### 5.2 `hybrid_search` gains a `doc_filter`
 
@@ -391,15 +388,40 @@ the influence of a single retriever's #1.
 
 ### 5.4 Two outputs from one corpus
 
-- **Related-work synthesis** (`research_answer`, the "Research a topic" flow):
-  two-stage retrieval → `RESEARCH_CHAT_SYSTEM` synthesises "what has been done".
+- **Related-work synthesis** (`research_answer`, the "Research a topic"
+  flow): shortlist → read every shortlisted paper → synthesise (§5.5).
 - **Citation insertion** (`agent4_assistant.suggest_citation`, the "Cite a
   draft" flow): flat hybrid search → rewrite the sentence with `\cite{key}`.
 
-**Why two.** They have genuinely different goals. A literature overview wants
-breadth across the shortlist; citing one sentence wants the single best-matching
-passage. The citation flow stays flat because narrowing to a summary shortlist
-first would over-constrain a single-sentence lookup.
+**Why two.** A literature overview wants breadth across the shortlist; citing
+one sentence wants the single best-matching passage. The citation flow stays
+flat because narrowing to a summary shortlist first would over-constrain a
+single-sentence lookup.
+
+### 5.5 The synthesis reads every paper it shortlists, then argues
+
+Stage 2 used to return the global top-k chunks across the shortlist; on a
+six-paper shortlist, six chunks came from two papers and the other four —
+one of them the review the query most needed — were never cited. Now each
+shortlisted paper (de-duplicated by title, keyed `P1`…`Pn`) gets its own
+restricted search, and in `map_reduce` mode (the default) its own model
+call producing ≤150-word notes — *Establishes / Method / Limits*, or *Not
+relevant* — before one synthesis call over the notes writes **What is
+established**, **Where the papers differ**, and **The gap**, citing by key.
+`single` mode is one call over the per-paper passages with the same
+headings. Both run at temperature 0.2 with an explicit context (4k for
+notes, 8k for the synthesis); the model's default was 1.0.
+
+**Why keys.** `[P3]` is what a 5 B model reproduces exactly and what code
+can check: `check_citation_keys` lists every key the synthesis used and
+flags any not on the shortlist, or belonging to a paper whose notes said
+*Not relevant*; the UI shows both. Invented content under a real key is the
+judge's job, downstream.
+
+**Cost.** `1 + N + 1` calls; ~6 minutes for six papers on the CPU machine
+versus ~3 before. The batched gate (§5.1, now one call) and the per-process
+search-resource cache pay for part of it. Progress is shown per paper.
+
 
 ---
 
