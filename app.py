@@ -1181,34 +1181,47 @@ with tab_build:
                         last_summary=f"Completed {display_q[:40]}",
                     )
             except BaseException as e:  # noqa: BLE001
-                status.update(label="Pipeline failed", state="error")
-                if isinstance(e, KeyboardInterrupt):
-                    pipeline_status.add_event("⚠️ Pipeline cancelled by user (SIGINT)")
+                if pipeline_status.is_cancellation(e):
+                    try:
+                        status.update(label="Pipeline cancelled", state="error")
+                    except Exception:
+                        pass
+                    pipeline_status.add_event("⚠️ Pipeline cancelled (session reloaded or stopped)")
                     pipeline_status.set_status(
                         active=False,
                         stage="idle",
                         stage_label="Idle",
-                        detail="Pipeline cancelled by user",
+                        detail="Pipeline cancelled",
                     )
-                else:
-                    pipeline_status.add_event(f"❌ Pipeline failed: {e}")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail=f"Pipeline failed: {e}",
-                    )
-                if isinstance(e, Exception):
-                    st.exception(e)
-                else:
                     raise
+                else:
+                    try:
+                        status.update(label="Pipeline failed", state="error")
+                    except Exception:
+                        pass
+                    detail_str = pipeline_status.format_exception_detail(e)
+                    pipeline_status.add_event(f"❌ Pipeline failed: {detail_str}")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail=f"Pipeline failed: {detail_str}",
+                    )
+                    if isinstance(e, Exception):
+                        st.exception(e)
+                    else:
+                        raise
             finally:
                 unreg_pipeline()
-                # Agent 0 has copied the paper into RAW_DIR under its own key by
-                # now, so the staging copy has served its purpose either way.
+                # If seed_file_path was a temporary staging copy outside RAW_DIR, clean it up.
+                # Never unlink files that are stored directly in RAW_DIR.
                 if seed_file_path:
                     try:
-                        os.unlink(seed_file_path)
+                        raw_dir_abs = os.path.abspath(config.RAW_DIR)
+                        seed_abs = os.path.abspath(seed_file_path)
+                        if not (seed_abs == raw_dir_abs or seed_abs.startswith(raw_dir_abs + os.sep)):
+                            if os.path.exists(seed_file_path):
+                                os.unlink(seed_file_path)
                     except OSError:
                         pass
 

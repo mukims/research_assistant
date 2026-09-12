@@ -323,21 +323,23 @@ def run(
         ):
             final = update
     except BaseException as exc:
-        if isinstance(exc, KeyboardInterrupt):
-            pipeline_status.add_event("⚠️ Pipeline cancelled by user (SIGINT)")
+        if pipeline_status.is_cancellation(exc):
+            pipeline_status.add_event("⚠️ Pipeline cancelled (session reloaded or stopped)")
             pipeline_status.set_status(
                 active=False,
                 stage="idle",
                 stage_label="Idle",
-                detail="Pipeline cancelled by user",
+                detail="Pipeline cancelled",
             )
         else:
-            pipeline_status.add_event(f"❌ Pipeline failed: {exc}")
+            detail_str = pipeline_status.format_exception_detail(exc)
+            logger.exception("Pipeline failed: %s", exc)
+            pipeline_status.add_event(f"❌ Pipeline failed: {detail_str}")
             pipeline_status.set_status(
                 active=False,
                 stage="idle",
                 stage_label="Idle",
-                detail=f"Pipeline failed: {exc}",
+                detail=f"Pipeline failed: {detail_str}",
             )
         raise
 

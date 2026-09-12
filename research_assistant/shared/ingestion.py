@@ -1086,20 +1086,22 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
         return result
     except BaseException as exc:
         if standalone:
-            if isinstance(exc, KeyboardInterrupt):
-                pipeline_status.add_event("⚠️ Ingestion cancelled by user")
+            if pipeline_status.is_cancellation(exc):
+                pipeline_status.add_event("⚠️ Ingestion cancelled (session reloaded or stopped)")
                 pipeline_status.set_status(
                     active=False,
                     stage="idle",
                     stage_label="Idle",
-                    detail="Ingestion cancelled by user",
+                    detail="Ingestion cancelled",
                 )
             else:
-                pipeline_status.add_event(f"❌ Ingestion failed: {exc}")
+                detail_str = pipeline_status.format_exception_detail(exc)
+                logger.exception("Ingestion failed: %s", exc)
+                pipeline_status.add_event(f"❌ Ingestion failed: {detail_str}")
                 pipeline_status.set_status(
                     active=False,
                     stage="idle",
                     stage_label="Idle",
-                    detail=f"Ingestion failed: {exc}",
+                    detail=f"Ingestion failed: {detail_str}",
                 )
         raise

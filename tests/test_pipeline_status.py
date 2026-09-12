@@ -794,5 +794,95 @@ def test_app_sidebar_summary_parentheses(temp_status_file, monkeypatch):
     assert not any("((+111 papers indexed))" in c for c in caption_calls)
 
 
+def test_format_exception_detail():
+    assert pipeline_status.format_exception_detail(AssertionError()) == "AssertionError"
+    assert pipeline_status.format_exception_detail(RuntimeError()) == "RuntimeError"
+    assert pipeline_status.format_exception_detail(RuntimeError("foo")) == "foo"
+    assert pipeline_status.format_exception_detail(ValueError("   ")) == "ValueError"
+
+
+def test_is_cancellation():
+    class ScriptControlException(BaseException):
+        pass
+
+    class StopException(ScriptControlException):
+        pass
+
+    class RerunException(ScriptControlException):
+        pass
+
+    assert pipeline_status.is_cancellation(KeyboardInterrupt()) is True
+    assert pipeline_status.is_cancellation(SystemExit()) is True
+    assert pipeline_status.is_cancellation(StopException()) is True
+    assert pipeline_status.is_cancellation(RerunException()) is True
+    assert pipeline_status.is_cancellation(RuntimeError("fail")) is False
+
+
+def test_track_stage_streamlit_cancellation(temp_status_file):
+    class StopException(BaseException):
+        pass
+
+    pipeline_status.clear_status()
+    with pytest.raises(StopException):
+        with pipeline_status.track_stage("ingest_seed", "Indexing seed paper"):
+            raise StopException()
+
+    st = pipeline_status.get_status()
+    assert st["active"] is False
+    assert st["stage"] == "idle"
+    assert not any("❌ Error in Indexing seed paper:" in ev for ev in st["recent_events"])
+    assert any("cancelled" in ev for ev in st["recent_events"])
+
+
+def test_track_stage_empty_exception_formatting(temp_status_file):
+    pipeline_status.clear_status()
+    with pytest.raises(AssertionError):
+        with pipeline_status.track_stage("ingest_seed", "Indexing seed paper"):
+            raise AssertionError()
+
+    st = pipeline_status.get_status()
+    assert st["active"] is False
+    assert st["stage"] == "idle"
+    assert not any(ev == "❌ Error in Indexing seed paper: " for ev in st["recent_events"])
+    assert any("❌ Error in Indexing seed paper: AssertionError" in ev for ev in st["recent_events"])
+
+
+def test_notify_callbacks_suppresses_base_exception():
+    class StopException(BaseException):
+        pass
+
+    def faulty_cb(st):
+        raise StopException()
+
+    unreg = pipeline_status.register_progress_callback(faulty_cb)
+    try:
+        pipeline_status._notify_callbacks({"stage": "test"})
+    finally:
+        unreg()
+
+
+def test_app_does_not_unlink_raw_dir(tmp_path, monkeypatch):
+    import app
+    from research_assistant import config
+
+    raw_paper = os.path.join(config.RAW_DIR, "test_preserve.pdf")
+    os.makedirs(config.RAW_DIR, exist_ok=True)
+    with open(raw_paper, "wb") as f:
+        f.write(b"%PDF-1.4 test")
+
+    try:
+        seed_file_path = raw_paper
+        raw_dir_abs = os.path.abspath(config.RAW_DIR)
+        seed_abs = os.path.abspath(seed_file_path)
+        if not (seed_abs == raw_dir_abs or seed_abs.startswith(raw_dir_abs + os.sep)):
+            if os.path.exists(seed_file_path):
+                os.unlink(seed_file_path)
+
+        assert os.path.exists(raw_paper)
+    finally:
+        if os.path.exists(raw_paper):
+            os.unlink(raw_paper)
+
+
 
 

@@ -24,6 +24,30 @@ except ImportError:
     fcntl = None  # type: ignore
 
 from research_assistant.shared.atomic import atomic_write_json
+from research_assistant.shared.log import get_logger
+
+logger = get_logger("pipeline_status")
+
+
+def is_cancellation(exc: BaseException) -> bool:
+    """Return True if exc represents a user cancel, interrupt, or Streamlit rerun/stop."""
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return True
+    cls_name = type(exc).__name__
+    if cls_name in ("StopException", "RerunException", "ScriptControlException"):
+        return True
+    for base in type(exc).__mro__:
+        if base.__name__ == "ScriptControlException":
+            return True
+    return False
+
+
+def format_exception_detail(exc: BaseException) -> str:
+    """Format an exception into a human-readable string, never returning empty."""
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    return type(exc).__name__
 
 MAX_RECENT_EVENTS = 15
 STALE_TIMEOUT_SECONDS = 300  # 5 minutes
@@ -130,7 +154,7 @@ def _notify_callbacks(status: dict[str, Any]) -> None:
         for cb in list(local_cbs):
             try:
                 cb(st_copy)
-            except Exception:
+            except BaseException:
                 pass
     # 2. Global callbacks
     with _global_callbacks_lock:
@@ -138,7 +162,7 @@ def _notify_callbacks(status: dict[str, Any]) -> None:
     for cb in global_cbs:
         try:
             cb(st_copy)
-        except Exception:
+        except BaseException:
             pass
 
 
@@ -555,22 +579,37 @@ def track_stage(
         if isinstance(exc, KeyboardInterrupt):
             err_msg = f"⚠️ {eff_label} cancelled by user (SIGINT)"
             detail_msg = f"Cancelled in {eff_label}"
+            logger.info("%s: %s", eff_label, err_msg)
         elif isinstance(exc, SystemExit):
             err_msg = f"⚠️ {eff_label} stopped (SystemExit)"
             detail_msg = f"Stopped in {eff_label}"
+            logger.info("%s: %s", eff_label, err_msg)
+        elif is_cancellation(exc):
+            err_msg = f"⚠️ {eff_label} cancelled (session reloaded or stopped)"
+            detail_msg = f"Cancelled in {eff_label}"
+            logger.info("%s: %s", eff_label, err_msg)
         else:
-            err_msg = f"❌ Error in {eff_label}: {exc}"
-            detail_msg = f"Failed in {eff_label}: {exc}"
-        status = _load_status_from_disk()
-        events = status.get("recent_events", [])
-        if not events or events[-1] != err_msg:
-            add_event(err_msg)
-        set_status(
-            active=False,
-            stage="idle",
-            stage_label="Idle",
-            detail=detail_msg,
-        )
+            detail_str = format_exception_detail(exc)
+            err_msg = f"❌ Error in {eff_label}: {detail_str}"
+            detail_msg = f"Failed in {eff_label}: {detail_str}"
+            logger.exception("Error in stage '%s': %s", eff_label, exc)
+        try:
+            status = _load_status_from_disk()
+            events = status.get("recent_events", [])
+            if not events or events[-1] != err_msg:
+                add_event(err_msg)
+        except BaseException:
+            pass
+        finally:
+            try:
+                set_status(
+                    active=False,
+                    stage="idle",
+                    stage_label="Idle",
+                    detail=detail_msg,
+                )
+            except BaseException:
+                pass
         raise
     else:
         stop_heartbeat.set()
