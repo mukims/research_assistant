@@ -417,7 +417,50 @@ def _render_shortlist(selected):
             st.write(r.get("summary", ""))
 
 
+def _synthesis_warnings(answer) -> list:
+    """What the reader must be told about the synthesis's citations."""
+    warnings = []
+    unknown = answer.get("unverified_citations") or []
+    if unknown:
+        warnings.append(f"The synthesis cites {', '.join(unknown)}, which are not on the shortlist — "
+                        "treat those sentences as unsupported.")
+    irrelevant = answer.get("irrelevant_cited") or []
+    if irrelevant:
+        keys = answer.get("keys") or {}
+        named = ", ".join(f"{k} ({keys.get(k, '?')})" for k in irrelevant)
+        warnings.append(f"The synthesis cites {named}, whose notes say the paper is not relevant to the idea.")
+    return warnings
+
+
+def _render_notes(answer):
+    notes = answer.get("notes") or []
+    if not notes:
+        return
+    st.markdown(f"**What each paper says** — {len(notes)} paper(s) read")
+    for n in notes:
+        flag = "" if n.get("relevant", True) else " · not relevant"
+        with st.expander(f"{n['key']} · {n['citation']}{flag}  ·  {n.get('passages_used', 0)} passage(s), {n.get('seconds', '?')}s"):
+            st.write(n["notes"])
+
+
+def _render_synthesis(answer, heading):
+    for w in _synthesis_warnings(answer):
+        st.warning(w, icon="⚠️")
+    with st.container(border=True):
+        st.markdown(f"###### {heading}")
+        st.markdown(answer["suggestion"])
+    keys = answer.get("keys") or {}
+    if keys:
+        st.caption("Keys: " + " · ".join(f"{k} = {t}" for k, t in keys.items()))
+    elif answer.get("citations"):
+        st.caption("Sources: " + " · ".join(str(c) for c in answer["citations"]))
+    t = answer.get("timings")
+    if t:
+        st.caption(f"{answer.get('mode', '')}: gate {t['gate']}s · notes {t['map']}s · synthesis {t['reduce']}s · total {t['total']}s")
+
+
 def _render_seed_citation_audit(final):
+
     seed_path = final.get("seed_path")
     audit = final.get("citation_audit")
 
@@ -613,11 +656,8 @@ def _render_build(final, query):
         answer = final.get("answer")
         if answer:
             _render_shortlist(answer.get("selected"))
-            with st.container(border=True):
-                st.markdown("###### Related work across collection")
-                st.markdown(answer["suggestion"])
-            if answer.get("citations"):
-                st.caption("Sources: " + " · ".join(str(c) for c in answer["citations"]))
+            _render_notes(answer)
+            _render_synthesis(answer, "Related work across collection")
             _render_passages(answer.get("passages") or [])
         else:
             st.info(
@@ -651,13 +691,11 @@ def _render_build(final, query):
     answer = final.get("answer")
     if answer:
         _render_shortlist(answer.get("selected"))
-        with st.container(border=True):
-            st.markdown("###### Related work")
-            st.markdown(answer["suggestion"])
-        if answer.get("citations"):
-            st.caption("Sources: " + " · ".join(str(c) for c in answer["citations"]))
+        _render_notes(answer)
+        _render_synthesis(answer, "Related work")
         _render_passages(answer.get("passages") or [])
     else:
+
         st.info(
             "Corpus updated. Switch to **Cite a draft** to query it.", icon="✍️"
         )
@@ -1016,9 +1054,19 @@ with tab_build:
                             st.write("🧠 Formulating related-work synthesis across uploaded collection…")
                             from research_assistant.shared import retrieve
 
+                            def _progress(stage, payload):
+                                if stage == "shortlist":
+                                    st.write("📚 Reading " + ", ".join(f"{p['key']} {p['citation'][:50]}" for p in payload["papers"]))
+                                elif stage == "notes":
+                                    mark = "📝" if payload.get("relevant", True) else "➖"
+                                    st.write(f"{mark} {payload['key']} · {payload['citation'][:60]} ({payload.get('seconds', '?')}s)")
+                                elif stage == "synthesis":
+                                    st.write(f"🧠 Synthesis written ({payload.get('seconds', '?')}s)")
+
                             try:
-                                answer = retrieve.research_answer(effective_q)
+                                answer = retrieve.research_answer(effective_q, on_progress=_progress)
                             except Exception as exc:  # noqa: BLE001
+
                                 logger.error("Synthesis failed: %s", exc)
                                 answer = {
                                     "suggestion": f"Synthesis encountered an error: {exc}",
