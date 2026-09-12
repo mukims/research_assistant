@@ -87,8 +87,15 @@ def _labeled_pdfs(paths):
         downloaded = {}
 
     by_path = _pdfs_from_manifest(downloaded)
+    # _pdfs_from_manifest keys by the path that exists locally, which can
+    # differ from the one the manifest recorded (a manifest written on the
+    # VM names /home/user/data/...). Match on the basename as well, so a
+    # paper is still labelled by its title rather than its filename stem.
+    by_base = {os.path.basename(p): label for p, label in by_path.items()}
     return {
-        path: by_path.get(path, os.path.splitext(os.path.basename(path))[0])
+        path: by_path.get(path)
+        or by_base.get(os.path.basename(path))
+        or os.path.splitext(os.path.basename(path))[0]
         for path in paths
     }
 
