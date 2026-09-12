@@ -160,3 +160,35 @@ def hybrid_search(
             })
 
     return results
+
+
+def expand_neighbours(results, texts, metadatas, window: int = 1):
+    """Attach the adjacent chunks of the same document to each result.
+
+    A paper's chunks are minted contiguously (ARCHITECTURE.md §4.4), so
+    chunk_index ± 1 with the same ``metadata["document"]`` is the neighbouring
+    text. Adds ``context_before`` / ``context_after`` (joined with newlines,
+    nearest last / nearest first respectively); empty strings at a document
+    boundary. Callers that ignore the two keys see no change.
+    """
+    def _meta(i):
+        return metadatas[i] if 0 <= i < len(metadatas) else None
+
+    for r in results:
+        idx = r.get("chunk_index")
+        doc = (r.get("metadata") or {}).get("document")
+        before, after = [], []
+        if isinstance(idx, int) and 0 <= idx < len(texts) and window > 0:
+            for i in range(1, window + 1):
+                m = _meta(idx - i)
+                if m is None or m.get("document") != doc:
+                    break
+                before.insert(0, texts[idx - i])
+            for i in range(1, window + 1):
+                m = _meta(idx + i)
+                if m is None or m.get("document") != doc:
+                    break
+                after.append(texts[idx + i])
+        r["context_before"] = "\n".join(before)
+        r["context_after"] = "\n".join(after)
+    return results

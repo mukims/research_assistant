@@ -276,5 +276,39 @@ class TestExcludeTypes(unittest.TestCase):
         self.assertIsNone(coll.where)
 
 
+from research_assistant.shared.search import expand_neighbours
+
+
+class TestExpandNeighbours(unittest.TestCase):
+    def _corpus(self):
+        texts = ["a0", "a1", "a2", "b0", "b1"]
+        metas = [{"document": "a.pdf"}] * 3 + [{"document": "b.pdf"}] * 2
+        return texts, metas
+
+    def test_adds_the_adjacent_chunks_of_the_same_document(self):
+        texts, metas = self._corpus()
+        out = expand_neighbours([{"chunk_index": 1, "text": "a1", "metadata": metas[1]}], texts, metas)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("a0", "a2"))
+
+    def test_never_crosses_into_another_document(self):
+        texts, metas = self._corpus()
+        out = expand_neighbours([{"chunk_index": 2, "text": "a2", "metadata": metas[2]}], texts, metas)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("a1", ""))
+        out = expand_neighbours([{"chunk_index": 3, "text": "b0", "metadata": metas[3]}], texts, metas)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("", "b1"))
+
+    def test_window_two_joins_both_sides(self):
+        texts, metas = self._corpus()
+        out = expand_neighbours([{"chunk_index": 2, "text": "a2", "metadata": metas[2]}], texts, metas, window=2)
+        self.assertEqual(out[0]["context_before"], "a0\na1")
+
+    def test_window_zero_and_out_of_range_are_safe(self):
+        texts, metas = self._corpus()
+        out = expand_neighbours([{"chunk_index": 0, "text": "a0", "metadata": metas[0]}], texts, metas, window=0)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("", ""))
+        out = expand_neighbours([{"chunk_index": 99, "text": "x", "metadata": {"document": "z"}}], texts, metas)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
