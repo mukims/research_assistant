@@ -5,10 +5,13 @@ are ordinary Python, and that is what makes them runnable in CI. The live
 regression suite against cases.jsonl is opt-in via RUN_LLM_TESTS=1.
 """
 
+import copy
 import json
 import os
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import research_assistant.judgement.judge as judge_mod
 from research_assistant.judgement.judge import (
@@ -165,3 +168,109 @@ class TestLiveJudgement(unittest.TestCase):
                     f"got {result['judgement']!r}"
                 )
         self.assertEqual(failures, [], "\n".join(failures))
+
+
+def _reply(finding="Supports", scope="Supports", strength="Not applicable", judgement="Supports",
+            span="the sentence", confidence="High", sufficiency="sufficient"):
+    return {
+        "slots": {"finding": {"assertion": "f", "verdict": finding},
+                  "scope": {"assertion": "s", "verdict": scope},
+                  "strength": {"assertion": "t", "verdict": strength}},
+        "judgement": judgement, "evidence_sufficiency": sufficiency, "confidence": confidence,
+        "supporting_span": span, "reason": "r",
+    }
+
+
+class TestDeriveJudgement(unittest.TestCase):
+    """The rubric's Step 3, in code, first match wins."""
+
+    def test_scope_does_not_support_beats_everything(self):
+        self.assertEqual(judge_mod.derive_judgement(_reply(finding="Contradicts", scope="Does not support")["slots"]),
+                         "Does not support")
+
+    def test_contradicts(self):
+        self.assertEqual(judge_mod.derive_judgement(_reply(finding="Contradicts")["slots"]), "Contradicts")
+
+    def test_finding_does_not_support(self):
+        self.assertEqual(judge_mod.derive_judgement(_reply(finding="Does not support")["slots"]), "Does not support")
+
+    def test_insufficient_finding_or_scope_is_unclear(self):
+        self.assertEqual(judge_mod.derive_judgement(_reply(finding="Insufficient")["slots"]),
+                         "Unclear / insufficient evidence")
+        self.assertEqual(judge_mod.derive_judgement(_reply(scope="Insufficient")["slots"]),
+                         "Unclear / insufficient evidence")
+
+    def test_all_supports_or_not_applicable_is_supports(self):
+        self.assertEqual(judge_mod.derive_judgement(_reply(strength="Supports")["slots"]), "Supports")
+        self.assertEqual(judge_mod.derive_judgement(_reply(strength="Not applicable")["slots"]), "Supports")
+
+    def test_partial_scope_or_strength_is_partially_supports(self):
+        self.assertEqual(judge_mod.derive_judgement(_reply(scope="Partially supports")["slots"]), "Partially supports")
+        self.assertEqual(judge_mod.derive_judgement(_reply(strength="Insufficient")["slots"]), "Partially supports")
+
+    def test_out_of_vocabulary_slot_counts_as_insufficient(self):
+        # "Partially supports" is not a finding verdict — seen from gemma4:e2b twice on 2026-09-12.
+        self.assertEqual(judge_mod.derive_judgement(_reply(finding="Partially supports")["slots"]),
+                         "Unclear / insufficient evidence")
+
+
+class TestSpanIsVerbatim(unittest.TestCase):
+    EVIDENCE = "The ﬁlms showed a 10% increase in Δσ_ph — “as expected”.  Next sentence."
+
+    def test_exact_substring(self):
+        self.assertTrue(judge_mod.span_is_verbatim("Next sentence.", self.EVIDENCE))
+
+    def test_whitespace_case_ligature_and_quote_differences_are_tolerated(self):
+        self.assertTrue(judge_mod.span_is_verbatim('the films showed a 10% increase in Δσ_ph - "as expected".', self.EVIDENCE))
+
+    def test_paraphrase_is_not_verbatim(self):
+        self.assertFalse(judge_mod.span_is_verbatim("Films increased by ten percent.", self.EVIDENCE))
+
+    def test_no_span_is_none(self):
+        self.assertIsNone(judge_mod.span_is_verbatim(None, self.EVIDENCE))
+        self.assertIsNone(judge_mod.span_is_verbatim("", self.EVIDENCE))
+        self.assertIsNone(judge_mod.span_is_verbatim("null", self.EVIDENCE))
+
+
+class TestEnforceRubric(unittest.TestCase):
+    def test_clean_reply_passes_through_with_derived_fields(self):
+        out = judge_mod.enforce_rubric(_reply(span="the sentence"), "here is the sentence indeed")
+        self.assertEqual(out["judgement"], "Supports")
+        self.assertEqual(out["model_judgement"], "Supports")
+        self.assertFalse(out["rubric_mismatch"])
+        self.assertEqual(out["rubric_violations"], [])
+        self.assertTrue(out["span_verified"])
+        self.assertEqual(out["confidence"], "High")
+
+    def test_model_aggregate_that_breaks_the_rules_is_overridden_and_recorded(self):
+        r = _reply(scope="Does not support", judgement="Supports")
+        out = judge_mod.enforce_rubric(r, "the sentence")
+        self.assertEqual(out["judgement"], "Does not support")
+        self.assertEqual(out["model_judgement"], "Supports")
+        self.assertTrue(out["rubric_mismatch"])
+        self.assertEqual(out["confidence"], "Medium")
+
+    def test_out_of_vocabulary_slot_is_recorded_and_caps_confidence(self):
+        r = _reply(finding="Partially supports", judgement="Partially supports")
+        out = judge_mod.enforce_rubric(r, "the sentence")
+        self.assertEqual(out["rubric_violations"], ["finding: 'Partially supports'"])
+        self.assertEqual(out["judgement"], "Unclear / insufficient evidence")
+        self.assertTrue(out["rubric_mismatch"])
+        self.assertEqual(out["confidence"], "Medium")
+
+    def test_unverified_span_caps_confidence_but_keeps_the_verdict(self):
+        out = judge_mod.enforce_rubric(_reply(span="not in there"), "the evidence text")
+        self.assertFalse(out["span_verified"])
+        self.assertEqual(out["judgement"], "Supports")
+        self.assertEqual(out["confidence"], "Medium")
+
+    def test_low_confidence_is_not_raised_to_medium(self):
+        out = judge_mod.enforce_rubric(_reply(span="not in there", confidence="Low"), "the evidence text")
+        self.assertEqual(out["confidence"], "Low")
+
+    def test_judge_applies_enforcement(self):
+        reply = json.dumps(_reply(scope="Does not support", judgement="Supports", span="evidence"))
+        with patch.object(judge_mod, "chat", return_value=types.SimpleNamespace(content=reply)):
+            out = judge_mod.judge("claim", "the evidence")
+        self.assertEqual(out["judgement"], "Does not support")
+        self.assertTrue(out["rubric_mismatch"])

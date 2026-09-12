@@ -13,6 +13,7 @@ distort the verifier's summary counts.
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 from research_assistant.config import (
@@ -47,6 +48,90 @@ REQUIRED_FIELDS = {
     "reason",
 }
 REQUIRED_SLOTS = {"finding", "scope", "strength"}
+
+# Step 2 of the rubric: each slot has its own vocabulary. The model reply is
+# validated at the top level only (VALID_JUDGEMENTS etc.); this is per slot.
+SLOT_VOCAB = {
+    "finding":  {"Supports", "Contradicts", "Does not support", "Insufficient"},
+    "scope":    {"Supports", "Partially supports", "Does not support", "Insufficient"},
+    "strength": {"Supports", "Partially supports", "Insufficient", "Not applicable"},
+}
+
+# Added by enforce_rubric(); merged into the verifier's record alongside
+# REQUIRED_FIELDS. Additive: no existing field changes meaning.
+DERIVED_FIELDS = {"model_judgement", "rubric_mismatch", "rubric_violations", "span_verified"}
+
+_CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
+
+
+def _slot_verdict(slots: dict, name: str) -> str:
+    """The verdict as the rules see it: anything outside the slot's vocabulary
+    is read as 'Insufficient' — the model did not follow the rubric here, and
+    the conservative reading of that is 'cannot tell'."""
+    verdict = slots[name]["verdict"]
+    return verdict if verdict in SLOT_VOCAB[name] else "Insufficient"
+
+
+def derive_judgement(slots: dict) -> str:
+    """Step 3 of the rubric, in code. First match wins."""
+    finding, scope, strength = (_slot_verdict(slots, k) for k in ("finding", "scope", "strength"))
+    if scope == "Does not support":
+        return "Does not support"
+    if finding == "Contradicts":
+        return "Contradicts"
+    if finding == "Does not support":
+        return "Does not support"
+    if finding == "Insufficient" or scope == "Insufficient":
+        return "Unclear / insufficient evidence"
+    if all(v in ("Supports", "Not applicable") for v in (finding, scope, strength)):
+        return "Supports"
+    return "Partially supports"
+
+
+_QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-"})
+_ELLIPSIS_RE = re.compile(r"(\.\.\.|…|\[\s*\.\.\.\s*\]|\[…\])")
+
+
+def _normalise(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text or "").translate(_QUOTES)
+    text = _ELLIPSIS_RE.sub(" ", text)
+    return " ".join(text.lower().split())
+
+
+def span_is_verbatim(span, evidence: str):
+    """Is the supporting span a substring of the evidence, up to whitespace,
+    case, ligatures, quote style and ellipses? None when there is no span."""
+    if span is None or not str(span).strip() or str(span).strip().lower() == "null":
+        return None
+    return _normalise(str(span)) in _normalise(evidence)
+
+
+def enforce_rubric(result: dict, evidence: str) -> dict:
+    """Make the record say what the rubric says, and where the model differed.
+
+    The model's stated judgement is kept as model_judgement; `judgement`
+    becomes the one the Step-3 rules derive from its own slots. Slot verdicts
+    outside their vocabulary are listed in rubric_violations. The supporting
+    span is checked verbatim. Any of those three caps confidence at Medium:
+    the model's High was self-reported about a reply that broke its rules.
+    """
+    slots = result["slots"]
+    violations = [
+        f"{name}: {slots[name]['verdict']!r}"
+        for name in ("finding", "scope", "strength")
+        if slots[name]["verdict"] not in SLOT_VOCAB[name]
+    ]
+    derived = derive_judgement(slots)
+    result["model_judgement"] = result["judgement"]
+    result["rubric_mismatch"] = derived != result["judgement"]
+    result["rubric_violations"] = violations
+    result["judgement"] = derived
+    result["span_verified"] = span_is_verbatim(result.get("supporting_span"), evidence)
+
+    if violations or result["rubric_mismatch"] or result["span_verified"] is False:
+        if _CONFIDENCE_RANK[result["confidence"]] > _CONFIDENCE_RANK["Medium"]:
+            result["confidence"] = "Medium"
+    return result
 
 _FENCE_RE = re.compile(r"\A```(?:json)?\s*\n(.*?)\n?```\Z", re.DOTALL)
 
@@ -138,4 +223,4 @@ def judge(claim: str, citation_evidence: str, model: str | None = None) -> dict:
     )
     if not result.content:
         raise JudgementParseError("LLM returned an empty response.", raw="")
-    return parse_judgement(result.content)
+    return enforce_rubric(parse_judgement(result.content), citation_evidence)
