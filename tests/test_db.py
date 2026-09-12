@@ -10,7 +10,9 @@ import os
 import pickle
 import sys
 import tempfile
+import time
 import types
+
 import unittest
 from unittest.mock import patch
 
@@ -62,3 +64,32 @@ class LoadTestCase(unittest.TestCase):
             _, bm25, _, _ = db.load_search_resources()
         self.assertEqual(bm25.tokenizer_version, "v9")
         self.assertTrue(any("tokenizer" in line for line in cm.output))
+
+
+class TestSearchResourceCache(LoadTestCase):
+    def setUp(self):
+        super().setUp()
+        db.clear_search_cache()
+        self.addCleanup(db.clear_search_cache)
+        with open(self.pkl, "wb") as f:
+            pickle.dump({"tokenizer": "v2", "built_at": "now", "bm25": _Bm25Stub()}, f)
+
+    def test_second_call_returns_the_same_objects_without_reloading(self):
+        first = db.load_search_resources()
+        with patch.object(db, "_load_search_resources_uncached", side_effect=AssertionError("reloaded")):
+            second = db.load_search_resources()
+        self.assertIs(first, second)
+
+    def test_a_rebuilt_pickle_invalidates(self):
+        first = db.load_search_resources()
+        with open(self.pkl, "wb") as f:
+            pickle.dump({"tokenizer": "v2", "built_at": "later", "bm25": _Bm25Stub()}, f)
+        os.utime(self.pkl, (time.time() + 5, time.time() + 5))
+        second = db.load_search_resources()
+        self.assertIsNot(first, second)
+
+    def test_clear_forces_a_reload(self):
+        first = db.load_search_resources()
+        db.clear_search_cache()
+        self.assertIsNot(first, db.load_search_resources())
+

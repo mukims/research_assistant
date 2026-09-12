@@ -866,10 +866,15 @@ def rebuild_bm25():
     }
     with atomic_write(BM25_INDEX_PATH, binary=True) as f:
         pickle.dump(payload, f)
+    # The cached (collection, bm25, texts, metadatas) in this process is now
+    # stale; the mtime key would catch it, but say so explicitly.
+    from research_assistant.shared.db import clear_search_cache
+    clear_search_cache()
     elapsed = time.perf_counter() - t0
     pipeline_status.add_event(f"✅ BM25 index rebuilt ({len(paired)} chunks)")
     logger.info("✓ BM25 index rebuilt (%d documents, tokenizer %s) in %.1fs.",
                 len(paired), TOKENIZER_VERSION, elapsed)
+
 
 
 # ─── Unified batch ingestion ──────────────────────────────────────────────────

@@ -18,11 +18,39 @@ from research_assistant.shared.tokenize import TOKENIZER_VERSION
 
 logger = get_logger("db")
 
+# One process, one copy of the corpus in memory. The synthesis path calls
+# hybrid_search once per shortlisted paper, and each call used to page the
+# whole collection out of Chroma and unpickle 13 MB — per query, per paper.
+# Keyed on the pickle's mtime so a rebuild (ingest) invalidates it.
+_cache: dict = {}
+
+
+def _cache_key():
+    try:
+        mtime = os.path.getmtime(BM25_INDEX_PATH)
+    except OSError:
+        mtime = None
+    return (VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime)
+
+
+def clear_search_cache() -> None:
+    _cache.clear()
+
 
 def load_search_resources():
+    """Cached: see _load_search_resources_uncached() for what is loaded."""
+    key = _cache_key()
+    if key not in _cache:
+        _cache.clear()
+        _cache[key] = _load_search_resources_uncached()
+    return _cache[key]
+
+
+def _load_search_resources_uncached():
     """
     Connect to ChromaDB, fetch all chunks in index order, and load the
     BM25 pickle.
+
 
     Returns:
         tuple: (collection, bm25, texts, metadatas)
