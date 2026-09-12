@@ -6,16 +6,6 @@ You are not judging whether the claim is true. You are judging the relationship 
 
 ---
 
-## Input
-
-**Claim:**
-{{CLAIM}}
-
-**Citation Evidence:**
-{{CITATION_EVIDENCE}}
-
----
-
 ## Step 1 — Decompose the claim into exactly three slots
 
 Every claim is decomposed into the same three slots. Do not add, merge, or omit slots.
@@ -257,3 +247,15 @@ Two contrasts are worth studying before you judge.
 **D against E.** The `finding` verdict is identical in both. Only the `scope` verdict differs, and that alone decides between `Contradicts` and `Does not support`.
 
 **B against F.** Both end at `Partially supports`, but for different reasons: B fails on `scope` and `strength` together, F fails on `strength` alone with the material and measurement conditions matching exactly. `strength` is a live verdict, not a formality — an attribution the paper hedges ("may be due to", "could be attributed to", "probably") never supports a claim that states it as the cause.
+
+---
+
+## Input
+
+Now apply Steps 1–5 to this claim and evidence. Return ONLY the JSON object.
+
+**Claim:**
+{{CLAIM}}
+
+**Citation Evidence:**
+{{CITATION_EVIDENCE}}
