@@ -109,6 +109,19 @@ DOC_RELEVANCE_GATE = (
 )
 
 
+# One call for the whole shortlist. Verdicts come back numbered so the
+# parser can align them to the summaries — or refuse to guess.
+DOC_RELEVANCE_GATE_BATCH = (
+    "A researcher is exploring this idea:\n\"{query}\"\n\n"
+    "Below are summaries of {n} papers, numbered. For each one, decide whether "
+    "the paper could be relevant prior work for that idea — even loosely.\n\n"
+    "{summaries}\n\n"
+    "Answer with exactly {n} lines, one per paper, in order, each of the form "
+    "`N: YES` or `N: NO`. Nothing else."
+)
+
+
+
 # ─── No-corpus fallback (Agent 0 found nothing to build on) ────────────────
 NO_CORPUS_FALLBACK = (
     "A researcher is exploring this idea:\n\"{query}\"\n\n"

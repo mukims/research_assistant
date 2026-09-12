@@ -12,15 +12,27 @@ As the corpus grows this keeps the detailed search bounded to a handful of
 papers instead of the whole store.
 """
 
+import re
+import time
+
 from research_assistant.config import (
     VECTORDB_PATH,
     SUMMARY_COLLECTION_NAME,
     DOC_SELECT_K,
     DOC_GATE,
+    GATE_BATCHED,
     DEFAULT_TOP_K,
 )
-from research_assistant.prompts import DOC_RELEVANCE_GATE, RESEARCH_CHAT_SYSTEM, RELATED_WORK_USER
+from research_assistant.prompts import (
+    DOC_RELEVANCE_GATE,
+    DOC_RELEVANCE_GATE_BATCH,
+    RESEARCH_CHAT_SYSTEM,
+    RELATED_WORK_USER,
+)
+from research_assistant.shared.db import load_search_resources
+from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.search import hybrid_search
 
 logger = get_logger("retrieve")
 
@@ -63,10 +75,28 @@ def rank_documents(query: str, k: int = DOC_SELECT_K) -> list[dict]:
     return out
 
 
-def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
-    """Ask the LLM to keep only the summaries that could be relevant prior work."""
-    from research_assistant.shared.llm import chat
+_VERDICT_RE = re.compile(r"^\s*(\d+)\s*[:.)\-]\s*(YES|NO)\b", re.I | re.M)
 
+
+def parse_gate_verdicts(text: str, n: int):
+    """Exactly one verdict per summary, indexed by number, or None.
+
+    Same rule as Agent 5's batched citation-need check: a reply that cannot
+    be aligned to its inputs is not partially trusted — it is discarded and
+    the per-summary path runs.
+    """
+    found = {}
+    for m in _VERDICT_RE.finditer(text or ""):
+        idx = int(m.group(1))
+        if idx in found:
+            return None
+        found[idx] = m.group(2).upper() == "YES"
+    if set(found) != set(range(1, n + 1)):
+        return None
+    return [found[i] for i in range(1, n + 1)]
+
+
+def _gate_one_by_one(query: str, ranked: list[dict]) -> list[dict]:
     kept = []
     for r in ranked:
         try:
@@ -80,6 +110,29 @@ def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
             continue
         if ans.startswith("Y"):
             kept.append(r)
+    return kept
+
+
+def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
+    """Ask the LLM to keep only the summaries that could be relevant prior work."""
+    kept = None
+    if GATE_BATCHED and ranked:
+        summaries = "\n\n".join(f"{i}. {r['summary']}" for i, r in enumerate(ranked, 1))
+        try:
+            reply = chat([{
+                "role": "user",
+                "content": DOC_RELEVANCE_GATE_BATCH.format(query=query, n=len(ranked), summaries=summaries),
+            }]).content
+            verdicts = parse_gate_verdicts(reply, len(ranked))
+        except Exception as e:
+            logger.warning("Batched gate call failed: %s — falling back to per-summary calls.", e)
+            verdicts = None
+        if verdicts is None:
+            logger.info("Batched gate reply could not be aligned to %d summaries — per-summary calls.", len(ranked))
+        else:
+            kept = [r for r, keep in zip(ranked, verdicts) if keep]
+    if kept is None:
+        kept = _gate_one_by_one(query, ranked)
 
     if not kept:
         logger.info("Gate rejected everything — falling back to the top summary.")
@@ -93,14 +146,12 @@ def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
 
 def deep_search(query: str, documents, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     """Hybrid chunk search restricted to `documents`."""
-    from research_assistant.shared.db import load_search_resources
-    from research_assistant.shared.search import hybrid_search
-
     collection, bm25, texts, metadatas = load_search_resources()
     return hybrid_search(
         query, collection, bm25, texts, metadatas,
         top_k=top_k, doc_filter=set(documents),
     )
+
 
 
 # ─── End to end ─────────────────────────────────────────────────────────────

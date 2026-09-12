@@ -191,6 +191,10 @@ DEFAULT_TOP_K    = 3                # Default number of results to return
 # then run the detail search only over what survives.
 DOC_SELECT_K     = _env_int("CITATION_DOC_SELECT_K", 6)
 DOC_GATE         = _env_bool("CITATION_DOC_GATE", True)
+# One gate call listing every shortlisted summary instead of one call per
+# summary. Falls back to per-summary calls when the reply cannot be aligned.
+GATE_BATCHED     = _env_bool("CITATION_GATE_BATCHED", True)
+
 
 # ─── Orchestrator Tunables ────────────────────────────────────────────────────
 PDF_COOLDOWN_SECONDS     = 30
