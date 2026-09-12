@@ -612,6 +612,8 @@ with tab_build:
                             st.write(f"📄 Found: **{title_lbl}** (`{p.get('filename', os.path.basename(p['path']))}`)")
 
                         st.write("⚙️ Parsing text chunks, computing embeddings, and building vector index…")
+                        from research_assistant.shared.ingestion import ingest_pdfs
+
                         ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force,
                                                  describe_figures=describe_figures)
                         if ingest_res.get("described"):
