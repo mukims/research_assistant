@@ -14,8 +14,10 @@ from research_assistant.shared.seed_audit import (
     _clean_claim_punctuation,
     _match_downloaded_paper,
     audit_seed_citations,
+    explain_rubric_verdict,
     extract_seed_citation_claims,
     find_tei_for_seed,
+    generate_seed_audit_markdown,
 )
 
 SAMPLE_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -200,6 +202,97 @@ class TestSeedAudit(unittest.TestCase):
         # Cleanup
         os.unlink(tei_file)
         os.unlink(dummy_pdf_path)
+
+    def test_generate_seed_audit_markdown_and_explain(self):
+        sample_report = {
+            "seed_path": "/data/test_paper.pdf",
+            "seed_name": "test_paper.pdf",
+            "generated": "2026-09-13T12:00:00",
+            "model": "gemini-3.5-flash-lite",
+            "totals": {
+                "total": 3,
+                "downloaded": 2,
+                "judged": 2,
+                "Supports": 1,
+                "Partially supports": 1,
+                "Contradicts": 0,
+                "Does not support": 0,
+                "Unclear / insufficient evidence": 0,
+                "not_downloaded": 1,
+            },
+            "results": [
+                {
+                    "sentence": "Graphene conducts electricity well [1].",
+                    "claim": "Graphene conducts electricity well.",
+                    "cite_text": "[1]",
+                    "ref": {
+                        "index": 1,
+                        "title": "Graphene Conductivity",
+                        "authors": ["A. Author"],
+                        "year": 2021,
+                        "doi": "10.1000/182",
+                    },
+                    "outcome": "judged",
+                    "judgement": "Supports",
+                    "confidence": "High",
+                    "evidence_sufficiency": "sufficient",
+                    "supporting_span": "Graphene has high electrical conductivity.",
+                    "reason": "Explicit empirical confirmation.",
+                    "slots": {
+                        "finding": {"assertion": "conducts well", "verdict": "Supports"},
+                        "scope": {"assertion": "graphene", "verdict": "Supports"},
+                        "strength": {"assertion": "well", "verdict": "Supports"},
+                    },
+                },
+                {
+                    "sentence": "All polymers are highly elastic [2].",
+                    "claim": "All polymers are highly elastic.",
+                    "cite_text": "[2]",
+                    "ref": {
+                        "index": 2,
+                        "title": "Elasticity of PANI",
+                        "authors": ["B. Builder"],
+                        "year": 2022,
+                    },
+                    "outcome": "judged",
+                    "judgement": "Partially supports",
+                    "confidence": "Medium",
+                    "evidence_sufficiency": "partial",
+                    "supporting_span": "PANI shows notable elasticity.",
+                    "reason": "Only PANI tested, generalized to all polymers.",
+                    "slots": {
+                        "finding": {"assertion": "elastic", "verdict": "Supports"},
+                        "scope": {"assertion": "all polymers", "verdict": "Partially supports"},
+                        "strength": {"assertion": "highly", "verdict": "Supports"},
+                    },
+                },
+                {
+                    "sentence": "Ancient methods were used [3].",
+                    "claim": "Ancient methods were used.",
+                    "cite_text": "[3]",
+                    "outcome": "not_downloaded",
+                    "judgement": "Not downloaded",
+                },
+            ],
+        }
+
+        # Test explain_rubric_verdict
+        expl_supp = explain_rubric_verdict(sample_report["results"][0])
+        self.assertIn("Fully supported", expl_supp)
+
+        expl_part = explain_rubric_verdict(sample_report["results"][1])
+        self.assertIn("Partial support", expl_part)
+
+        expl_pw = explain_rubric_verdict(sample_report["results"][2])
+        self.assertIn("paywalled", expl_pw.lower())
+
+        # Test generate_seed_audit_markdown
+        md = generate_seed_audit_markdown(sample_report)
+        self.assertIn("# 🔍 In-Text Citation Audit Report", md)
+        self.assertIn("Graphene Conductivity", md)
+        self.assertIn("Slot Decomposition Analysis", md)
+        self.assertIn("Why this verdict?", md)
+        self.assertIn("Executive Summary", md)
 
 
 if __name__ == "__main__":

@@ -110,7 +110,7 @@ Return ONLY valid JSON. No prose, no code fences.
   "evidence_sufficiency": "sufficient | partial | insufficient",
   "confidence": "High | Medium | Low",
   "supporting_span": "the sentence from the evidence that most directly determines the judgement, verbatim; null if none",
-  "reason": "one sentence, 35 words maximum"
+  "reason": "a clear 1-2 sentence explanation detailing why the evidence supports, partially supports, contradicts, or fails to support the claim, noting any gaps in scope, finding, or strength"
 }
 ```
 

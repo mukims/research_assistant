@@ -506,11 +506,45 @@ def _render_seed_citation_audit(final):
         return
 
     with st.container(border=True):
-        st.markdown("##### 🔍 Uploaded Paper Citation Audit")
-        st.caption(
-            "Verifies whether the references cited inside the uploaded paper support "
-            "the statements made in its text, evaluated with the Gemma 4 judgement rubric."
+        from research_assistant.shared.seed_audit import (
+            explain_rubric_verdict,
+            generate_seed_audit_markdown,
         )
+
+        stem = (
+            os.path.splitext(os.path.basename(seed_path))[0]
+            if seed_path
+            else "seed_paper"
+        )
+
+        # Header with Title and Download Buttons
+        c_title, c_dl1, c_dl2 = st.columns([3, 1, 1])
+        with c_title:
+            st.markdown("##### 🔍 Uploaded Paper Citation Audit")
+            st.caption(
+                "Verifies whether the references cited inside the uploaded paper support "
+                "the statements made in its text, evaluated with the formal 3-slot judgement rubric."
+            )
+
+        md_report = generate_seed_audit_markdown(audit, seed_title=stem)
+        with c_dl1:
+            st.download_button(
+                "📥 Download Report (.md)",
+                data=md_report,
+                file_name=f"{stem}_citation_verification_report.md",
+                mime="text/markdown",
+                key="btn_dl_seed_audit_md",
+                help="Download complete, detailed verification report in Markdown with all citations, slots, and reasoning.",
+            )
+        with c_dl2:
+            st.download_button(
+                "📥 Download Data (.json)",
+                data=json.dumps(audit, indent=2, ensure_ascii=False),
+                file_name=f"{stem}_citation_audit.json",
+                mime="application/json",
+                key="btn_dl_seed_audit_json",
+                help="Download raw structured JSON audit data.",
+            )
 
         # Top metric row
         cols = st.columns(5)
@@ -566,21 +600,68 @@ def _render_seed_citation_audit(final):
                 st.markdown("**Cited Reference:**")
                 st.write(f"{ref_num} **{ref_title}** {ref_yr}  \n*{ref_auth}*")
                 if ref_info.get("doi"):
-                    st.caption(f"DOI: `{ref_info['doi']}`")
+                    st.caption(f"DOI: [{ref_info['doi']}](https://doi.org/{ref_info['doi']})")
 
                 if item.get("outcome") == "judged":
                     st.markdown(
-                        f"**Verdict:** `{judgement}` (Confidence: {item.get('confidence', 'Medium')})"
+                        f"**Verdict:** `{judgement}` · **Confidence:** `{item.get('confidence', 'Medium')}` · "
+                        f"**Evidence Sufficiency:** `{item.get('evidence_sufficiency', 'sufficient')}`"
                     )
+
+                    # Slot decomposition table
+                    slots = item.get("slots") or {}
+                    if slots and isinstance(slots, dict):
+                        st.markdown("**Claim Decomposition & Slot Analysis:**")
+                        slot_rows = []
+                        for slot_name in ("finding", "scope", "strength"):
+                            sdata = slots.get(slot_name) or {}
+                            if isinstance(sdata, dict):
+                                asrt = sdata.get("assertion", "—")
+                                v = sdata.get("verdict", "—")
+                            else:
+                                asrt = "—"
+                                v = str(sdata or "—")
+
+                            if v == "Supports":
+                                vb = "🟢 Supports"
+                            elif v == "Partially supports":
+                                vb = "🟡 Partially supports"
+                            elif v == "Contradicts":
+                                vb = "🔴 Contradicts"
+                            elif v == "Does not support":
+                                vb = "🟠 Does not support"
+                            elif v == "Insufficient":
+                                vb = "⚪ Insufficient"
+                            else:
+                                vb = f"`{v}`"
+
+                            slot_rows.append(f"| `{slot_name}` | {asrt} | {vb} |")
+
+                        st.markdown(
+                            "| Slot | Assertion Extracted from Claim | Slot Evaluation |\n"
+                            "| :--- | :--- | :--- |\n"
+                            + "\n".join(slot_rows)
+                        )
+
                     if item.get("supporting_span"):
                         st.markdown("**Verbatim Evidence from Cited Paper:**")
                         st.success(f"\"{item['supporting_span']}\"")
+                    elif item.get("evidence"):
+                        with st.expander("Show retrieved evidence excerpt from paper"):
+                            st.markdown(f"> {item['evidence'][:500]}...")
+
+                    st.markdown("**Detailed Reasoning & Assessment:**")
                     if item.get("reason"):
-                        st.markdown(f"**Reasoning:** {item['reason']}")
+                        st.markdown(f"> {item['reason']}")
+
+                    rule_expl = explain_rubric_verdict(item)
+                    st.info(f"💡 **Why this verdict?** {rule_expl}")
+
                 elif item.get("outcome") == "not_downloaded":
                     st.warning(
-                        "⚠️ This reference paper was not open-access or could not be downloaded, "
-                        "so its full text is not in the local library.",
+                        "⚠️ **Reference Not Downloaded**: This reference paper was not open-access or could not be downloaded "
+                        "(paywalled publisher, book, or 404). Its full text is not in the local library, so claims citing it "
+                        "cannot be empirically verified.",
                         icon="🔒",
                     )
                 else:
@@ -1480,13 +1561,39 @@ with tab_batch:
             cols[4].metric("Not judged", not_judged)
 
             md_path = written.replace(".txt", "_verification.md")
+            json_path = written.replace(".txt", "_verification.json")
             if os.path.exists(md_path):
                 with open(md_path, encoding="utf-8") as fh:
-                    # Open the report whenever anything is wrong — a run that
-                    # judged nothing is exactly when the reader needs it.
-                    with st.expander("Full verification report",
-                                     expanded=needs_review > 0 or not_judged > 0):
-                        st.markdown(fh.read())
+                    report_md = fh.read()
+                c_ver_h, c_ver_dl_md, c_ver_dl_json = st.columns([3, 1, 1])
+                with c_ver_h:
+                    st.markdown("##### 📋 Full Verification Report")
+                with c_ver_dl_md:
+                    st.download_button(
+                        "📥 Download Report (.md)",
+                        data=report_md,
+                        file_name=os.path.basename(md_path),
+                        mime="text/markdown",
+                        key=f"dl_verif_md_{os.path.basename(written)}",
+                        help="Download verification report in Markdown",
+                    )
+                if os.path.exists(json_path):
+                    with open(json_path, encoding="utf-8") as jfh:
+                        report_json = jfh.read()
+                    with c_ver_dl_json:
+                        st.download_button(
+                            "📥 Download Data (.json)",
+                            data=report_json,
+                            file_name=os.path.basename(json_path),
+                            mime="application/json",
+                            key=f"dl_verif_json_{os.path.basename(written)}",
+                            help="Download raw JSON verification results",
+                        )
+                # Open the report whenever anything is wrong — a run that
+                # judged nothing is exactly when the reader needs it.
+                with st.expander("Full verification report",
+                                 expanded=needs_review > 0 or not_judged > 0):
+                    st.markdown(report_md)
 
 
 # ─── Tab 4: research chat ──────────────────────────────────────────────────

@@ -476,4 +476,238 @@ def audit_seed_citations(
     atomic_write_json(out_file, report)
     logger.info("Saved seed citation audit to %s", out_file)
 
+    try:
+        md_content = generate_seed_audit_markdown(report)
+        out_md = os.path.join(AUDIT_DIR, f"{stem}_audit.md")
+        with open(out_md, "w", encoding="utf-8") as fh:
+            fh.write(md_content)
+        logger.info("Saved seed citation audit report to %s", out_md)
+    except Exception as exc:
+        logger.warning("Could not write markdown audit report: %s", exc)
+
     return report
+
+
+def explain_rubric_verdict(item: dict) -> str:
+    """Explains why a citation received its verdict based on the 3-slot rubric."""
+    judgement = item.get("judgement", "")
+    outcome = item.get("outcome", "")
+    slots = item.get("slots") or {}
+
+    if outcome == "not_downloaded":
+        return (
+            "This reference paper was paywalled, a book, or otherwise unavailable for open-access download. "
+            "Its full text is not in the corpus, so claims citing it could not be empirically verified."
+        )
+
+    if outcome == "no_evidence":
+        return (
+            "The cited reference is in the corpus, but semantic and keyword search found no passages discussing this specific assertion."
+        )
+
+    if outcome in ("retrieval_failed", "call_failed", "parse_failed"):
+        return f"Evaluation could not complete due to a processing issue: {item.get('reason', outcome)}."
+
+    def _val(name):
+        s = slots.get(name)
+        if isinstance(s, dict):
+            return s.get("verdict", "")
+        return str(s or "")
+
+    f_v = _val("finding")
+    s_v = _val("scope")
+    st_v = _val("strength")
+
+    if judgement == "Supports":
+        return (
+            "Fully supported: The cited evidence explicitly verifies the asserted finding, matches the tested scope/conditions, and corroborates the claim's strength."
+        )
+
+    if judgement == "Contradicts":
+        return (
+            "Contradiction flagged: The cited paper investigated the same scope and reported an empirical finding directly opposite or inconsistent with the claim."
+        )
+
+    if judgement == "Does not support":
+        if s_v in ("Does not support", "Insufficient"):
+            return (
+                "Scope mismatch: The cited paper investigated a different material system, experimental condition, or domain than asserted in the claim."
+            )
+        if f_v in ("Does not support", "Insufficient"):
+            return (
+                "Finding mismatch: While the cited paper is in a related area, it does not report the specific effect or relationship asserted."
+            )
+        return "Does not support: The evidence does not validate the asserted finding or tested conditions."
+
+    if judgement == "Partially supports":
+        hedges = []
+        if s_v in ("Partially supports", "Insufficient"):
+            hedges.append("the paper tested only a narrower subset of the asserted conditions or scope")
+        if st_v in ("Partially supports", "Insufficient"):
+            hedges.append("the paper proposed a hedged or specific mechanism whereas the claim asserted a definitive or generalized effect")
+        detail = " and ".join(hedges) if hedges else "certain slots were qualified"
+        return f"Partial support: The core finding is substantiated in the cited text, but {detail}."
+
+    if judgement == "Unclear / insufficient evidence":
+        return (
+            "Insufficient evidence: The retrieved passages from the cited paper are too fragmentary or ambiguous to determine whether the claim is supported."
+        )
+
+    return item.get("reason") or "Evaluation complete."
+
+
+def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) -> str:
+    """Generates a complete, comprehensive Markdown audit report for the given report dict."""
+    title = (
+        seed_title
+        or report.get("seed_name")
+        or os.path.basename(report.get("seed_path", "Seed Paper"))
+    )
+    totals = report.get("totals", {})
+    results = report.get("results", [])
+    generated = report.get("generated", datetime.now().isoformat(timespec="seconds"))
+    model = report.get("model", "judgement-engine")
+
+    total_citations = totals.get("total", len(results))
+    pct = lambda val: f"{round((val / total_citations) * 100, 1)}%" if total_citations else "0%"
+
+    lines = [
+        f"# 🔍 In-Text Citation Audit Report",
+        "",
+        f"**Document:** `{title}`  ",
+        f"**Generated:** `{generated}`  ",
+        f"**Evaluation Model:** `{model}`  ",
+        "",
+        "---",
+        "",
+        "## 1. Executive Summary",
+        "",
+        "| Category | Count | Percentage | Description |",
+        "| :--- | :--- | :--- | :--- |",
+        f"| **Total In-Text Citations** | **{total_citations}** | 100% | Unique in-text reference instances |",
+        f"| **Downloaded / In Corpus** | **{totals.get('downloaded', 0)}** | {pct(totals.get('downloaded', 0))} | Reference PDFs available in library |",
+        f"| 🟢 **Supports** | **{totals.get('Supports', 0)}** | {pct(totals.get('Supports', 0))} | Evidence directly validates claim |",
+        f"| 🟡 **Partially Supports** | **{totals.get('Partially supports', 0)}** | {pct(totals.get('Partially supports', 0))} | Core finding matches; scope or strength hedged |",
+        f"| 🔴 **Contradicts** | **{totals.get('Contradicts', 0)}** | {pct(totals.get('Contradicts', 0))} | Evidence directly opposes claim |",
+        f"| 🟠 **Does Not Support** | **{totals.get('Does not support', 0)}** | {pct(totals.get('Does not support', 0))} | Scope or finding mismatch |",
+        f"| ⚪ **Unclear / Insufficient** | **{totals.get('Unclear / insufficient evidence', 0)}** | {pct(totals.get('Unclear / insufficient evidence', 0))} | Fragile or fragmentary evidence |",
+        f"| 🔒 **Paywalled / Unchecked** | **{totals.get('not_downloaded', 0)}** | {pct(totals.get('not_downloaded', 0))} | Non-OA reference; unavailable |",
+        "",
+        "---",
+        "",
+        "## 2. Verification Rubric & Methodology",
+        "",
+        "Every in-text citation was audited by extracting the exact sentence in the paper, isolating the referenced source, and retrieving the top matching passages from that source. The evidence is evaluated against a formal **three-slot decomposition**:",
+        "",
+        "- **Finding Slot**: Does the cited evidence assert the specific phenomenon, relationship, or effect claimed?",
+        "- **Scope Slot**: Did the cited paper test the same system, material, conditions, or environment?",
+        "- **Strength Slot**: Does the evidence establish causation or generality, or only an isolated observation or hypothesis?",
+        "",
+        "---",
+        "",
+    ]
+
+    needs_review = [
+        r for r in results
+        if r.get("judgement") in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
+    ]
+    supported = [
+        r for r in results
+        if r.get("judgement") in ("Supports", "Partially supports")
+    ]
+    paywalled = [r for r in results if r.get("outcome") == "not_downloaded"]
+    other = [r for r in results if r not in needs_review and r not in supported and r not in paywalled]
+
+    def _format_entry(item, index):
+        ref_info = item.get("ref") or {}
+        ref_num = f"[{ref_info.get('index') or '?'}]"
+        ref_title = ref_info.get("title") or item.get("cite_text") or "Unknown Reference"
+        ref_year = f" ({ref_info.get('year')})" if ref_info.get("year") else ""
+        ref_authors = (
+            ", ".join(ref_info.get("authors", [])[:3])
+            + (" et al." if len(ref_info.get("authors", [])) > 3 else "")
+            if ref_info.get("authors")
+            else "Unknown authors"
+        )
+        doi = ref_info.get("doi")
+        doi_str = f"https://doi.org/{doi}" if doi else "N/A"
+
+        judgement = item.get("judgement", "Unclear")
+        confidence = item.get("confidence", "Medium")
+        sufficiency = item.get("evidence_sufficiency", "partial")
+
+        badge_map = {
+            "Supports": "🟢 Supports",
+            "Partially supports": "🟡 Partially Supports",
+            "Contradicts": "🔴 Contradicts",
+            "Does not support": "🟠 Does Not Support",
+            "Unclear / insufficient evidence": "⚪ Unclear / Insufficient Evidence",
+        }
+        badge = badge_map.get(judgement, "⚪ Paywalled / Unchecked") if item.get("outcome") != "not_downloaded" else "🔒 Paywalled / Not In Corpus"
+
+        out_lines = [
+            f"### Citation {index}: {ref_num} {ref_title}{ref_year}",
+            "",
+            f"- **Verdict:** `{badge}` · **Confidence:** `{confidence}` · **Evidence Sufficiency:** `{sufficiency}`",
+            f"- **Statement in Paper:**  \n  > \"{item.get('sentence') or item.get('claim', '')}\"",
+            (
+                f"- **Cited Reference:** {ref_authors}{ref_year}. *{ref_title}*. DOI: [`{doi}`]({doi_str})"
+                if doi
+                else f"- **Cited Reference:** {ref_authors}{ref_year}. *{ref_title}*"
+            ),
+        ]
+
+        slots = item.get("slots")
+        if slots and isinstance(slots, dict):
+            out_lines.append("")
+            out_lines.append("**Slot Decomposition Analysis:**")
+            out_lines.append("")
+            out_lines.append("| Slot | Assertion Extracted from Claim | Evaluation |")
+            out_lines.append("| :--- | :--- | :--- |")
+            for slot_name in ("finding", "scope", "strength"):
+                sdata = slots.get(slot_name) or {}
+                if isinstance(sdata, dict):
+                    asrt = sdata.get("assertion", "—")
+                    v = sdata.get("verdict", "—")
+                else:
+                    asrt = "—"
+                    v = str(sdata or "—")
+                out_lines.append(f"| **`{slot_name}`** | {asrt} | `{v}` |")
+
+        if item.get("supporting_span"):
+            out_lines.append("")
+            out_lines.append(f"- **Verbatim Evidence from Cited Paper:**  \n  > \"{item['supporting_span']}\"")
+        elif item.get("evidence"):
+            out_lines.append("")
+            out_lines.append(f"- **Evidence Passages Considered:**  \n  > \"{item['evidence'][:350].strip()}...\"")
+
+        out_lines.append("")
+        if item.get("reason"):
+            out_lines.append(f"- **Assessment:** {item['reason']}")
+        out_lines.append(f"- **Why this verdict?** {explain_rubric_verdict(item)}")
+        out_lines.append("")
+        out_lines.append("---")
+        out_lines.append("")
+        return "\n".join(out_lines)
+
+    if needs_review:
+        lines.append(f"## 3. Citations Needing Review ({len(needs_review)})\n")
+        for i, item in enumerate(needs_review, 1):
+            lines.append(_format_entry(item, i))
+
+    if supported:
+        lines.append(f"## 4. Supported Citations ({len(supported)})\n")
+        for i, item in enumerate(supported, len(needs_review) + 1):
+            lines.append(_format_entry(item, i))
+
+    if paywalled:
+        lines.append(f"## 5. Paywalled or Unavailable Citations ({len(paywalled)})\n")
+        for i, item in enumerate(paywalled, len(needs_review) + len(supported) + 1):
+            lines.append(_format_entry(item, i))
+
+    if other:
+        lines.append(f"## 6. Other Citations ({len(other)})\n")
+        for i, item in enumerate(other, len(needs_review) + len(supported) + len(paywalled) + 1):
+            lines.append(_format_entry(item, i))
+
+    return "\n".join(lines)
