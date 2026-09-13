@@ -19,6 +19,8 @@ from research_assistant.agents.agent8_verifier import (
     assemble_evidence,
     needs_escalation,
 )
+from research_assistant.judgement.policy import evaluate_reliability
+from research_assistant.judgement.source_assessor import assess_source
 from research_assistant.config import (
     DOWNLOADED_JSON_PATH,
     JUDGEMENT_ESCALATE_TOP_K,
@@ -603,6 +605,23 @@ def audit_seed_citations(
 
     all_results = claims_to_judge + downloaded_claims[max_claims:] + undownloaded_claims + deferred_claims
 
+    for r in all_results:
+        source_eval = assess_source(metadata=r.get("metadata") or {}, ref_info=r.get("ref"))
+        r["source_grade"] = source_eval["grade"]
+        r["source_assessment"] = source_eval
+        rel_eval = evaluate_reliability(
+            relation=r.get("judgement", "Unclear / insufficient evidence"),
+            source_grade=source_eval["grade"],
+            confidence=r.get("confidence", "Medium"),
+            span_verified=r.get("span_verified"),
+            rubric_violations=r.get("rubric_violations"),
+            rubric_mismatch=r.get("rubric_mismatch", False),
+        )
+        r["reliability"] = rel_eval["rating"]
+        r["reliability_badge"] = rel_eval["badge"]
+        r["reliability_label"] = rel_eval["rating_label"]
+        r["reliability_explanation"] = rel_eval["explanation"]
+
     totals = {
         "total": len(all_results),
         "downloaded": len(downloaded_claims),
@@ -620,6 +639,13 @@ def audit_seed_citations(
         ),
         "not_downloaded": sum(1 for r in all_results if r.get("outcome") == "not_downloaded"),
         "deferred_paywalled": sum(1 for r in all_results if r.get("outcome") == "deferred_paywalled"),
+        "reliability": {
+            "high": sum(1 for r in all_results if r.get("reliability") == "HIGH"),
+            "moderate": sum(1 for r in all_results if r.get("reliability") == "MODERATE"),
+            "low": sum(1 for r in all_results if r.get("reliability") == "LOW"),
+            "contradicted": sum(1 for r in all_results if r.get("reliability") == "CONTRADICTED"),
+            "unresolved": sum(1 for r in all_results if r.get("reliability") == "UNRESOLVED"),
+        },
     }
 
     report = {
@@ -926,6 +952,16 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| ⏳ **Deferred (Pending Evidence)** | **{totals.get('deferred_paywalled', 0)}** | {pct(totals.get('deferred_paywalled', 0))} | Paragraph >50% paywalled; evaluation deferred |",
         f"| 🔒 **Paywalled / Unchecked** | **{totals.get('not_downloaded', 0)}** | {pct(totals.get('not_downloaded', 0))} | Non-OA reference; unavailable |",
         "",
+        "### Scientific Evidence Reliability Rating",
+        "",
+        "| Reliability Tier | Count | Percentage | Standard & Policy |",
+        "| :--- | :--- | :--- | :--- |",
+        f"| 🟢 **High Reliability** | **{totals.get('reliability', {}).get('high', 0)}** | {pct(totals.get('reliability', {}).get('high', 0))} | Peer-reviewed primary research with verified verbatim evidence span |",
+        f"| 🟡 **Moderate Reliability** | **{totals.get('reliability', {}).get('moderate', 0)}** | {pct(totals.get('reliability', {}).get('moderate', 0))} | Supported by unreviewed preprints, secondary surveys, or hedged findings |",
+        f"| 🟠 **Low / Flagged** | **{totals.get('reliability', {}).get('low', 0)}** | {pct(totals.get('reliability', {}).get('low', 0))} | Unverified spans, retracted/flawed sources, or rubric violations |",
+        f"| 🔴 **Contradicted** | **{totals.get('reliability', {}).get('contradicted', 0)}** | {pct(totals.get('reliability', {}).get('contradicted', 0))} | Cited peer-reviewed literature directly refutes the claim |",
+        f"| ⏳ **Unresolved / Pending** | **{totals.get('reliability', {}).get('unresolved', 0)}** | {pct(totals.get('reliability', {}).get('unresolved', 0))} | Unretrieved, paywalled, or insufficient evidence |",
+        "",
         "---",
         "",
         "## 2. Verification Rubric & Methodology",
@@ -1016,17 +1052,35 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         else:
             badge = badge_map.get(judgement, "⚪ Unclear / Insufficient Evidence")
 
+        rel_line = (
+            f"- **Scientific Reliability:** `{item.get('reliability_badge', '⚪ Unresolved')}` — *{item.get('reliability_explanation', '')}*"
+            if item.get("reliability_badge")
+            else None
+        )
+        source_ass = item.get("source_assessment") or {}
+        src_line = (
+            f"- **Source Quality:** `{source_ass.get('badge', '❓ Unknown')}` ({source_ass.get('grade_label', '')}) · *{source_ass.get('rationale', '')}*"
+            if source_ass.get("badge")
+            else None
+        )
+
         out_lines = [
             f"### Citation {index}: {ref_num} {ref_title}{ref_year}",
             "",
             f"- **Verdict:** `{badge}` · **Confidence:** `{confidence}` · **Evidence Sufficiency:** `{sufficiency}`",
+        ]
+        if rel_line:
+            out_lines.append(rel_line)
+        if src_line:
+            out_lines.append(src_line)
+        out_lines.extend([
             f"- **Statement in Paper:**  \n  > \"{item.get('sentence') or item.get('claim', '')}\"",
             (
                 f"- **Cited Reference:** {ref_authors}{ref_year}. *{ref_title}*. DOI: [`{doi}`]({doi_str})"
                 if doi
                 else f"- **Cited Reference:** {ref_authors}{ref_year}. *{ref_title}*"
             ),
-        ]
+        ])
 
         slots = item.get("slots")
         if slots and isinstance(slots, dict):

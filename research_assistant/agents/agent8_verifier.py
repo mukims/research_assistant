@@ -43,6 +43,8 @@ from research_assistant.judgement.judge import (
     JudgementParseError,
     judge,
 )
+from research_assistant.judgement.policy import evaluate_reliability
+from research_assistant.judgement.source_assessor import assess_source
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
@@ -354,6 +356,23 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
         results.append(entry)
 
+    for entry in results:
+        source_eval = assess_source({"venue": entry.get("citation_source")})
+        entry["source_grade"] = source_eval["grade"]
+        entry["source_assessment"] = source_eval
+        rel_eval = evaluate_reliability(
+            relation=entry.get("judgement", "Unclear / insufficient evidence"),
+            source_grade=source_eval["grade"],
+            confidence=entry.get("confidence", "Medium"),
+            span_verified=entry.get("span_verified"),
+            rubric_violations=entry.get("rubric_violations"),
+            rubric_mismatch=entry.get("rubric_mismatch", False),
+        )
+        entry["reliability"] = rel_eval["rating"]
+        entry["reliability_badge"] = rel_eval["badge"]
+        entry["reliability_label"] = rel_eval["rating_label"]
+        entry["reliability_explanation"] = rel_eval["explanation"]
+
     report = {
         "draft": os.path.abspath(draft_path),
         "citations": os.path.abspath(citations_path),
@@ -395,11 +414,19 @@ def _totals(results) -> dict:
                 totals["rubric_mismatch"] += 1
             if entry.get("span_verified") is False:
                 totals["span_unverified"] += 1
+    totals["reliability"] = {
+        "high": sum(1 for r in results if r.get("reliability") == "HIGH"),
+        "moderate": sum(1 for r in results if r.get("reliability") == "MODERATE"),
+        "low": sum(1 for r in results if r.get("reliability") == "LOW"),
+        "contradicted": sum(1 for r in results if r.get("reliability") == "CONTRADICTED"),
+        "unresolved": sum(1 for r in results if r.get("reliability") == "UNRESOLVED"),
+    }
     return totals
 
 
 def _write_markdown(path, report) -> None:
     totals = report["totals"]
+    rel = totals.get("reliability") or {}
     lines = [
         f"# Verification Report — `{os.path.basename(report['draft'])}`",
         f"*Generated {report['generated']} · model `{report['model']}`*\n",
@@ -419,6 +446,15 @@ def _write_markdown(path, report) -> None:
         f"| Retrieval failed | {totals['retrieval_failed']} |",
         f"| Unusable model reply | {totals['parse_failed']} |",
         f"| Model call failed | {totals['call_failed']} |",
+        "",
+        "### Scientific Evidence Reliability\n",
+        "| Reliability Tier | Count | Policy Standard |",
+        "|------------------|-------|-----------------|",
+        f"| 🟢 **High Reliability** | {rel.get('high', 0)} | Peer-reviewed primary research with verified verbatim evidence span |",
+        f"| 🟡 **Moderate Reliability** | {rel.get('moderate', 0)} | Supported by preprints, secondary reviews, or qualified claims |",
+        f"| 🟠 **Low / Flagged** | {rel.get('low', 0)} | Unverified spans, retracted/flawed sources, or rubric violations |",
+        f"| 🔴 **Contradicted** | {rel.get('contradicted', 0)} | Directly refuted by cited literature under comparable conditions |",
+        f"| ⏳ **Unresolved / Pending** | {rel.get('unresolved', 0)} | Missing, paywalled, or insufficient evidence |",
         "",
         "---\n",
     ]
@@ -498,6 +534,11 @@ def _entry_block(entry) -> list:
         f"**Confidence:** {entry['confidence']} · "
         f"**Evidence sufficiency:** {entry['evidence_sufficiency']}\n",
     ]
+    if entry.get("reliability_badge"):
+        block.append(f"🛡️ **Scientific Reliability:** `{entry['reliability_badge']}` — {entry.get('reliability_explanation', '')}\n")
+    if entry.get("source_assessment", {}).get("badge"):
+        src = entry["source_assessment"]
+        block.append(f"🏛️ **Source Quality:** `{src['badge']}` ({src.get('grade_label', '')}) · *{src.get('rationale', '')}*\n")
     if entry.get("escalated"):
         block.append(f"↻ **Escalated:** first verdict {entry['first_judgement']} "
                      f"(sufficiency {entry['first_sufficiency']}) on the top hit; "

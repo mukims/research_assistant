@@ -266,6 +266,11 @@ class TestSeedAudit(unittest.TestCase):
         self.assertEqual(report["totals"]["Supports"], 1)
         self.assertEqual(report["totals"]["deferred_paywalled"], 1)
         self.assertEqual(report["totals"]["not_downloaded"], 0)
+        self.assertIn("reliability", report["totals"])
+        self.assertEqual(report["totals"]["reliability"]["high"], 1)
+        self.assertEqual(report["totals"]["reliability"]["unresolved"], 1)
+        self.assertEqual(report["results"][0]["reliability"], "HIGH")
+        self.assertIn("🟢", report["results"][0]["reliability_badge"])
 
         # Cleanup
         os.unlink(tei_file)

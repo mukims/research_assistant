@@ -560,6 +560,16 @@ def _render_seed_citation_audit(final):
         cols[4].metric("Deferred (Pending) ⏳", totals.get("deferred_paywalled", 0))
         cols[5].metric("Paywalled / Unchecked ⚪", totals.get("not_downloaded", 0))
 
+        rel_totals = totals.get("reliability") or {}
+        if rel_totals:
+            st.caption("🛡️ **Scientific Evidence Reliability Assessment:**")
+            rcols = st.columns(5)
+            rcols[0].metric("High Reliability 🟢", rel_totals.get("high", 0), help="Peer-reviewed primary literature with verified verbatim evidence span")
+            rcols[1].metric("Moderate 🟡", rel_totals.get("moderate", 0), help="Preprints, secondary reviews, or qualified claims")
+            rcols[2].metric("Low / Flagged 🟠", rel_totals.get("low", 0), help="Unverified spans, retracted sources, or rubric violations")
+            rcols[3].metric("Contradicted 🔴", rel_totals.get("contradicted", 0), help="Direct conflict with primary experimental/theoretical findings")
+            rcols[4].metric("Unresolved ⏳", rel_totals.get("unresolved", 0), help="Insufficient evidence or paywalled sources")
+
         # Filter tabs
         supp_count = totals.get("Supports", 0) + totals.get("Partially supports", 0)
         rev_count = needs_rev + totals.get("Unclear / insufficient evidence", 0)
@@ -635,6 +645,15 @@ def _render_seed_citation_audit(final):
                         f"**Verdict:** `{judgement}` · **Confidence:** `{item.get('confidence', 'Medium')}` · "
                         f"**Evidence Sufficiency:** `{item.get('evidence_sufficiency', 'sufficient')}`"
                     )
+                    if item.get("reliability_badge"):
+                        st.markdown(
+                            f"**🛡️ Scientific Reliability:** `{item['reliability_badge']}` — *{item.get('reliability_explanation', '')}*"
+                        )
+                    source_ass = item.get("source_assessment") or {}
+                    if source_ass.get("badge"):
+                        st.markdown(
+                            f"**🏛️ Source Quality:** `{source_ass.get('badge')}` ({source_ass.get('grade_label', '')}) · *{source_ass.get('rationale', '')}*"
+                        )
 
                     # Slot decomposition table
                     slots = item.get("slots") or {}
