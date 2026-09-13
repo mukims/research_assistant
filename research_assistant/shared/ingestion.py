@@ -63,6 +63,7 @@ from research_assistant.config import (
     SEMANTIC_CHUNKER_TYPE,
     SEMANTIC_CHUNKER_AMOUNT,
     SUMMARY_MODEL,
+    LLM_MODEL,
     SUMMARY_MAX_CHARS,
 )
 from research_assistant.prompts import FIGURE_DESCRIPTION, DOCUMENT_SUMMARY
@@ -566,7 +567,7 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
     made = 0
     to_summarize = [doc for doc, text in per_doc_text.items() if doc not in have and text.strip()]
     total_to_sum = len(to_summarize)
-    model_name = SUMMARY_MODEL or "Qwen2.5"
+    model_name = SUMMARY_MODEL or LLM_MODEL
     if total_to_sum:
         pipeline_status.add_event(f"📝 Generating summaries for {total_to_sum} paper(s) with {model_name}…")
 
