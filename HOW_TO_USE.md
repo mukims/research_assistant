@@ -12,17 +12,17 @@ This system builds and searches an evidence-grounded academic literature corpus,
 ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                       📚 Citation Needed!                                              │
 │                                                                                                        │
-│  [Tab 1: Research a topic]   [Tab 2: Cite a draft]   [Tab 3: Cite a whole draft]   [Tab 4: Chat]   [Tab 5]   │
-│  Mine literature, fetch      Suggest & ground one    Batch-cite manuscript &       Interactive     Manual   │
-│  PDFs, audit in-text claims  individual claim        Agent 8 verification audit    studio          & FAQ    │
+│  [Tab 1: Citation auditor]   [Tab 2: Research idea]  [Tab 3: Cite a draft]    [Tab 4: Chat]   [Tab 5]   │
+│  Audit in-text citations     Discover literature &   Batch-cite manuscript &  Interactive     Manual   │
+│  against open-access PDFs    synthesize topic gaps   Agent 8 verification     studio          & FAQ    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Tab | Purpose | Primary Input | Key Deliverables |
 |---|---|---|---|
-| **Tab 1: Research a topic** | Mine literature, download open-access references, audit citations, synthesize review | Single PDF, multiple PDFs, ZIP, or topic query | Indexed corpus, seed paper card, per-paper notes, structured synthesis, in-text citation audit, missing paywall uploaders |
-| **Tab 2: Cite a draft** | Suggest and attribute citations for an individual claim | Single scientific statement | Formatted LaTeX `\cite{...}`, source metadata, support rationale, verbatim evidence passages |
-| **Tab 3: Cite a whole draft** | Batch-cite and rigorously audit an entire academic manuscript | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
+| **Tab 1: Citation auditor** | Upload a published paper, fetch open-access references, and audit whether citations support the claims | Single PDF, multiple PDFs, or ZIP archive | In-text citation audit, 5 metric tiles, missing paywall upload cards, per-claim evidence viewer, synthesis across collection |
+| **Tab 2: Research idea** | Discover literature from an idea, download open-access papers, and synthesize established findings & gaps | Topic query or arXiv/PDF link | Discovered seed paper, per-paper reading notes, structured 3-part synthesis, key evidence passages |
+| **Tab 3: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
 | **Tab 4: Research chat** | Conversational research studio grounded in your local library | Plain-English research questions | Token-by-token streaming answers, 5 analytical lenses, keyed sources `[S#]`, clickable follow-up chips, persistent scratchpad |
 | **Tab 5: How to use** | Interactive documentation, architecture guide, and FAQ | None | This user guide rendered live inside the application |
 
@@ -39,7 +39,7 @@ The left sidebar provides persistent visibility and control over background oper
 - **Live Event Log**: Expandable rolling log showing the last 15 system events (e.g. `✅ Downloaded 14 reference PDFs`, `✓ Ingested 18 papers into index v2`).
 
 ### 2. Cooperative Pipeline Cancellation
-- **"🛑 Stop pipeline" Button**: Appears in the sidebar and in Tab 1 whenever a background job is running.
+- **"🛑 Stop pipeline" Button**: Appears in the sidebar and at the top of active tabs whenever a background job is running.
 - **Safe Item-Boundary Abort**: Cancellation is checked between discrete items (between individual PDF downloads, PDF parsings, summary calls, and graph nodes). It **never** aborts mid-write or inside an in-flight LLM call, ensuring ChromaDB and BM25 index files are never corrupted.
 
 ### 3. Corpus & System Metrics
@@ -53,30 +53,21 @@ The left sidebar provides persistent visibility and control over background oper
 
 ---
 
-### Tab 1 — Research a topic (Literature Miner, Synthesizer & Citation Auditor)
+### Tab 1 — Citation auditor (Seed Paper Citation Auditor & Ingestion)
 
-Tab 1 is the core engine for turning ideas or papers into an indexed, verifiable library.
+Tab 1 is the dedicated engine for auditing citations in published research papers and ingesting paper collections into your local library.
 
-#### 1. Choose Your Starting Point
-Select one of the two input modes via the radio selector at the top:
-
-* **Mode A: 📄 Upload research paper(s) (PDF or ZIP)**
-  * **Single PDF Upload (Seed Mode)**:
-    1. Drag and drop a single `.pdf` research paper.
-    2. *(Optional)* Enter a **Research topic / question** to guide the final synthesis (e.g. `mechanical properties of MXene monolayers`). If left blank, the research question is automatically inferred from the paper's title and abstract.
-    3. Configure the 4 execution toggles (see below).
-    4. Click **Process and Index Paper(s)**.
-    5. *What happens:* The system ingests your seed paper, parses its bibliography using GROBID TEI, downloads all open-access references, indexes full text into sentence windows, writes a multi-paper synthesis, and audits the seed paper's own in-text citations.
-  * **Batch Upload (Multiple PDFs or ZIP Archive)**:
-    1. Drag and drop several PDFs or a `.zip` archive containing papers.
-    2. Click **Process and Index Paper(s)**.
-    3. *What happens:* Direct batch ingestion. All papers are parsed, chunked, embedded, and added to the ChromaDB vector database and BM25 index in a single locked pass.
-
-* **Mode B: 🔍 Search for a paper**
-  1. Enter your research topic into **Research idea** (e.g. `low-temperature thermal conductivity in disordered crystalline solids`).
-  2. *(Optional)* Enter a **Seed paper URL** (direct link or arXiv URL) if you want to anchor the search to an exact known paper.
-  3. Configure the toggles and click **Build corpus**.
-  4. *What happens:* Agent 0 searches arXiv, OpenAlex, and Semantic Scholar until a relevant open-access paper is successfully downloaded, then executes the literature mining pipeline.
+#### 1. Input Options
+* **Single PDF Upload (Seed Audit Mode)**:
+  1. Drag and drop a single `.pdf` research manuscript.
+  2. *(Optional)* Enter a **Research topic / question** to guide the final synthesis across the literature (e.g. `mechanical properties of MXene monolayers`). If left blank, the topic is automatically inferred from the paper's title.
+  3. Configure toggles (Audit citations, Synthesize answer, Force re-run, Analyse figures).
+  4. Click **Audit Citations & Index Paper(s)**.
+  5. *What happens:* The system ingests your seed paper, parses its bibliography using GROBID TEI, downloads all open-access references from Unpaywall, Europe PMC, and arXiv, indexes full text into sentence windows, writes a multi-paper synthesis, and executes a full scientific audit of the seed paper's in-text citations.
+* **Batch Upload (Multiple PDFs or ZIP Archive)**:
+  1. Drag and drop several PDFs or a `.zip` archive containing papers.
+  2. Click **Audit Citations & Index Paper(s)**.
+  3. *What happens:* Direct batch ingestion. All papers are parsed, chunked, embedded, and added to the ChromaDB vector database and BM25 index in a single locked pass.
 
 ---
 
@@ -84,45 +75,18 @@ Select one of the two input modes via the radio selector at the top:
 
 | Toggle | Default | What It Does | When to Change |
 |---|---|---|---|
-| **Answer query** | `ON` | Generates a structured Map-Reduce synthesis of the shortlisted papers at the end of the run. | Turn `OFF` if you only want to download and index literature without generating a summary. |
+| **Audit citations** | `ON` | Evaluates every in-text citation in the uploaded seed paper against the full text of the downloaded references using Rubric V1.4. | Turn `OFF` if you only want literature ingestion and synthesis, skipping citation checking. |
+| **Synthesize answer** | `ON` | Generates a structured Map-Reduce synthesis of the shortlisted papers at the end of the run. | Turn `OFF` if you only want to download and index literature without generating a summary. |
 | **Force re-run** | `OFF` | Bypasses cached seed papers and re-fetches all references from scratch. | Turn `ON` if you modified pipeline parameters or want to refresh cached web downloads. |
 | **Analyse figures** | `OFF` | Passes every figure and table crop through the Vision-Language Model (`gemma4:e2b` or Gemini) to generate descriptive text chunks. | Turn `ON` when visual diagrams or charts are vital for synthesis and chat. *(Note: Adds ~30–60s per figure on CPU).* |
-| **Audit citations** | `ON` | Evaluates every in-text citation in the uploaded seed paper against the full text of the downloaded references using Rubric V1.4. | Turn `OFF` if you only want literature ingestion and synthesis, skipping citation checking. |
 
 ---
 
-#### 3. Understanding Tab 1 Outputs
+#### 3. Understanding Tab 1 Audit Outputs
 
 Once execution finishes, Tab 1 displays the following sections:
 
-##### A. Seed Paper Card
-Displays full bibliographic metadata extracted by GROBID: Title, Authors, Year, Publication Venue, DOI (with direct clickable link), and Extraction Engine (`grobid` or `pymupdf`).
-
-##### B. References Fetched & Unavailable Expanders
-- **References Fetched**: Lists all reference papers that were resolved and downloaded into your library.
-- **References Unavailable**: Lists references that could not be downloaded (paywalled publishers, proprietary journals, or broken URLs), with author, title, and DOI links.
-
-##### C. Per-Paper Notes
-Before synthesis, the system reads each shortlisted paper independently and extracts structured notes under unique keys (`[P1]`, `[P2]`, ...):
-- **What it establishes**: Core findings backed by evidence.
-- **Method / System**: Experimental or theoretical setup, sample conditions, materials.
-- **Limits / Caveats**: Stated constraints, assumptions, or gaps.
-
-##### D. Related-Work Synthesis
-A structured, grounded synthesis written across the shortlisted papers organized under three mandatory headings:
-1. **What is established**: Consensus findings confirmed across multiple papers.
-2. **Where the papers differ**: Competing hypotheses, contradictory observations, or divergent experimental conditions.
-3. **The gap**: What remains unaddressed in the current literature.
-- *Citation Verification*: Every citation in the synthesis is verified against the shortlist. If the model cites an unverified key or a paper marked irrelevant, an explicit alert is displayed.
-- *Download*: Click **📥 Download Synthesis (.md)** to save the markdown report.
-
----
-
-##### E. Seed In-Text Citation Audit & Direct Paywall Upload Workflow
-
-If **Audit citations** was toggled ON for an uploaded paper, the system parses every sentence containing an in-text citation marker (`[1]`, `[Smith et al., 2020]`), maps it to the bibliography, and checks whether the cited reference actually supports the claim.
-
-###### The 5 Metric Tiles
+##### A. The 5 Metric Tiles
 ```
 ┌─────────────────┬─────────────────┬───────────────────┬──────────────────────┬─────────────────────────┐
 │ Claims Checked  │   Supports 🟢   │   Partially 🟡    │ Need Review 🔴 / 🟠  │  Pending Evidence ⏳    │
@@ -132,56 +96,62 @@ If **Audit citations** was toggled ON for an uploaded paper, the system parses e
 - **Supports 🟢**: The cited text confirms the statement's finding, scope, and strength.
 - **Partially Supports 🟡**: The cited text confirms the core finding, but scope or certainty is overstated.
 - **Need Review 🔴 / 🟠**: The cited text contradicts the assertion (`Contradicts 🔴`) or fails to address it (`Does Not Support 🟠`).
-- **Pending Evidence (Deferred) ⏳**: Statements whose evaluation was deferred because more than 50% of the cited references are paywalled/missing.
+- **Pending Evidence (Deferred) ⏳**: Statements whose evaluation was deferred because more than 50% of the cited references in that paragraph are paywalled/missing.
 
-###### ⏳ The Paywall Deferral & Direct Upload Workflow
-In scientific papers, complex claims often cite multiple references in a single paragraph (e.g., `...as demonstrated previously [12, 14, 15]`). If references `[14]` and `[15]` are paywalled, judging the sentence against `[12]` alone produces false contradiction or unsupported verdicts.
+##### B. Filter Tabs & Claim Expanders
+- **Supported Tab**: Every verified claim with its verbatim quote from the cited paper.
+- **Need Review Tab**: Every contradicted or unsupported claim with slot-by-slot breakdown and explanation.
+- **⏳ Pending Evidence (Deferred) Tab**:
+  - Missing paper cards with direct DOI links.
+  - Inline drag-and-drop PDF uploaders to supply institutional copies.
+  - **⚡ Re-run Audit with Uploaded Papers** button to re-evaluate without restarting from scratch.
+- **All Citations Tab**: Complete registry of all in-text citations found.
 
-**How Citation Needed! handles this:**
-1. **The >50% Paywall Threshold**: If more than 50% of the references cited in a paragraph are missing from the corpus, claim evaluation is **automatically deferred** rather than judged prematurely.
-2. **Actionable Missing Paper Cards**: In the **⏳ Pending Evidence (Deferred)** tab, the assistant displays each missing reference with:
-   - Paper title, authors, year, and direct clickable DOI link.
-   - Expandable **Dependent Statement(s)** showing the exact sentences in the seed paper that rely on this missing work.
-3. **Direct Drag-and-Drop Uploader**: Each missing paper card includes an inline file uploader:
-   - Drag and drop the missing PDF from your personal institutional access or local folder.
-   - The file is saved directly to `data/pulled_pdfs/` under its canonical key and registered in `downloaded.json`.
-4. **Instant Re-Audit Button**: Click **⚡ Re-run Audit with Uploaded Papers** at the top of the tab:
-   - The uploaded paper is immediately indexed into ChromaDB and BM25.
-   - The deferred claims are evaluated against the new evidence without re-running the entire seed pipeline!
-5. **Download Reports**: Download the complete audit report as Markdown (`.md`) or raw structured data (`.json`).
+##### C. Reports & Downloads
+- Click **📥 Download Audit Report (.md)** for a formatted markdown report.
+- Click **📥 Download Audit Data (.json)** for raw JSON data.
 
 ---
 
-### Tab 2 — Cite a draft (Single-Sentence Verification)
+### Tab 2 — Research idea (Literature Discovery & Synthesis)
 
-Use this tab when writing or editing an individual paragraph and you need to attribute an exact, grounded citation for a factual assertion.
+Use Tab 2 to explore a new research topic or hypothesis from scratch without uploading a PDF.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Your sentence:                                                                         │
-│ [ Transition metal dichalcogenides exhibit strong spin-orbit coupling at the K-valleys.]│
+│ Research idea:                                                                         │
+│ [ topological protection in disordered quantum wires                                  ]│
 │                                                                                        │
-│ Passages to retrieve: [====●=========] 5                                               │
-│ [ Suggest a citation ]                                                                 │
+│ Seed paper URL (optional):                                                             │
+│ [ https://arxiv.org/abs/2401.12345                                                    ]│
+│                                                                                        │
+│ [x] Synthesize answer   [ ] Force re-run   [ ] Analyse figures                         │
+│ [ Explore Research Idea ]                                                              │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 #### Step-by-Step Instructions:
-1. **Ensure your library is populated**: Check the sidebar to verify `Indexed Chunks > 0`.
-2. **Enter your sentence**: Paste a single scientific claim into **Your sentence**.
-3. **Set candidate passages**: Adjust the slider (1 to 10, default: 5) to control how many candidate chunks the hybrid search retrieves.
-4. **Click Suggest a citation**:
-   - **Agent 4** performs hybrid BM25 + dense retrieval with Reciprocal Rank Fusion (`k=60`).
-   - Evaluates whether the top retrieved passage supports the claim.
-5. **Outputs Provided**:
-   - **Suggested sentence**: Your sentence reformatted with the appropriate LaTeX `\cite{paper_key}` insertion.
-   - **Source Attribution**: Full title, authors, year, publication venue, and DOI of the matched paper.
-   - **Support Rationale**: Plain-English explanation detailing exactly how the source text supports the assertion.
-   - **Retrieved Passages**: Expandable excerpt showing the verbatim paragraph from the source paper and its retrieval similarity score.
+1. **Enter your topic**: Type your research question or idea into **Research idea**.
+2. *(Optional)* **Anchor with a Seed URL**: Paste a direct arXiv or PDF link if you want the search anchored to a specific landmark paper.
+3. **Configure Toggles**: Turn on **Synthesize answer** to get a structured literature review.
+4. **Click "Explore Research Idea"**:
+   - **Agent 0** searches arXiv, OpenAlex, and Semantic Scholar for candidate literature and downloads the seed paper.
+   - **Agents 1 & 2** extract the seed's references and fetch open-access connected literature.
+   - **Agent 3** chunks, embeds, and indexes all papers into ChromaDB and the BM25 keyword index.
+   - **Synthesis Engine** reads shortlisted papers and formulates a structured 3-part related-work synthesis.
+
+#### Tab 2 Deliverables:
+- **Seed & Downloads Card**: Lists the anchor paper and all successfully downloaded literature with DOIs.
+- **Per-Paper Notes**: What each shortlisted paper establishes, its experimental/theoretical methods, and its caveats.
+- **Related-Work Synthesis**:
+  1. *What is established*: Consensus findings across papers.
+  2. *Where the papers differ*: Competing hypotheses, contradictory observations, or divergent conditions.
+  3. *The gap*: Unaddressed questions and future research directions.
+- **Evidence Passages**: Verbatim excerpts from the literature with cosine similarity scores.
 
 ---
 
-### Tab 3 — Cite a whole draft (Batch Citer & Agent 8 Verifier)
+### Tab 3 — Cite a draft (Batch Manuscript Citer & Agent 8 Verifier)
 
 Use Tab 3 to take an un-cited or draft manuscript and execute a two-stage attribution and verification workflow.
 

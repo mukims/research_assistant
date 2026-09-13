@@ -20,6 +20,7 @@ import streamlit as st
 from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.shared import pipeline_status
+from research_assistant.shared.atomic import atomic_write_json
 
 st.set_page_config(page_title="Citation Needed! · Marvin the Citebot", page_icon="📚", layout="wide")
 os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -1036,14 +1037,14 @@ st.caption(
     "Or hand it a sentence and it finds the citation."
 )
 
-tab_build, tab_cite, tab_batch, tab_chat, tab_help = st.tabs(
-    ["Research a topic", "Cite a draft", "Cite a whole draft", "Research chat",
+tab_audit, tab_idea, tab_draft, tab_chat, tab_help = st.tabs(
+    ["Citation auditor", "Research idea", "Cite a draft", "Research chat",
      "How to use"]
 )
 
 
 @st.fragment(run_every="3s")
-def _render_tab1_live_status():
+def _render_live_pipeline_status(key_suffix="tab1"):
     try:
         active_status = pipeline_status.get_status()
         if active_status.get("active", False) or _is_ingest_locked():
@@ -1052,8 +1053,8 @@ def _render_tab1_live_status():
                 with col_title:
                     st.markdown("#### ⚡ Pipeline Active on Server")
                 with col_stop:
-                    if st.button("⏹️ Stop Pipeline", key="tab1_stop_pipeline_btn", type="secondary", use_container_width=True, help="Immediately halt the active pipeline safely"):
-                        pipeline_status.request_cancel("User stopped pipeline via Tab 1")
+                    if st.button("⏹️ Stop Pipeline", key=f"stop_pipeline_btn_{key_suffix}", type="secondary", use_container_width=True, help="Immediately halt the active pipeline safely"):
+                        pipeline_status.request_cancel(f"User stopped pipeline via {key_suffix}")
                         st.rerun()
                 st_stage = active_status.get("stage_label") or "Indexing papers"
                 try:
@@ -1090,162 +1091,297 @@ def _render_tab1_live_status():
         pass
 
 
-# ─── Tab 1: build a corpus ─────────────────────────────────────────────────
+_render_tab1_live_status = _render_live_pipeline_status
 
-with tab_build:
-    _render_tab1_live_status()
 
-    source_type = st.radio(
-        "Start pipeline from",
-        ["📄 Upload research paper(s) (PDF or ZIP)", "🔍 Search for a paper"],
-        horizontal=True,
+def _run_pipeline_job(
+    query: str,
+    seed_url_val: str | None = None,
+    seed_file_path: str | None = None,
+    ask: bool = True,
+    force: bool = False,
+    describe_figures: bool = False,
+    audit_citations: bool = True,
+) -> dict:
+    graph = _graph()
+    thread_seed = query or (os.path.basename(seed_file_path) if seed_file_path else "run")
+    cfg = {"configurable": {"thread_id": hashlib.sha1(thread_seed.encode()).hexdigest()[:16]}}
+    inputs = {
+        "query": query,
+        "workers": 1,
+        "force": force,
+        "ask": ask,
+        "seed_url": seed_url_val,
+        "seed_file": seed_file_path,
+        "describe_figures": describe_figures,
+        "audit_citations": audit_citations,
+    }
+
+    live = st.empty()
+    final = {}
+
+    with st.status("Running the pipeline…", expanded=True) as status:
+        prog_bar = st.progress(0.0, text="Starting pipeline…")
+        stage_ranges = {
+            "discover": (0.0, 0.2),
+            "ingest_seed": (0.2, 0.4),
+            "extract": (0.4, 0.6),
+            "fetch": (0.6, 0.8),
+            "ingest_refs": (0.8, 0.95),
+            "respond": (0.95, 1.0),
+            "fallback": (0.95, 1.0),
+        }
+
+        def _on_pipeline_progress(st_data):
+            try:
+                st_stage = st_data.get("stage", "discover")
+                p_low, p_high = stage_ranges.get(st_stage, (0.0, 0.2))
+                try:
+                    ic = int(st_data.get("item_current") or 0)
+                    it = int(st_data.get("item_total") or 0)
+                    cs = int(st_data.get("current_step") or 1)
+                    ts = int(st_data.get("total_steps") or 5)
+                except (ValueError, TypeError):
+                    ic, it, cs, ts = 0, 0, 1, 5
+                lbl = st_data.get("stage_label") or st_stage
+                if it > 0:
+                    frac = min(1.0, max(0.0, ic / it))
+                    val = p_low + (p_high - p_low) * frac
+                    txt = f"Step {cs}/{ts}: {lbl} — {ic}/{it} papers ({int(frac * 100)}%)"
+                else:
+                    val = p_low + (p_high - p_low) * 0.25
+                    txt = f"Step {cs}/{ts}: {lbl}"
+                detail = st_data.get("detail")
+                if detail:
+                    txt += f" · {detail[:40]}"
+                prog_bar.progress(min(0.98, max(0.0, val)), text=txt)
+                curr_item = st_data.get("current_item_name")
+                if curr_item:
+                    status.update(label=f"Pipeline: {lbl} — {curr_item[:40]}")
+            except Exception:
+                pass
+
+        unreg_pipeline = pipeline_status.register_progress_callback(_on_pipeline_progress)
+
+        node_weights = {
+            "discover": (1, 0.2),
+            "ingest_seed": (2, 0.4),
+            "extract": (3, 0.6),
+            "fetch": (4, 0.8),
+            "ingest_refs": (5, 0.95),
+            "respond": (5, 1.0),
+            "fallback": (5, 1.0),
+        }
+        display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
+        pipeline_status.set_status(
+            active=True,
+            stage="discover",
+            stage_label="Finding seed paper",
+            current_step=1,
+            total_steps=5,
+            detail=f"Starting pipeline for: {display_q[:50]}",
+        )
+        pipeline_status.add_event(f"🚀 Pipeline started for: {display_q[:40]}")
+        try:
+            for update in graph.stream(inputs, cfg, stream_mode="updates"):
+                if pipeline_status.is_cancel_requested():
+                    break
+                for node, payload in update.items():
+                    icon, label = STEPS.get(node, ("•", node))
+                    st.write(f"{icon} {label}")
+                    step_num, progress_val = node_weights.get(node, (1, 0.2))
+                    prog_bar.progress(progress_val, text=f"Step {step_num}/5: {label}")
+                    final.update(payload or {})
+                    if node in ("discover", "ingest_seed", "extract", "fetch", "ingest_refs"):
+                        with live.container():
+                            effective_display_q = final.get("query") or query
+                            _render_seed_and_downloads(effective_display_q, final)
+                    if payload and payload.get("stopped"):
+                        break
+                if pipeline_status.is_cancel_requested():
+                    break
+            if pipeline_status.is_cancel_requested():
+                status.update(label="Pipeline stopped by user", state="error")
+                st.warning("Pipeline execution stopped by user.", icon="⏹️")
+            else:
+                final = graph.get_state(cfg).values
+                prog_bar.progress(1.0, text="Pipeline complete!")
+                if final.get("stopped"):
+                    status.update(label="Stopped early", state="error")
+                    pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail=f"Stopped: {final['stopped'][:60]}",
+                    )
+                else:
+                    status.update(label="Done", state="complete")
+                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
+                    pipeline_status.set_status(
+                        active=False,
+                        stage="idle",
+                        stage_label="Idle",
+                        detail="Pipeline complete",
+                        last_completed_at=now_iso,
+                        last_summary=f"Completed {display_q[:40]}",
+                    )
+        except BaseException as e:  # noqa: BLE001
+            if pipeline_status.is_cancellation(e):
+                try:
+                    status.update(label="Pipeline cancelled", state="error")
+                except Exception:
+                    pass
+                pipeline_status.add_event("⚠️ Pipeline cancelled (session reloaded or stopped)")
+                pipeline_status.set_status(
+                    active=False,
+                    stage="idle",
+                    stage_label="Idle",
+                    detail="Pipeline cancelled",
+                )
+                raise
+            else:
+                try:
+                    status.update(label="Pipeline failed", state="error")
+                except Exception:
+                    pass
+                detail_str = pipeline_status.format_exception_detail(e)
+                pipeline_status.add_event(f"❌ Pipeline failed: {detail_str}")
+                pipeline_status.set_status(
+                    active=False,
+                    stage="idle",
+                    stage_label="Idle",
+                    detail=f"Pipeline failed: {detail_str}",
+                )
+                if isinstance(e, Exception):
+                    st.exception(e)
+                else:
+                    raise
+        finally:
+            unreg_pipeline()
+            if seed_file_path:
+                try:
+                    raw_dir_abs = os.path.abspath(config.RAW_DIR)
+                    seed_abs = os.path.abspath(seed_file_path)
+                    if not (seed_abs == raw_dir_abs or seed_abs.startswith(raw_dir_abs + os.sep)):
+                        if os.path.exists(seed_file_path):
+                            os.unlink(seed_file_path)
+                except OSError:
+                    pass
+    live.empty()
+    return final
+
+
+# ─── Tab 1: citation auditor ───────────────────────────────────────────────
+
+with tab_audit:
+    _render_live_pipeline_status("tab_audit")
+
+    st.subheader("📄 Seed Paper Citation Auditor")
+    st.caption(
+        "Upload a research manuscript (PDF or ZIP). The pipeline parses in-text citations with GROBID, "
+        "retrieves open-access references from Unpaywall, Europe PMC, and arXiv, and audits each citation "
+        "against the source text using Rubric V1.4."
     )
 
-    seed_file_path = None
-    seed_url_val = None
-    q = ""
-    submitted = False
-    ask = True
-    force = False
-    describe_figures = config.FIGURE_VLM
+    with st.form("upload_papers_form"):
+        uploaded_files = st.file_uploader(
+            "Select research paper(s) (.pdf or .zip)",
+            type=["pdf", "zip"],
+            accept_multiple_files=True,
+            help="Upload one or multiple PDF papers, or a .zip archive. If 1 paper is uploaded, its in-text citations are audited; if multiple papers are uploaded, all are directly indexed into the corpus.",
+        )
+        pdf_query = st.text_input(
+            "Research topic / question (optional)",
+            placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
+            help="If provided, used to synthesize an answer across the papers at the end.",
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        audit_citations = c1.toggle(
+            "Audit citations",
+            value=True,
+            help="Audit in-text citations in uploaded paper against fetched references using Gemma 4 / Gemini.",
+        )
+        ask = c2.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis.")
+        force = c3.toggle("Force re-run", value=False)
+        describe_figures = c4.toggle(
+            "Analyse figures",
+            value=config.FIGURE_VLM,
+            help="Describe figures and tables with VLM during ingestion. Adds ~1 min per figure on CPU.",
+        )
+        submitted_upload = st.form_submit_button("Audit Citations & Index Paper(s)", type="primary")
 
-    if source_type == "📄 Upload research paper(s) (PDF or ZIP)":
-        with st.form("upload_papers_form"):
-            uploaded_files = st.file_uploader(
-                "Select research paper(s) (.pdf or .zip)",
-                type=["pdf", "zip"],
-                accept_multiple_files=True,
-                help="Upload one or multiple PDF papers, or a .zip archive of papers. If 1 paper is uploaded, its references can be mined; if multiple papers are uploaded, all are directly indexed into the corpus.",
-            )
-            pdf_query = st.text_input(
-                "Research topic / question (optional)",
-                placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
-                help="If provided, used to synthesize an answer across the papers at the end.",
-            )
-            c1, c2, c3, c4 = st.columns(4)
-            ask = c1.toggle("Answer query", value=True)
-            force = c2.toggle("Force re-run", value=False)
-            describe_figures = c3.toggle(
-                "Analyse figures",
-                value=config.FIGURE_VLM,
-                help="One choice for this whole run: every figure and table in every paper "
-                     "is described by the model and the description joins the corpus. "
-                     "Adds roughly a minute per figure on CPU.",
-            )
-            audit_citations = c4.toggle(
-                "Audit citations",
-                value=True,
-                help="Audit in-text citations in uploaded paper against fetched references using Gemma 4.",
-            )
-            submitted = st.form_submit_button("Process and Index Paper(s)", type="primary")
+    if submitted_upload:
+        if not uploaded_files:
+            st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
+        else:
+            from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
 
-        if submitted:
-            if not uploaded_files:
-                if pdf_query.strip():
-                    st.info(
-                        f"💡 **Looking to research *\"{pdf_query.strip()}\"* without uploading a PDF?**\n\n"
-                        "Switch to the **'🔍 Search for a paper'** mode above, enter your topic into **Research idea**, and click **Build corpus** to automatically find and download literature from arXiv, OpenAlex, and Semantic Scholar.",
-                        icon="💡",
-                    )
-                else:
-                    st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
+            staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
+            if not staged:
+                st.error(
+                    "No valid PDF documents found in the uploaded files. Check that files contain valid PDF headers (%PDF-).",
+                    icon="⚠️",
+                )
+            elif len(staged) == 1:
+                seed_file_path = staged[0]["path"]
+                effective_q = pdf_query.strip()
+                final = _run_pipeline_job(
+                    query=effective_q,
+                    seed_url_val=None,
+                    seed_file_path=seed_file_path,
+                    ask=ask,
+                    force=force,
+                    describe_figures=describe_figures,
+                    audit_citations=audit_citations,
+                )
+                effective_final_q = final.get("query") or effective_q or final.get("seed_label", "")
+                st.session_state["audit_result"] = final
+                st.session_state["audit_query"] = effective_final_q
+                st.session_state["build_result"] = final
+                st.session_state["build_query"] = effective_final_q
             else:
-                from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
+                with st.status(f"Batch ingesting {len(staged)} papers into corpus…", expanded=True) as status:
+                    batch_progress = st.progress(0.0, text=f"Preparing to ingest {len(staged)} papers…")
+                    st.write(f"📁 Unpacked {len(staged)} documents.")
+                    candidates = {p["path"]: p.get("title") or os.path.basename(p["path"]) for p in staged}
 
-                staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
-                if not staged:
-                    st.error(
-                        "No valid PDF documents found in the uploaded files. Check that files contain valid PDF headers (%PDF-).",
-                        icon="⚠️",
-                    )
-                elif len(staged) == 1:
-                    # Single PDF: execute full LangGraph pipeline (discover, seed ingest, reference extraction & fetch, synthesis)
-                    seed_file_path = staged[0]["path"]
-                    q = pdf_query.strip()
-                else:
-                    # Multiple PDFs: execute direct batch ingestion of all papers
-                    st.session_state.pop("build_result", None)
-                    st.session_state.pop("build_query", None)
-                    with st.status(f"Ingesting {len(staged)} research papers into corpus…", expanded=True) as status:
-                        batch_progress = st.progress(0.0, text=f"Preparing to ingest {len(staged)} papers…")
-                        candidates = {}
-                        for p in staged:
-                            title_lbl = p.get("title") or p.get("key") or os.path.basename(p["path"])
-                            candidates[p["path"]] = title_lbl
-                            st.write(f"📄 Found: **{title_lbl}** (`{p.get('filename', os.path.basename(p['path']))}`)")
+                    from research_assistant.shared.ingestion import ingest_pdfs
 
-                        batch_progress.progress(0.2, text="Parsing and chunking papers…")
-                        st.write("⚙️ Parsing text chunks, computing embeddings, and building vector index…")
-                        from research_assistant.shared.ingestion import ingest_pdfs
+                    def _on_batch_progress(item_c, item_t, name):
+                        if item_t > 0:
+                            pct = min(1.0, max(0.0, item_c / item_t))
+                            batch_progress.progress(pct, text=f"Parsing paper [{item_c}/{item_t}]: {name[:40]}")
 
-                        def _on_batch_progress(st_data):
-                            try:
-                                try:
-                                    ic = int(st_data.get("item_current") or 0)
-                                    it = int(st_data.get("item_total") or 0)
-                                except (ValueError, TypeError):
-                                    ic, it = 0, 0
-                                if it > 0:
-                                    frac = min(1.0, max(0.0, ic / it))
-                                    p_val = 0.2 + 0.75 * frac
-                                    txt = f"Ingesting: {ic}/{it} papers ({int(frac * 100)}%)"
-                                    if st_data.get("detail"):
-                                        txt += f" · {st_data['detail'][:40]}"
-                                    batch_progress.progress(min(0.98, max(0.0, p_val)), text=txt)
-                            except Exception:
-                                pass
-
-                        unreg_batch = pipeline_status.register_progress_callback(_on_batch_progress)
+                    with pipeline_status.track_stage(
+                        "ingest_refs",
+                        "Batch Paper Ingestion",
+                        current_step=1,
+                        total_steps=1,
+                        item_total=len(candidates),
+                        detail=f"Batch ingesting {len(candidates)} papers",
+                    ):
                         try:
-                            with pipeline_status.track_stage(
-                                "ingest_refs",
-                                f"Ingesting {len(staged)} uploaded papers",
-                                current_step=5,
-                                total_steps=5,
-                                item_total=len(candidates),
-                                mark_idle_on_exit=True,
-                                last_summary=f"+{len(candidates)} uploaded papers indexed",
-                            ):
-                                ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force,
-                                                         describe_figures=describe_figures)
+                            ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force, describe_figures=describe_figures)
                         finally:
-                            unreg_batch()
-                        if pipeline_status.is_cancel_requested():
-                            batch_progress.progress(1.0, text="Ingestion stopped by user.")
-                            status.update(label="Ingestion stopped by user", state="error")
-                            st.warning("Batch ingestion stopped by user.", icon="⏹️")
-                        else:
-                            batch_progress.progress(1.0, text="Ingestion complete!")
-                            if ingest_res.get("described"):
-                                st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
+                            pipeline_status.unregister_progress_callback(_on_batch_progress)
+
+                    if pipeline_status.is_cancel_requested():
+                        status.update(label="Batch ingestion stopped by user", state="error")
+                        st.warning("Batch ingestion stopped by user.", icon="⏹️")
+                    else:
+                        if ingest_res.get("described"):
+                            st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
                         scanned_empty = ingest_res.get("scanned_or_empty", [])
                         inserted = ingest_res.get("inserted", 0)
                         processed = ingest_res.get("processed", len(candidates))
+                        skipped = ingest_res.get("skipped", 0)
+                        st.write(f"✓ Parsed {processed} paper(s), skipped {skipped} duplicates, inserted {inserted} new chunks.")
+                        if scanned_empty:
+                            st.warning(f"⚠️ {len(scanned_empty)} file(s) had no extractable text: {', '.join(scanned_empty[:5])}")
 
-                        if scanned_empty and inserted == 0 and processed > 0:
-                            st.error(
-                                f"📄 **No selectable text found in: {', '.join(scanned_empty)}**. "
-                                "This PDF appears to be a scanned photocopy or rasterized document without an embedded OCR text layer. "
-                                "GROBID and PyMuPDF require digital selectable text. Please run OCR or upload a PDF with digital text.",
-                                icon="⚠️",
-                            )
-                        elif scanned_empty:
-                            st.warning(
-                                f"⚠️ **{len(scanned_empty)} document(s) had no selectable text** ({', '.join(scanned_empty)}). "
-                                f"The remaining documents were indexed successfully ({inserted} chunks inserted).",
-                                icon="⚠️",
-                            )
-                        else:
-                            st.write(
-                                f"✅ Ingestion complete: {processed} processed, "
-                                f"{inserted} chunks inserted into ChromaDB."
-                            )
-
-                        # Record in downloaded.json so they appear in manifests and sidebar
                         try:
-                            import json, time
-                            from research_assistant.shared.atomic import atomic_write_json
-
                             dl_manifest = {}
                             if os.path.exists(config.DOWNLOADED_JSON_PATH):
                                 with open(config.DOWNLOADED_JSON_PATH, "r", encoding="utf-8") as f:
@@ -1263,17 +1399,16 @@ with tab_build:
                                     "fetched_at": now_iso,
                                 }
                             atomic_write_json(config.DOWNLOADED_JSON_PATH, dl_manifest, ensure_ascii=False)
-                        except Exception as e:  # noqa: BLE001
+                        except Exception as e:
                             logger.warning("Could not update downloaded.json: %s", e)
 
-                        # Formulate synthesis if query or ask is set
                         answer = None
                         effective_q = pdf_query.strip() or (staged[0].get("title") if staged else "")
                         if ask and effective_q:
                             st.write("🧠 Formulating related-work synthesis across uploaded collection…")
                             from research_assistant.shared import retrieve
 
-                            def _progress(stage, payload):
+                            def _on_progress(stage, payload):
                                 if stage == "shortlist":
                                     st.write("📚 Reading " + ", ".join(f"{p['key']} {p['citation'][:50]}" for p in payload["papers"]))
                                 elif stage == "notes":
@@ -1283,9 +1418,8 @@ with tab_build:
                                     st.write(f"🧠 Synthesis written ({payload.get('seconds', '?')}s)")
 
                             try:
-                                answer = retrieve.research_answer(effective_q, on_progress=_progress)
-                            except Exception as exc:  # noqa: BLE001
-
+                                answer = retrieve.research_answer(effective_q, on_progress=_on_progress)
+                            except Exception as exc:
                                 logger.error("Synthesis failed: %s", exc)
                                 answer = {
                                     "suggestion": f"Synthesis encountered an error: {exc}",
@@ -1302,289 +1436,103 @@ with tab_build:
                         "answer": answer,
                     }
                     effective_final_q = effective_q or "Uploaded paper collection"
+                    st.session_state["audit_result"] = final
+                    st.session_state["audit_query"] = effective_final_q
                     st.session_state["build_result"] = final
                     st.session_state["build_query"] = effective_final_q
                     _corpus_stats.clear()
+
+    audit_res = st.session_state.get("audit_result") or st.session_state.get("build_result")
+    if audit_res and (audit_res.get("audit") or audit_res.get("batch_uploaded")):
+        _render_build(audit_res, st.session_state.get("audit_query") or st.session_state.get("build_query", ""))
     else:
-        with st.form("build_form"):
-            query = st.text_input(
-                "Research idea",
-                placeholder="topological protection in disordered quantum wires",
-            )
-            seed_url = st.text_input(
-                "Seed paper URL",
-                placeholder="https://arxiv.org/abs/2401.12345 — leave blank to search automatically",
-                help="Used when the search finds no open-access PDF. "
-                     "Accepts an arXiv link or a direct .pdf URL.",
-            )
-            c1, c2, c3, c4 = st.columns(4)
-            ask = c1.toggle("Answer query", value=True)
-            force = c2.toggle("Force re-run", value=False)
-            describe_figures = c3.toggle(
-                "Analyse figures",
-                value=config.FIGURE_VLM,
-                help="One choice for this whole run: every figure and table in every paper "
-                     "is described by the model and the description joins the corpus. "
-                     "Adds roughly a minute per figure on CPU.",
-            )
-            audit_citations = c4.toggle(
-                "Audit citations",
-                value=True,
-                help="Audit in-text citations in seed paper against fetched references using Gemma 4.",
-            )
-            submitted = st.form_submit_button("Build corpus", type="primary")
-
-        if submitted:
-            if not query.strip():
-                st.warning("Please enter a research idea to search.", icon="⚠️")
-            else:
-                q = query.strip()
-                seed_url_val = seed_url.strip() or None
-
-    if submitted and (seed_file_path or q):
-        st.session_state.pop("build_result", None)
-        st.session_state.pop("build_query", None)
-        graph = _graph()
-        thread_seed = q or (os.path.basename(seed_file_path) if seed_file_path else "run")
-        cfg = {"configurable": {"thread_id": hashlib.sha1(thread_seed.encode()).hexdigest()[:16]}}
-        inputs = {
-            "query": q,
-            "workers": 1,
-            "force": force,
-            "ask": ask,
-            "seed_url": seed_url_val,
-            "seed_file": seed_file_path,
-            "describe_figures": describe_figures,
-            "audit_citations": audit_citations,
-        }
-
-        # Filled progressively as nodes complete, so the seed + downloads show
-        # up mid-run instead of only at the end.
-        live = st.empty()
-
-        with st.status("Running the pipeline…", expanded=True) as status:
-            prog_bar = st.progress(0.0, text="Starting pipeline…")
-            stage_ranges = {
-                "discover": (0.0, 0.2),
-                "ingest_seed": (0.2, 0.4),
-                "extract": (0.4, 0.6),
-                "fetch": (0.6, 0.8),
-                "ingest_refs": (0.8, 0.95),
-                "respond": (0.95, 1.0),
-                "fallback": (0.95, 1.0),
-            }
-
-            def _on_pipeline_progress(st_data):
-                try:
-                    st_stage = st_data.get("stage", "discover")
-                    p_low, p_high = stage_ranges.get(st_stage, (0.0, 0.2))
-                    try:
-                        ic = int(st_data.get("item_current") or 0)
-                        it = int(st_data.get("item_total") or 0)
-                        cs = int(st_data.get("current_step") or 1)
-                        ts = int(st_data.get("total_steps") or 5)
-                    except (ValueError, TypeError):
-                        ic, it, cs, ts = 0, 0, 1, 5
-                    lbl = st_data.get("stage_label") or st_stage
-                    if it > 0:
-                        frac = min(1.0, max(0.0, ic / it))
-                        val = p_low + (p_high - p_low) * frac
-                        txt = f"Step {cs}/{ts}: {lbl} — {ic}/{it} papers ({int(frac * 100)}%)"
-                    else:
-                        val = p_low + (p_high - p_low) * 0.25
-                        txt = f"Step {cs}/{ts}: {lbl}"
-                    detail = st_data.get("detail")
-                    if detail:
-                        txt += f" · {detail[:40]}"
-                    prog_bar.progress(min(0.98, max(0.0, val)), text=txt)
-                    curr_item = st_data.get("current_item_name")
-                    if curr_item:
-                        status.update(label=f"Pipeline: {lbl} — {curr_item[:40]}")
-                except Exception:
-                    pass
-
-            unreg_pipeline = pipeline_status.register_progress_callback(_on_pipeline_progress)
-
-            node_weights = {
-                "discover": (1, 0.2),
-                "ingest_seed": (2, 0.4),
-                "extract": (3, 0.6),
-                "fetch": (4, 0.8),
-                "ingest_refs": (5, 0.95),
-                "respond": (5, 1.0),
-                "fallback": (5, 1.0),
-            }
-            display_q = q or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
-            pipeline_status.set_status(
-                active=True,
-                stage="discover",
-                stage_label="Finding seed paper",
-                current_step=1,
-                total_steps=5,
-                detail=f"Starting pipeline for: {display_q[:50]}",
-            )
-            pipeline_status.add_event(f"🚀 Pipeline started for: {display_q[:40]}")
-            final = {}
-            try:
-                for update in graph.stream(inputs, cfg, stream_mode="updates"):
-                    if pipeline_status.is_cancel_requested():
-                        break
-                    for node, payload in update.items():
-                        icon, label = STEPS.get(node, ("•", node))
-                        st.write(f"{icon} {label}")
-                        step_num, progress_val = node_weights.get(node, (1, 0.2))
-                        prog_bar.progress(progress_val, text=f"Step {step_num}/5: {label}")
-                        final.update(payload or {})
-                        if node in ("discover", "ingest_seed", "extract", "fetch", "ingest_refs"):
-                            with live.container():
-                                effective_display_q = final.get("query") or q
-                                _render_seed_and_downloads(effective_display_q, final)
-                        if payload and payload.get("stopped"):
-                            break
-                    if pipeline_status.is_cancel_requested():
-                        break
-                if pipeline_status.is_cancel_requested():
-                    status.update(label="Pipeline stopped by user", state="error")
-                    st.warning("Pipeline execution stopped by user.", icon="⏹️")
-                else:
-                    final = graph.get_state(cfg).values
-                    prog_bar.progress(1.0, text="Pipeline complete!")
-                    if final.get("stopped"):
-                        status.update(label="Stopped early", state="error")
-                        pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
-                        pipeline_status.set_status(
-                            active=False,
-                            stage="idle",
-                            stage_label="Idle",
-                            detail=f"Stopped: {final['stopped'][:60]}",
-                        )
-                    else:
-                        status.update(label="Done", state="complete")
-                        import time
-                        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                        pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
-                        pipeline_status.set_status(
-                            active=False,
-                            stage="idle",
-                            stage_label="Idle",
-                            detail="Pipeline complete",
-                            last_completed_at=now_iso,
-                            last_summary=f"Completed {display_q[:40]}",
-                        )
-            except BaseException as e:  # noqa: BLE001
-                if pipeline_status.is_cancellation(e):
-                    try:
-                        status.update(label="Pipeline cancelled", state="error")
-                    except Exception:
-                        pass
-                    pipeline_status.add_event("⚠️ Pipeline cancelled (session reloaded or stopped)")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail="Pipeline cancelled",
-                    )
-                    raise
-                else:
-                    try:
-                        status.update(label="Pipeline failed", state="error")
-                    except Exception:
-                        pass
-                    detail_str = pipeline_status.format_exception_detail(e)
-                    pipeline_status.add_event(f"❌ Pipeline failed: {detail_str}")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail=f"Pipeline failed: {detail_str}",
-                    )
-                    if isinstance(e, Exception):
-                        st.exception(e)
-                    else:
-                        raise
-            finally:
-                unreg_pipeline()
-                # If seed_file_path was a temporary staging copy outside RAW_DIR, clean it up.
-                # Never unlink files that are stored directly in RAW_DIR.
-                if seed_file_path:
-                    try:
-                        raw_dir_abs = os.path.abspath(config.RAW_DIR)
-                        seed_abs = os.path.abspath(seed_file_path)
-                        if not (seed_abs == raw_dir_abs or seed_abs.startswith(raw_dir_abs + os.sep)):
-                            if os.path.exists(seed_file_path):
-                                os.unlink(seed_file_path)
-                    except OSError:
-                        pass
-
-        live.empty()
-        effective_final_q = final.get("query") or q or final.get("seed_label", "")
-        st.session_state["build_result"] = final
-        st.session_state["build_query"] = effective_final_q
-
-    if st.session_state.get("build_result"):
-        _render_build(
-            st.session_state["build_result"],
-            st.session_state.get("build_query", ""),
-        )
-    else:
-        st.caption(
-            "Agent 0 gets the seed paper → Agent 1 reads its references → "
-            "Agent 2 fetches them → Agent 3 indexes everything → "
-            "the top papers get summarised and matched to your topic."
+        st.markdown("---")
+        st.markdown(
+            "#### 🔍 How Seed Paper Citation Auditing Works\n\n"
+            "1. **Upload your paper** (.pdf) or drop multiple papers (.zip).\n"
+            "2. **Reference Mining**: GROBID extracts all in-text citation markers (`[14]`, `(Smith et al., 2020)`) and maps them to the bibliography.\n"
+            "3. **Open-Access Retrieval**: Unpaywall, Europe PMC, and arXiv download full-text PDFs of the cited literature.\n"
+            "4. **Scientific Claim Audit**: Every citation is independently audited against the source text to verify if the cited evidence actually backs up the claim."
         )
 
 
-# ─── Tab 2: cite a draft ──────────────────────────────────────────────────
+# ─── Tab 2: research idea ──────────────────────────────────────────────────
 
-with tab_cite:
-    if chunks == 0:
-        st.info(
-            "No corpus yet — build one in **Research a topic** first.", icon="📭"
-        )
+with tab_idea:
+    _render_live_pipeline_status("tab_idea")
 
-    with st.form("cite_form"):
-        draft = st.text_area(
-            "Your sentence",
-            placeholder="Anderson localization suppresses diffusive transport in one dimension.",
-            height=120,
-        )
-        top_k = st.slider("Passages to retrieve", 1, 10, config.DEFAULT_TOP_K)
-        cite_submitted = st.form_submit_button(
-            "Suggest a citation", type="primary", disabled=chunks == 0
-        )
-
-    if cite_submitted and draft.strip():
-        from research_assistant.agents import agent4_assistant
-
-        try:
-            resources = get_cached_search_resources(_get_resources_mtime())
-            with st.spinner("Retrieving and drafting…"):
-                result = agent4_assistant.suggest_citation(
-                    draft.strip(), top_k=top_k, search_resources=resources
-                )
-            st.session_state["cite_result"] = result or "empty"
-        except RuntimeError:
-            st.session_state["cite_result"] = "empty"
-        except Exception as e:  # noqa: BLE001
-            st.exception(e)
-            st.session_state["cite_result"] = None
-
-    cr = st.session_state.get("cite_result")
-    if cr == "empty":
-        st.info("Nothing in the corpus matched that text.", icon="🤷")
-    elif isinstance(cr, dict):
-        _render_suggestion(cr)
-
-
-# ─── Tab 3: cite a whole draft ─────────────────────────────────────────────
-
-with tab_batch:
+    st.subheader("🔍 Explore Research Ideas & Discover Literature")
     st.caption(
-        "Upload a plain-text draft. Every sentence that makes a factual claim "
-        "is checked against the corpus and cited where a source supports it."
+        "Give Marvin a topic, hypothesis, or research question. The assistant searches arXiv, Semantic Scholar, and OpenAlex, "
+        "downloads relevant open-access papers, indexes them into your local corpus, and synthesizes what has already been done."
+    )
+
+    with st.form("idea_form"):
+        query = st.text_input(
+            "Research idea",
+            placeholder="topological protection in disordered quantum wires",
+            help="Enter a research topic, question, or hypothesis.",
+        )
+        seed_url = st.text_input(
+            "Seed paper URL (optional)",
+            placeholder="https://arxiv.org/abs/2401.12345 — leave blank to search automatically",
+            help="Used when the search finds no open-access PDF. Accepts an arXiv link or a direct .pdf URL.",
+        )
+        c1, c2, c3 = st.columns(3)
+        ask = c1.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis across discovered papers.")
+        force = c2.toggle("Force re-run", value=False)
+        describe_figures = c3.toggle(
+            "Analyse figures",
+            value=config.FIGURE_VLM,
+            help="Describe figures and tables with VLM during ingestion. Adds ~1 min per figure on CPU.",
+        )
+        submitted_idea = st.form_submit_button("Explore Research Idea", type="primary")
+
+    if submitted_idea:
+        if not query.strip():
+            st.warning("Please enter a research idea to search.", icon="⚠️")
+        else:
+            q = query.strip()
+            seed_url_val = seed_url.strip() or None
+            final = _run_pipeline_job(
+                query=q,
+                seed_url_val=seed_url_val,
+                seed_file_path=None,
+                ask=ask,
+                force=force,
+                describe_figures=describe_figures,
+                audit_citations=False,
+            )
+            effective_final_q = final.get("query") or q or final.get("seed_label", "")
+            st.session_state["idea_result"] = final
+            st.session_state["idea_query"] = effective_final_q
+            _corpus_stats.clear()
+
+    idea_res = st.session_state.get("idea_result")
+    if idea_res:
+        _render_build(idea_res, st.session_state.get("idea_query", ""))
+    else:
+        st.markdown("---")
+        st.markdown(
+            "#### 💡 How Literature Discovery Works\n\n"
+            "1. **Enter an idea**: Describe a research topic or paste a known arXiv / PDF link.\n"
+            "2. **Discovery (Agent 0)**: Searches academic repositories for candidate literature and downloads the seed paper.\n"
+            "3. **Citation Chasing (Agents 1 & 2)**: Extracts references and fetches connected open-access papers.\n"
+            "4. **Corpus Indexing (Agent 3)**: Chunks, embeds, and builds the BM25 keyword index.\n"
+            "5. **Synthesis**: Writes a structured related-work summary highlighting established findings and open gaps."
+        )
+
+
+# ─── Tab 3: cite a draft ───────────────────────────────────────────────────
+
+with tab_draft:
+    st.subheader("✍️ Cite a Research Draft")
+    st.caption(
+        "Upload a plain-text draft (.txt) or paste it below. Every sentence that makes a factual claim "
+        "is checked against your indexed corpus, cited where a source supports it, and verified for accuracy."
     )
     if chunks == 0:
-        st.info("No corpus yet — build one in **Research a topic** first.", icon="📭")
+        st.info("No corpus yet — build one in **Citation auditor** or **Research idea** first.", icon="📭")
 
     uploaded = st.file_uploader("Draft (.txt)", type=["txt"], key="batch_upload")
     pasted = st.text_area("…or paste it here", height=200, key="batch_paste")
