@@ -25,6 +25,7 @@ from research_assistant.config import (
     JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_NEIGHBOUR_WINDOW,
     JUDGEMENT_TOP_K,
+    PULLED_PDFS_DIR,
     RAW_DIR,
 )
 from research_assistant.shared import pipeline_status
@@ -92,6 +93,9 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         - cite_text: raw in-text citation text (e.g. "[14]", "Smith et al. (2020)")
         - target: xml:id target (e.g. "b13")
         - ref: structured reference dict (xml_id, index, title, authors, year, doi, raw)
+        - paragraph_id: identifier of the body paragraph (e.g. "p_0" or xml:id)
+        - paragraph_index: 0-based integer index of the body paragraph
+        - paragraph_refs: list of all unique reference dicts cited in this paragraph
     """
     if isinstance(tei_source, BeautifulSoup):
         soup = tei_source
@@ -161,20 +165,62 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
     claims = []
     seen_pairs = set()
 
-    for p in body.find_all("p"):
+    for p_idx, p in enumerate(body.find_all("p")):
         refs = p.find_all("ref", type="bibr")
         if not refs:
             continue
 
-        # Replace ref tags with identifiable tokens
+        p_id = p.get("xml:id") or p.get("id") or f"p_{p_idx}"
+
+        # Resolve all unique reference dicts cited in this paragraph
+        p_refs_dict = {}
         for idx, ref in enumerate(refs):
             target = (ref.get("target") or "").lstrip("#")
             txt = _clean(ref)
+            ref_info = bib_by_id.get(target)
+            if not ref_info:
+                # Try numeric citation e.g. [14]
+                nums = re.findall(r"\d+", txt)
+                if nums:
+                    try:
+                        ref_info = bib_by_index.get(int(nums[0]))
+                    except (ValueError, TypeError):
+                        pass
+
+            if not ref_info and txt:
+                for r in bib_by_id.values():
+                    if any(
+                        author.split()[-1].lower() in txt.lower()
+                        for author in r.get("authors", [])
+                        if author.split()
+                    ):
+                        ref_info = r
+                        break
+
+            if not ref_info:
+                ref_info = {
+                    "xml_id": target or f"unknown_{txt}",
+                    "index": None,
+                    "title": txt or "Unknown reference",
+                    "authors": [],
+                    "year": None,
+                    "doi": None,
+                    "raw_reference": txt,
+                }
+
+            rk = ref_info.get("xml_id") or normalise_doi(ref_info.get("doi")) or ref_info.get("title") or target or txt
+            if rk:
+                p_refs_dict[rk] = ref_info
+
+            # Replace ref tag with identifiable token
             ref.replace_with(f" __CITE_{idx}_{target}_{txt}__ ")
+
+        p_unique_refs = list(p_refs_dict.values())
 
         clean_p = _clean(p)
         sentences = split_into_sentences(clean_p)
 
+        paragraph_claims = []
         for sent in sentences:
             matches = re.findall(r"__CITE_\d+_([^_]*)_([^_]*)__", sent)
             if not matches:
@@ -220,19 +266,35 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                             ref_info = r
                             break
 
+                if not ref_info:
+                    ref_info = {
+                        "xml_id": target or f"unknown_{txt}",
+                        "index": None,
+                        "title": txt or "Unknown reference",
+                        "authors": [],
+                        "year": None,
+                        "doi": None,
+                        "raw_reference": txt,
+                    }
+
                 ref_key = ref_info.get("xml_id") if ref_info else (target or txt)
                 dedup_key = (claim_text, ref_key)
                 if dedup_key in seen_pairs:
                     continue
                 seen_pairs.add(dedup_key)
 
-                claims.append({
+                paragraph_claims.append({
                     "sentence": human_sent,
                     "claim": claim_text,
                     "cite_text": txt,
                     "target": target,
                     "ref": ref_info,
+                    "paragraph_id": p_id,
+                    "paragraph_index": p_idx,
+                    "paragraph_refs": p_unique_refs,
                 })
+
+        claims.extend(paragraph_claims)
 
     return claims
 
@@ -307,8 +369,20 @@ def audit_seed_citations(
         logger.info("No TEI XML found for seed PDF %s — skipping citation audit.", seed_path)
         return {
             "seed_path": seed_path,
+            "seed_name": seed_pdf_name,
             "error": "No GROBID TEI XML found for seed PDF.",
-            "totals": {"total": 0, "judged": 0},
+            "totals": {
+                "total": 0,
+                "downloaded": 0,
+                "judged": 0,
+                "Supports": 0,
+                "Partially supports": 0,
+                "Contradicts": 0,
+                "Does not support": 0,
+                "Unclear / insufficient evidence": 0,
+                "not_downloaded": 0,
+                "deferred_paywalled": 0,
+            },
             "results": [],
         }
 
@@ -317,40 +391,103 @@ def audit_seed_citations(
         logger.info("No in-text citation claims found in %s.", tei_path)
         return {
             "seed_path": seed_path,
-            "totals": {"total": 0, "judged": 0},
+            "seed_name": seed_pdf_name,
+            "generated": datetime.now().isoformat(timespec="seconds"),
+            "model": _judgement_model(),
+            "totals": {
+                "total": 0,
+                "downloaded": 0,
+                "judged": 0,
+                "Supports": 0,
+                "Partially supports": 0,
+                "Contradicts": 0,
+                "Does not support": 0,
+                "Unclear / insufficient evidence": 0,
+                "not_downloaded": 0,
+                "deferred_paywalled": 0,
+            },
             "results": [],
         }
 
     downloaded_manifest = _load_downloaded_manifest()
 
-    # Enrich claims with downloaded status
+    # Group claims by paragraph_id to evaluate paywall ratio per paragraph
+    paragraphs = {}
+    for c in claims:
+        p_id = c.get("paragraph_id", "p_0")
+        paragraphs.setdefault(p_id, []).append(c)
+
     downloaded_claims = []
     undownloaded_claims = []
+    deferred_claims = []
 
-    for c in claims:
-        ref = c.get("ref")
-        dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
-        if dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]):
-            c["downloaded"] = True
-            c["document"] = os.path.basename(dl_entry["path"])
-            c["citation_source"] = (
-                dl_entry.get("title")
-                or dl_entry.get("raw_reference")
-                or dl_entry.get("key")
-            )
-            downloaded_claims.append(c)
+    for p_id, p_claims in paragraphs.items():
+        # Get unique paragraph refs
+        p_refs = p_claims[0].get("paragraph_refs", [])
+        if not p_refs:
+            seen_r = {}
+            for c in p_claims:
+                r = c.get("ref")
+                if r:
+                    rk = r.get("xml_id") or normalise_doi(r.get("doi")) or r.get("title")
+                    seen_r[rk] = r
+            p_refs = list(seen_r.values())
+
+        total_p_refs = len(p_refs)
+        missing_p_refs = []
+
+        for r in p_refs:
+            dl_entry = _match_downloaded_paper(r, seed_pdf_name, downloaded_manifest)
+            if not (dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"])):
+                missing_p_refs.append(r)
+
+        missing_count = len(missing_p_refs)
+        paywall_ratio = (missing_count / total_p_refs) if total_p_refs > 0 else 0.0
+
+        if paywall_ratio > 0.50:
+            # Mark entire paragraph and all claims as deferred
+            for c in p_claims:
+                c["downloaded"] = False
+                c["outcome"] = "deferred_paywalled"
+                c["judgement"] = "Deferred (pending paywalled evidence)"
+                c["reason"] = (
+                    f"Evaluation deferred: {missing_count}/{total_p_refs} references cited in this "
+                    f"paragraph are missing from the corpus (>50% paywalled)."
+                )
+                c["paragraph_missing_refs"] = missing_p_refs
+                c["paywall_ratio"] = paywall_ratio
+                deferred_claims.append(c)
         else:
-            c["downloaded"] = False
-            c["outcome"] = "not_downloaded"
-            c["judgement"] = "Not downloaded"
-            c["reason"] = "Reference PDF was not available or could not be downloaded."
-            undownloaded_claims.append(c)
+            # Paragraph is under threshold: evaluate individual claims
+            for c in p_claims:
+                ref = c.get("ref")
+                dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
+                if dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]):
+                    c["downloaded"] = True
+                    c["document"] = os.path.basename(dl_entry["path"])
+                    c["citation_source"] = (
+                        dl_entry.get("title")
+                        or dl_entry.get("raw_reference")
+                        or dl_entry.get("key")
+                    )
+                    c["paragraph_missing_refs"] = missing_p_refs
+                    c["paywall_ratio"] = paywall_ratio
+                    downloaded_claims.append(c)
+                else:
+                    c["downloaded"] = False
+                    c["outcome"] = "not_downloaded"
+                    c["judgement"] = "Not downloaded"
+                    c["reason"] = "Reference PDF was not available or could not be downloaded."
+                    c["paragraph_missing_refs"] = missing_p_refs
+                    c["paywall_ratio"] = paywall_ratio
+                    undownloaded_claims.append(c)
 
     logger.info(
-        "Found %d in-text citation claims (%d cite downloaded references, %d not in corpus).",
+        "Found %d in-text citation claims (%d cite downloaded references, %d not in corpus, %d deferred paywalled).",
         len(claims),
         len(downloaded_claims),
         len(undownloaded_claims),
+        len(deferred_claims),
     )
 
     claims_to_judge = downloaded_claims[:max_claims]
@@ -442,7 +579,13 @@ def audit_seed_citations(
                 item["judgement"] = "Unclear / insufficient evidence"
                 item["reason"] = f"Model evaluation error: {exc}"
 
-    all_results = claims_to_judge + downloaded_claims[max_claims:] + undownloaded_claims
+    for c in downloaded_claims[max_claims:]:
+        if not c.get("outcome"):
+            c["outcome"] = "cap_exceeded"
+            c["judgement"] = "Unclear / insufficient evidence"
+            c["reason"] = "Maximum claims evaluation budget reached."
+
+    all_results = claims_to_judge + downloaded_claims[max_claims:] + undownloaded_claims + deferred_claims
 
     totals = {
         "total": len(all_results),
@@ -460,6 +603,7 @@ def audit_seed_citations(
             1 for r in all_results if r.get("judgement") == "Unclear / insufficient evidence"
         ),
         "not_downloaded": sum(1 for r in all_results if r.get("outcome") == "not_downloaded"),
+        "deferred_paywalled": sum(1 for r in all_results if r.get("outcome") == "deferred_paywalled"),
     }
 
     report = {
@@ -488,11 +632,183 @@ def audit_seed_citations(
     return report
 
 
+def get_deferred_missing_references(audit_report: dict) -> list[dict]:
+    """Aggregates all unique missing references blocking deferred paragraphs.
+
+    Returns a list of dicts with keys:
+        - xml_id: str
+        - index: Optional[int]
+        - title: str
+        - authors: list[str]
+        - year: Optional[int]
+        - doi: Optional[str]
+        - raw_reference: Optional[str]
+        - affected_claims: list[str] (unique claim sentences requiring this reference)
+    """
+    if not audit_report:
+        return []
+
+    results = audit_report.get("results", [])
+    deferred_results = [r for r in results if r.get("outcome") == "deferred_paywalled"]
+
+    missing_map = {}
+
+    for item in deferred_results:
+        sent = item.get("sentence") or item.get("claim") or ""
+        missing_refs = item.get("paragraph_missing_refs") or []
+        if not missing_refs and item.get("ref"):
+            missing_refs = [item["ref"]]
+
+        for m_ref in missing_refs:
+            if not isinstance(m_ref, dict):
+                continue
+            doi = normalise_doi(m_ref.get("doi"))
+            xml_id = m_ref.get("xml_id") or ""
+            title = (m_ref.get("title") or "").strip()
+
+            key = xml_id or doi or title.lower()
+            if not key:
+                continue
+
+            if key not in missing_map:
+                missing_map[key] = {
+                    "xml_id": xml_id,
+                    "index": m_ref.get("index"),
+                    "title": title or "Unknown Title",
+                    "authors": m_ref.get("authors") or [],
+                    "year": m_ref.get("year"),
+                    "doi": doi or m_ref.get("doi"),
+                    "raw_reference": m_ref.get("raw_reference"),
+                    "affected_claims": [],
+                }
+
+            if sent and sent not in missing_map[key]["affected_claims"]:
+                missing_map[key]["affected_claims"].append(sent)
+
+    return list(missing_map.values())
+
+
+def save_and_register_reference_pdf(
+    pdf_bytes: bytes,
+    ref_info: dict,
+    seed_pdf_name: str,
+    original_filename: str = "reference.pdf",
+    pulled_pdfs_dir: str = PULLED_PDFS_DIR,
+    downloaded_manifest_path: str = DOWNLOADED_JSON_PATH,
+    ingest: bool = True,
+) -> dict:
+    """Save an uploaded reference PDF, register it in downloaded.json atomically, and ingest into ChromaDB.
+
+    Args:
+        pdf_bytes: Raw bytes of the uploaded PDF file.
+        ref_info: Reference metadata dict (xml_id, doi, title, authors, year, etc.).
+        seed_pdf_name: Filename of the seed paper that cited this reference.
+        original_filename: Original name of the uploaded PDF file.
+        pulled_pdfs_dir: Directory where reference PDFs are stored.
+        downloaded_manifest_path: Path to downloaded.json manifest.
+        ingest: Whether to invoke ChromaDB ingestion immediately.
+
+    Returns:
+        Metadata dict of the registered paper.
+    """
+    if not pdf_bytes:
+        raise ValueError("pdf_bytes must be non-empty bytes")
+
+    ref_info = ref_info or {}
+    doi = normalise_doi(ref_info.get("doi"))
+    xml_id = ref_info.get("xml_id")
+    title = ref_info.get("title") or ""
+
+    # Sanitize / determine file name
+    if original_filename and original_filename != "reference.pdf":
+        clean_base = re.sub(r"[^\w\.\-]", "_", os.path.basename(original_filename))
+    elif doi:
+        clean_base = f"{doi.replace('/', '_')}.pdf"
+    elif xml_id:
+        clean_base = f"{xml_id}.pdf"
+    elif title:
+        clean_title = re.sub(r"[^\w\-]", "_", title)[:40].strip("_")
+        clean_base = f"{clean_title}.pdf"
+    else:
+        clean_base = "reference.pdf"
+
+    if not clean_base.lower().endswith(".pdf"):
+        clean_base += ".pdf"
+
+    os.makedirs(pulled_pdfs_dir, exist_ok=True)
+    dest = os.path.join(pulled_pdfs_dir, clean_base)
+    with open(dest, "wb") as fh:
+        fh.write(pdf_bytes)
+    logger.info("Saved reference PDF to %s (%d bytes)", dest, len(pdf_bytes))
+
+    manifest = {}
+    if os.path.exists(downloaded_manifest_path):
+        try:
+            with open(downloaded_manifest_path, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except Exception as exc:
+            logger.warning("Could not read manifest at %s: %s", downloaded_manifest_path, exc)
+
+    if doi:
+        key = f"doi:{doi}"
+    elif xml_id and seed_pdf_name:
+        key = f"xml:{xml_id}:{seed_pdf_name}"
+    elif xml_id:
+        key = f"xml:{xml_id}"
+    else:
+        key = clean_base
+
+    entry = {
+        "key": key,
+        "path": dest,
+        "provider": "manual_upload",
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "title": ref_info.get("title"),
+        "raw_reference": ref_info.get("raw_reference"),
+        "doi": doi,
+        "xml_id": xml_id,
+        "cited_by": seed_pdf_name,
+    }
+    manifest[key] = entry
+
+    os.makedirs(os.path.dirname(os.path.abspath(downloaded_manifest_path)), exist_ok=True)
+    atomic_write_json(downloaded_manifest_path, manifest, ensure_ascii=False)
+    logger.info("Registered %s in manifest %s", key, downloaded_manifest_path)
+
+    if ingest:
+        try:
+            from research_assistant.agents import agent6_manual_ingestor
+
+            citation_lbl = ref_info.get("title") or os.path.splitext(clean_base)[0]
+            ingest_res = agent6_manual_ingestor.ingest_manual_pdf(dest, citation_string=citation_lbl)
+            entry["ingest_result"] = ingest_res
+            entry["ingested"] = True
+            logger.info("Ingested %s: %s", dest, ingest_res)
+        except Exception as exc:
+            logger.warning("Ingestion of %s failed: %s", dest, exc)
+            entry["ingest_result"] = None
+            entry["ingested"] = False
+            entry["ingest_error"] = str(exc)
+    else:
+        entry["ingested"] = False
+
+    return entry
+
+
 def explain_rubric_verdict(item: dict) -> str:
     """Explains why a citation received its verdict based on the 3-slot rubric."""
     judgement = item.get("judgement", "")
     outcome = item.get("outcome", "")
     slots = item.get("slots") or {}
+
+    if outcome == "deferred_paywalled" or "Deferred" in judgement:
+        reason = item.get("reason")
+        if reason:
+            return f"{reason} Upload the missing reference PDF(s) to verify this claim."
+        return (
+            "Evaluation deferred: More than 50% of the references cited in this paragraph are missing from the corpus. "
+            "Upload the missing reference PDF(s) to enable empirical verification."
+        )
 
     if outcome == "not_downloaded":
         return (
@@ -591,6 +907,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| 🔴 **Contradicts** | **{totals.get('Contradicts', 0)}** | {pct(totals.get('Contradicts', 0))} | Evidence directly opposes claim |",
         f"| 🟠 **Does Not Support** | **{totals.get('Does not support', 0)}** | {pct(totals.get('Does not support', 0))} | Scope or finding mismatch |",
         f"| ⚪ **Unclear / Insufficient** | **{totals.get('Unclear / insufficient evidence', 0)}** | {pct(totals.get('Unclear / insufficient evidence', 0))} | Fragile or fragmentary evidence |",
+        f"| ⏳ **Deferred (Pending Evidence)** | **{totals.get('deferred_paywalled', 0)}** | {pct(totals.get('deferred_paywalled', 0))} | Paragraph >50% paywalled; evaluation deferred |",
         f"| 🔒 **Paywalled / Unchecked** | **{totals.get('not_downloaded', 0)}** | {pct(totals.get('not_downloaded', 0))} | Non-OA reference; unavailable |",
         "",
         "---",
@@ -603,9 +920,41 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         "- **Scope Slot**: Did the cited paper test the same system, material, conditions, or environment?",
         "- **Strength Slot**: Does the evidence establish causation or generality, or only an isolated observation or hypothesis?",
         "",
+        "### Paragraph-Level Evidence Threshold & Deferral Policy",
+        "",
+        "To prevent spurious contradictions or premature negative verdicts when key literature is missing, citation verification operates on paragraph context:",
+        "- If **more than 50% (>50%)** of the unique references cited in a paragraph are unavailable (missing/paywalled), evaluation of all claims in that paragraph is **deferred** (`Deferred (pending paywalled evidence)`).",
+        "- When **50% or more** of a paragraph's cited references are present in the corpus, claims citing available references are evaluated against the 3-slot rubric, while claims citing missing references are marked as `Not downloaded`.",
+        "",
         "---",
         "",
     ]
+
+    deferred_missing = get_deferred_missing_references(report)
+    lines.append(f"## 3. Missing References Required for Deferred Paragraphs ({len(deferred_missing)})\n")
+    if deferred_missing:
+        lines.append("| Reference / Title | Authors | Year | DOI | Required By Deferred Claim(s) |")
+        lines.append("| :--- | :--- | :--- | :--- | :--- |")
+        for ref in deferred_missing:
+            ref_num = f"[{ref.get('index') or '?'}]"
+            title_s = f"{ref_num} {ref.get('title') or 'Unknown Title'}"
+            authors_list = ref.get("authors", [])
+            auth_s = (
+                ", ".join(authors_list[:2]) + (" et al." if len(authors_list) > 2 else "")
+                if authors_list
+                else "Unknown authors"
+            )
+            yr_s = str(ref.get("year") or "N/A")
+            doi_val = ref.get("doi")
+            doi_s = f"[`{doi_val}`](https://doi.org/{doi_val})" if doi_val else "N/A"
+            affected = ref.get("affected_claims", [])
+            claims_s = "<br>• ".join(f'"{c}"' for c in affected[:3]) if affected else "—"
+            if len(affected) > 3:
+                claims_s += f"<br>*(+{len(affected) - 3} more)*"
+            lines.append(f"| {title_s} | {auth_s} | {yr_s} | {doi_s} | {claims_s} |")
+        lines.append("")
+    else:
+        lines.append("*No paragraphs were deferred; all citations were either available or under the 50% paywall threshold.*\n")
 
     needs_review = [
         r for r in results
@@ -615,7 +964,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         r for r in results
         if r.get("judgement") in ("Supports", "Partially supports")
     ]
-    paywalled = [r for r in results if r.get("outcome") == "not_downloaded"]
+    paywalled = [r for r in results if r.get("outcome") in ("not_downloaded", "deferred_paywalled")]
     other = [r for r in results if r not in needs_review and r not in supported and r not in paywalled]
 
     def _format_entry(item, index):
@@ -642,8 +991,14 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             "Contradicts": "🔴 Contradicts",
             "Does not support": "🟠 Does Not Support",
             "Unclear / insufficient evidence": "⚪ Unclear / Insufficient Evidence",
+            "Deferred (pending paywalled evidence)": "⏳ Deferred (Pending Evidence)",
         }
-        badge = badge_map.get(judgement, "⚪ Paywalled / Unchecked") if item.get("outcome") != "not_downloaded" else "🔒 Paywalled / Not In Corpus"
+        if item.get("outcome") == "deferred_paywalled":
+            badge = "⏳ Deferred (Pending Evidence)"
+        elif item.get("outcome") == "not_downloaded":
+            badge = "🔒 Paywalled / Not In Corpus"
+        else:
+            badge = badge_map.get(judgement, "⚪ Unclear / Insufficient Evidence")
 
         out_lines = [
             f"### Citation {index}: {ref_num} {ref_title}{ref_year}",
@@ -690,24 +1045,29 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         out_lines.append("")
         return "\n".join(out_lines)
 
+    current_sec = 4
     if needs_review:
-        lines.append(f"## 3. Citations Needing Review ({len(needs_review)})\n")
+        lines.append(f"## {current_sec}. Citations Needing Review ({len(needs_review)})\n")
         for i, item in enumerate(needs_review, 1):
             lines.append(_format_entry(item, i))
+        current_sec += 1
 
     if supported:
-        lines.append(f"## 4. Supported Citations ({len(supported)})\n")
-        for i, item in enumerate(supported, len(needs_review) + 1):
+        lines.append(f"## {current_sec}. Supported Citations ({len(supported)})\n")
+        for i, item in enumerate(supported, 1):
             lines.append(_format_entry(item, i))
+        current_sec += 1
 
     if paywalled:
-        lines.append(f"## 5. Paywalled or Unavailable Citations ({len(paywalled)})\n")
-        for i, item in enumerate(paywalled, len(needs_review) + len(supported) + 1):
+        lines.append(f"## {current_sec}. Paywalled or Unavailable Citations ({len(paywalled)})\n")
+        for i, item in enumerate(paywalled, 1):
             lines.append(_format_entry(item, i))
+        current_sec += 1
 
     if other:
-        lines.append(f"## 6. Other Citations ({len(other)})\n")
-        for i, item in enumerate(other, len(needs_review) + len(supported) + len(paywalled) + 1):
+        lines.append(f"## {current_sec}. Other Citations ({len(other)})\n")
+        for i, item in enumerate(other, 1):
             lines.append(_format_entry(item, i))
+        current_sec += 1
 
     return "\n".join(lines)

@@ -464,8 +464,8 @@ def _render_synthesis(answer, heading):
 
 def _render_seed_citation_audit(final):
 
-    seed_path = final.get("seed_path")
     audit = final.get("citation_audit")
+    seed_path = final.get("seed_path") or (audit.get("seed_path") if audit else None)
 
     # If audit has not been run yet, offer an explicit button when a seed PDF is available
     if not audit and seed_path and os.path.exists(seed_path):
@@ -510,6 +510,8 @@ def _render_seed_citation_audit(final):
         from research_assistant.shared.seed_audit import (
             explain_rubric_verdict,
             generate_seed_audit_markdown,
+            get_deferred_missing_references,
+            save_and_register_reference_pdf,
         )
 
         stem = (
@@ -548,24 +550,26 @@ def _render_seed_citation_audit(final):
             )
 
         # Top metric row
-        cols = st.columns(5)
+        cols = st.columns(6)
         cols[0].metric("Citations Found", totals.get("total", len(results)))
         cols[1].metric("Supports 🟢", totals.get("Supports", 0))
         cols[2].metric("Partially 🟡", totals.get("Partially supports", 0))
         needs_rev = totals.get("Contradicts", 0) + totals.get("Does not support", 0)
         cols[3].metric("Need Review 🔴", needs_rev)
-        cols[4].metric("Paywalled / Unchecked ⚪", totals.get("not_downloaded", 0))
+        cols[4].metric("Deferred (Pending) ⏳", totals.get("deferred_paywalled", 0))
+        cols[5].metric("Paywalled / Unchecked ⚪", totals.get("not_downloaded", 0))
 
         # Filter tabs
         supp_count = totals.get("Supports", 0) + totals.get("Partially supports", 0)
         rev_count = needs_rev + totals.get("Unclear / insufficient evidence", 0)
-        pw_count = totals.get("not_downloaded", 0)
+        deferred_count = totals.get("deferred_paywalled", 0)
+        all_count = totals.get("total", len(results))
 
-        tab_supported, tab_review, tab_paywalled, tab_all = st.tabs([
+        tab_supported, tab_review, tab_deferred, tab_all = st.tabs([
             f"Supported ({supp_count})",
             f"Need Review ({rev_count})",
-            f"Paywalled / Not In Corpus ({pw_count})",
-            f"All Citations ({len(results)})",
+            f"⏳ Pending Evidence (Deferred) ({deferred_count})",
+            f"All Citations ({all_count})",
         ])
 
         def _render_claim_item(item):
@@ -579,8 +583,11 @@ def _render_seed_citation_audit(final):
                 else ""
             )
 
+            outcome = item.get("outcome")
             judgement = item.get("judgement", "Unclear")
-            if judgement == "Supports":
+            if outcome == "deferred_paywalled":
+                badge = "⏳ Deferred (Pending Evidence)"
+            elif judgement == "Supports":
                 badge = "🟢 Supports"
             elif judgement == "Partially supports":
                 badge = "🟡 Partially Supports"
@@ -588,7 +595,7 @@ def _render_seed_citation_audit(final):
                 badge = "🔴 Contradicts"
             elif judgement == "Does not support":
                 badge = "🟠 Does Not Support"
-            elif item.get("outcome") == "not_downloaded":
+            elif outcome == "not_downloaded":
                 badge = "⚪ Paywalled / Not In Corpus"
             else:
                 badge = "⚪ Unclear / Insufficient Evidence"
@@ -603,7 +610,26 @@ def _render_seed_citation_audit(final):
                 if ref_info.get("doi"):
                     st.caption(f"DOI: [{ref_info['doi']}](https://doi.org/{ref_info['doi']})")
 
-                if item.get("outcome") == "judged":
+                if outcome == "deferred_paywalled":
+                    st.warning(
+                        "⏳ **Evaluation Deferred (Pending Evidence)**: More than 50% of the cited references "
+                        "in this body paragraph are missing from the local corpus (paywalled publishers, books, or 404s). "
+                        "Evaluation of this statement is deferred until the missing papers are uploaded.",
+                        icon="⏳",
+                    )
+                    missing_refs = item.get("paragraph_missing_refs") or []
+                    if missing_refs:
+                        missing_titles = [
+                            m.get("title") or f"[{m.get('index') or '?'}] {m.get('doi') or 'Unknown'}"
+                            for m in missing_refs
+                            if isinstance(m, dict)
+                        ]
+                        if missing_titles:
+                            st.caption(
+                                f"Missing references in this paragraph ({len(missing_titles)}): "
+                                + "; ".join(missing_titles)
+                            )
+                elif item.get("outcome") == "judged":
                     st.markdown(
                         f"**Verdict:** `{judgement}` · **Confidence:** `{item.get('confidence', 'Medium')}` · "
                         f"**Evidence Sufficiency:** `{item.get('evidence_sufficiency', 'sufficient')}`"
@@ -658,7 +684,7 @@ def _render_seed_citation_audit(final):
                     rule_expl = explain_rubric_verdict(item)
                     st.info(f"💡 **Why this verdict?** {rule_expl}")
 
-                elif item.get("outcome") == "not_downloaded":
+                elif outcome == "not_downloaded":
                     st.warning(
                         "⚠️ **Reference Not Downloaded**: This reference paper was not open-access or could not be downloaded "
                         "(paywalled publisher, book, or 404). Its full text is not in the local library, so claims citing it "
@@ -666,7 +692,7 @@ def _render_seed_citation_audit(final):
                         icon="🔒",
                     )
                 else:
-                    st.caption(f"Status: {item.get('reason') or item.get('outcome', 'Unclear')}")
+                    st.caption(f"Status: {item.get('reason') or outcome or 'Unclear'}")
 
         with tab_supported:
             supp_items = [
@@ -691,17 +717,119 @@ def _render_seed_citation_audit(final):
             else:
                 st.caption("No citations flagged for review.")
 
-        with tab_paywalled:
-            pw_items = [r for r in results if r.get("outcome") == "not_downloaded"]
-            if pw_items:
-                st.caption(
-                    "These references were cited in the uploaded paper but could not be downloaded "
-                    "(paywalled, books, or 404)."
+        with tab_deferred:
+            if deferred_count == 0:
+                st.info(
+                    "No citations currently deferred. All paragraphs had sufficient reference coverage (≤50% paywalled).",
+                    icon="✅",
                 )
-                for it in pw_items:
-                    _render_claim_item(it)
             else:
-                st.caption("All cited references were downloaded and verified!")
+                st.warning(
+                    "⏳ **Evaluation Deferred (Pending Evidence)**: One or more paragraphs in this uploaded paper cite "
+                    "references where more than 50% are missing from the corpus (paywalled publishers, books, or 404s). "
+                    "Evaluation of these statements is deferred until the missing PDFs are uploaded. "
+                    "Upload the missing papers below and re-run the audit.",
+                    icon="⏳",
+                )
+
+                deferred_missing = get_deferred_missing_references(audit)
+                if not deferred_missing:
+                    st.caption("No missing reference details available.")
+                else:
+                    st.markdown(f"**Missing References Blocking Evaluation ({len(deferred_missing)}):**")
+                    for idx, ref in enumerate(deferred_missing):
+                        xid = ref.get("xml_id") or str(ref.get("index") or idx)
+                        xid = re.sub(r"[^\w\-]", "_", str(xid))
+                        ref_idx = ref.get("index")
+                        ref_idx_str = f"[{ref_idx}] " if ref_idx is not None else ""
+                        ref_title = ref.get("title") or "Unknown Title"
+                        ref_authors = ref.get("authors") or []
+                        ref_year = ref.get("year")
+                        ref_doi = ref.get("doi")
+
+                        with st.container(border=True):
+                            st.markdown(f"##### {ref_idx_str}{ref_title}")
+
+                            meta_line = []
+                            if ref_authors:
+                                auth_str = ", ".join(ref_authors[:3])
+                                if len(ref_authors) > 3:
+                                    auth_str += " et al."
+                                meta_line.append(f"**Authors:** {auth_str}")
+                            if ref_year:
+                                meta_line.append(f"**Year:** {ref_year}")
+                            if meta_line:
+                                st.markdown(" · ".join(meta_line))
+
+                            if ref_doi:
+                                st.markdown(f"🔗 **DOI:** [{ref_doi}](https://doi.org/{ref_doi})")
+                            elif ref.get("raw_reference"):
+                                st.caption(f"Citation: *{ref['raw_reference'][:140]}*")
+
+                            affected = ref.get("affected_claims") or []
+                            with st.expander(f"Dependent Statement(s) in Seed Paper ({len(affected)})"):
+                                if affected:
+                                    for aff_sent in affected:
+                                        st.info(f"\"{aff_sent}\"")
+                                else:
+                                    st.caption("No dependent statements recorded.")
+
+                            uploader_key = f"upload_ref_{stem}_{xid}"
+                            uploaded_file = st.file_uploader(
+                                f"Upload PDF for {ref_title[:45]}…",
+                                type=["pdf"],
+                                key=uploader_key,
+                                help="Upload the full-text PDF to unblock evaluation of citations to this work.",
+                            )
+
+                            if uploaded_file is not None:
+                                proc_key = f"processed_upload_{stem}_{xid}_{uploaded_file.size}"
+                                legacy_key = f"processed_upload_{stem}_{xid}"
+                                if (
+                                    proc_key not in st.session_state
+                                    and st.session_state.get(legacy_key) != uploaded_file.size
+                                ):
+                                    seed_name = os.path.basename(seed_path) if seed_path else ""
+                                    try:
+                                        reg_entry = save_and_register_reference_pdf(
+                                            uploaded_file.read(),
+                                            ref,
+                                            seed_pdf_name=seed_name,
+                                            original_filename=uploaded_file.name,
+                                        )
+                                        st.session_state[proc_key] = reg_entry
+                                        st.session_state[legacy_key] = uploaded_file.size
+                                        st.toast(f"✅ Uploaded & indexed {ref_title}", icon="📄")
+                                    except Exception as exc:
+                                        st.error(f"Failed to process uploaded PDF: {exc}")
+
+                                if (
+                                    proc_key in st.session_state
+                                    or st.session_state.get(legacy_key) == uploaded_file.size
+                                ):
+                                    st.success(
+                                        f"✅ PDF `{uploaded_file.name}` uploaded and indexed in knowledge base. Ready for re-audit."
+                                    )
+
+                st.markdown("---")
+                if seed_path and os.path.exists(seed_path):
+                    if st.button(
+                        "⚡ Re-run Audit with Uploaded Papers",
+                        key="btn_rerun_audit_uploaded",
+                        type="primary",
+                    ):
+                        with st.status(
+                            "Re-auditing seed citations with newly uploaded reference papers…",
+                            expanded=True,
+                        ) as status:
+                            from research_assistant.shared.seed_audit import audit_seed_citations
+
+                            cached_res = get_cached_search_resources(_get_resources_mtime())
+                            audit_res = audit_seed_citations(seed_path, search_resources=cached_res)
+                            final["citation_audit"] = audit_res
+                            st.session_state["build_result"] = final
+                            status.update(label="Citation audit complete!", state="complete")
+                            st.rerun()
 
         with tab_all:
             for it in results:
