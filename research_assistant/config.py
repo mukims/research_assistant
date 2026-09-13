@@ -11,7 +11,7 @@ try:
     from dotenv import load_dotenv
 
     load_dotenv(override=True)
-except ImportError:
+except Exception:
     pass
 
 # ─── Roots ───────────────────────────────────────────────────────────────────
@@ -98,6 +98,12 @@ EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
 CHAT_OLLAMA_OPTIONS = {
     "num_ctx": 4096,           # Context window
 }
+CHAT_CONDENSE               = _env_bool("CITATION_CHAT_CONDENSE", True)
+CHAT_CONTEXT_MAX_CHARS      = _env_int("CITATION_CHAT_CONTEXT_MAX_CHARS", 7000)
+CHAT_ANSWER_RESERVE_TOKENS  = _env_int("CITATION_CHAT_ANSWER_RESERVE_TOKENS", 700)
+CHAT_PER_DOC_CAP            = _env_int("CITATION_CHAT_PER_DOC_CAP", 3)
+CHAT_FOCUS_TOP_K            = _env_int("CITATION_CHAT_FOCUS_TOP_K", 2)
+CHAT_TEMPERATURE            = float(os.environ.get("CITATION_CHAT_TEMPERATURE", "0.3"))
 
 
 # ─── Index version ───────────────────────────────────────────────────────────

@@ -134,7 +134,7 @@ def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
 # so no agent has to import a provider SDK to do it.
 
 
-def chat_stream(messages, model=None, options=None):
+def chat_stream(messages, model=None, options=None, temperature=None):
     """Yield content deltas as plain strings.
 
     Args:
@@ -142,26 +142,30 @@ def chat_stream(messages, model=None, options=None):
         model:    model id; defaults to config.LLM_MODEL.
         options:  ollama runtime options (e.g. CHAT_OLLAMA_OPTIONS). The
                   OpenAI-compatible backend has no equivalent and ignores it.
+        temperature: sampling temperature; None leaves the provider default.
 
     Deliberately not a generator itself, so an unknown backend raises at the
     call rather than on the first ``next()``.
     """
     model = model or LLM_MODEL
     if LLM_BACKEND == "openai":
-        return _openai_stream(messages, model)
+        return _openai_stream(messages, model, temperature=temperature)
     if LLM_BACKEND == "ollama":
-        return _ollama_stream(messages, model, options)
+        return _ollama_stream(messages, model, options, temperature=temperature)
     raise ValueError(
         f"Unknown LLM_BACKEND {LLM_BACKEND!r} (expected 'ollama' or 'openai')"
     )
 
 
-def _ollama_stream(messages, model, options):
+def _ollama_stream(messages, model, options, temperature=None):
     import ollama
 
     kwargs = {"model": model, "messages": messages, "stream": True}
-    if options:
-        kwargs["options"] = options
+    opts = dict(options) if options else {}
+    if temperature is not None:
+        opts["temperature"] = temperature
+    if opts:
+        kwargs["options"] = opts
     for chunk in ollama.chat(**kwargs):
         try:
             content = chunk.message.content
@@ -171,13 +175,14 @@ def _ollama_stream(messages, model, options):
             yield content
 
 
-def _openai_stream(messages, model):
+def _openai_stream(messages, model, temperature=None):
     from openai import OpenAI
 
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
-    stream = client.chat.completions.create(
-        model=model, messages=messages, stream=True
-    )
+    kwargs = {"model": model, "messages": messages, "stream": True}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    stream = client.chat.completions.create(**kwargs)
     for chunk in stream:
         # Role-only opening frames and usage-only terminal frames carry no text.
         if not getattr(chunk, "choices", None):

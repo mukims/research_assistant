@@ -197,5 +197,32 @@ class TestNomicPrefixes(unittest.TestCase):
         self.assertEqual(self.calls, [("query", "q")])
 
 
+class TestChatStreamTemperature(unittest.TestCase):
+    def test_ollama_gets_temperature_in_a_copied_options_dict(self):
+        fake = MagicMock()
+        fake.chat.return_value = iter([_ollama_chunk("x")])
+        opts = {"num_ctx": 4096}
+        with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
+            list(llm.chat_stream([{"role": "user", "content": "q"}], options=opts, temperature=0.3))
+        sent = fake.chat.call_args.kwargs["options"]
+        self.assertEqual(sent, {"num_ctx": 4096, "temperature": 0.3})
+        self.assertEqual(opts, {"num_ctx": 4096})  # caller's dict untouched
+
+    def test_ollama_without_temperature_sends_options_as_is(self):
+        fake = MagicMock()
+        fake.chat.return_value = iter([_ollama_chunk("x")])
+        with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
+            list(llm.chat_stream([{"role": "user", "content": "q"}], options={"num_ctx": 8192}))
+        self.assertEqual(fake.chat.call_args.kwargs["options"], {"num_ctx": 8192})
+
+    def test_openai_gets_temperature(self):
+        fake_openai = MagicMock()
+        client = fake_openai.OpenAI.return_value
+        client.chat.completions.create.return_value = iter([_openai_chunk("x")])
+        with patch.dict("sys.modules", {"openai": fake_openai}), patch.object(llm, "LLM_BACKEND", "openai"):
+            list(llm.chat_stream([{"role": "user", "content": "q"}], temperature=0.3))
+        self.assertEqual(client.chat.completions.create.call_args.kwargs["temperature"], 0.3)
+
+
 if __name__ == "__main__":
     unittest.main()

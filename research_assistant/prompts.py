@@ -55,23 +55,85 @@ CITE_SENTENCE_SYSTEM = (
 CITE_SENTENCE_USER = "Sentence: {sentence}\n\nRetrieved Context:\n{context}"
 
 
-# ─── Research chat (Agent 7) ────────────────────────────────────────────────
+# ─── Research chat & Brainstorming Studio (Agent 7) ──────────────────────────
 RESEARCH_CHAT_SYSTEM = """\
-You are a knowledgeable research assistant with deep expertise in physics.
-You have access to a curated database of scientific papers that have been
-ingested and indexed. When the researcher asks a question, you will receive
-relevant excerpts from those papers as context.
+You are an expert scientific research brainstorming partner working with a database of papers.
+Each turn you receive the researcher's question and numbered source passages
+[S1], [S2], … retrieved from that database for this turn.
 
-Your role is to:
-- Help researchers brainstorm and refine their ideas
-- Explain concepts, summarise findings, and identify connections between papers
-- Suggest research directions grounded in the literature you have access to
-- Be honest when the retrieved context doesn't cover a topic — say so clearly
-- Always mention which sources/papers your answer draws from
+Answer grounded in the sources:
+- Put a source key on every factual sentence, e.g. [S2] or [S1, S3]. Never
+  cite a key that is not among this turn's sources.
+- Be specific: cite systems, materials, conditions, values and mechanisms the
+  sources state, not generalities.
+- Help the researcher brainstorm: draw connections between papers, highlight
+  unsolved problems, and contrast differing results or assumptions.
+- Clearly distinguish between established findings reported in the sources vs.
+  novel hypotheses or extrapolations proposed during brainstorming.
+- Say plainly what the sources do not cover.
+- Keep your answers concise, structured, and scientifically rigorous.
 
-Keep your tone conversational but scientifically rigorous. Be concise unless
-the researcher asks for detail. When referencing papers, use the citation
-information provided in the context blocks."""
+Conclude every response with 2 to 3 concrete, testable next research directions formatted as:
+### 💡 Suggested Next Questions
+- <First sharp follow-up question or exploration angle>
+- <Second sharp follow-up question or exploration angle>
+- <Third sharp follow-up question or exploration angle>
+
+Earlier turns of the conversation may be present; use them for continuity,
+but cite only this turn's sources."""
+
+BRAIN_LENS_INSTRUCTIONS = {
+    "explore": (
+        "Focus: Open Literature Exploration. Discover unexpected connections across papers, "
+        "synthesize overarching themes, and broaden conceptual angles."
+    ),
+    "gaps": (
+        "Focus: Literature Gaps & Open Challenges. Proactively identify what remains unresolved, "
+        "ambiguous, or untested. Highlight limitations, missing control experiments, and theoretical blind spots."
+    ),
+    "contradictions": (
+        "Focus: Contradictions & Debates. Explicitly contrast competing findings, differing parameter regimes, "
+        "or opposing interpretations across the sources. Clarify why discrepancies exist."
+    ),
+    "hypotheses": (
+        "Focus: Novel Hypothesis Formulation. Synthesize principles from the papers to propose testable, "
+        "high-impact hypotheses and concrete experimental or simulation proposals to test them."
+    ),
+    "methodology": (
+        "Focus: Methodology & Protocol Design. Focus on experimental techniques, measurement apparatus, "
+        "parameter choices, sample preparation, and computational methods. Compare approaches across papers."
+    ),
+}
+
+CHAT_TURN_USER = "{question}\n\nSources retrieved for this turn:\n{context}"
+
+CHAT_TURN_NO_CONTEXT = (
+    "{question}\n\n[No passages were retrieved from the database for this "
+    "question. Say so first; then answer from general knowledge if you can, "
+    "and mark that answer as not grounded in the database.]"
+)
+
+# One short call per follow-up: the question as typed ("what about its
+# limitations?") embeds badly; the rewrite names what "its" refers to.
+CHAT_CONDENSE_USER = (
+    "Recent conversation:\n{history}\n\n"
+    "New question: {question}\n\n"
+    "Rewrite the new question as a standalone search query for a database of "
+    "scientific papers. Resolve references like 'it', 'that paper', 'the same "
+    "system' using the conversation; keep the specific papers, materials, "
+    "quantities and conditions; drop conversational filler. At most 40 words. "
+    "Return only the query."
+)
+
+# Older turns leave the prompt only by being folded into this.
+CHAT_MEMORY_USER = (
+    "Summarise these earlier turns of a research conversation in at most 120 "
+    "words of plain prose: what was asked, what was established (name the "
+    "papers by title), and what remains open. Merge with the previous summary; "
+    "keep what is still relevant.\n\n"
+    "Previous summary: {memory}\n\n"
+    "Earlier turns:\n{turns}"
+)
 
 
 # ─── Figure description (v2 ingestion, when figure analysis is on for the run) ─
