@@ -59,11 +59,9 @@ def _env_int(name: str, default: int) -> int:
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 LLM_BACKEND     = os.environ.get("LLM_BACKEND")
-if GEMINI_API_KEY and (LLM_BACKEND is None or LLM_BACKEND.lower() == "ollama"):
+if LLM_BACKEND is None:
     # When GEMINI_API_KEY is supplied, default to OpenAI-compatible Gemini endpoint
-    LLM_BACKEND = "openai"
-elif LLM_BACKEND is None:
-    LLM_BACKEND = "ollama"
+    LLM_BACKEND = "openai" if GEMINI_API_KEY else "ollama"
 LLM_BACKEND     = LLM_BACKEND.lower()
 
 # When Gemini is used, default to the official Google OpenAI-compatible endpoint
