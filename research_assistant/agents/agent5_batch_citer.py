@@ -20,21 +20,21 @@ logger = get_logger("agent5")
 
 # ─── Improved sentence splitter ──────────────────────────────────────────────
 
-# Abbreviations that should NOT trigger a sentence break
-_ABBREVS = r"(?:et al|Fig|Figs|Eq|Eqs|Dr|Prof|Mr|Mrs|Ms|Jr|Sr|vs|i\.e|e\.g|cf|approx|Ref|Refs|Vol|No|Ch|Sec|pp)"
+# Abbreviations and initials that should NOT trigger a sentence break
+_ABBREVS = r"(?:et al|Fig|Figs|Eq|Eqs|Dr|Prof|Mr|Mrs|Ms|Jr|Sr|vs|i\.e|e\.g|cf|approx|Ref|Refs|Vol|No|Ch|Sec|pp|[A-Za-z])"
 
 def split_into_sentences(text):
     """
     Split text into sentences, handling common scientific abbreviations
-    that contain periods (e.g., "et al.", "Fig.", "Eq.").
+    and author initials that contain periods (e.g., "et al.", "Fig.", "Eq.", "K.J.").
     """
     _TOKEN = "<PD>"
     def replace_abbrev_period(match):
         return match.group(0).replace('.', _TOKEN)
     
-    # Mask periods in known abbreviations
+    # Mask periods in known abbreviations and author initials (case-insensitive)
     pattern = rf'\b({_ABBREVS})\.'
-    masked_text = re.sub(pattern, replace_abbrev_period, text)
+    masked_text = re.sub(pattern, replace_abbrev_period, text, flags=re.IGNORECASE)
     
     # Split on sentence-ending punctuation followed by whitespace
     sentences = re.split(r'(?<=[.!?])\s+', masked_text.strip())

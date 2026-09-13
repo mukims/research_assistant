@@ -447,13 +447,29 @@ def audit_seed_citations(
         if paywall_ratio > 0.50:
             # Mark entire paragraph and all claims as deferred
             for c in p_claims:
-                c["downloaded"] = False
+                ref = c.get("ref")
+                dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
+                is_dl = bool(dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]))
+                if is_dl:
+                    c["document"] = os.path.basename(dl_entry["path"])
+                    c["citation_source"] = (
+                        dl_entry.get("title")
+                        or dl_entry.get("raw_reference")
+                        or dl_entry.get("key")
+                    )
+                c["downloaded"] = is_dl
                 c["outcome"] = "deferred_paywalled"
                 c["judgement"] = "Deferred (pending paywalled evidence)"
-                c["reason"] = (
-                    f"Evaluation deferred: {missing_count}/{total_p_refs} references cited in this "
-                    f"paragraph are missing from the corpus (>50% paywalled)."
-                )
+                if is_dl:
+                    c["reason"] = (
+                        f"Evaluation deferred: Although this reference is in the corpus, "
+                        f"{missing_count}/{total_p_refs} references cited in this paragraph are missing (>50% paywalled)."
+                    )
+                else:
+                    c["reason"] = (
+                        f"Evaluation deferred: {missing_count}/{total_p_refs} references cited in this "
+                        f"paragraph are missing from the corpus (>50% paywalled)."
+                    )
                 c["paragraph_missing_refs"] = missing_p_refs
                 c["paywall_ratio"] = paywall_ratio
                 deferred_claims.append(c)
