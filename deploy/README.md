@@ -9,10 +9,10 @@ One VM, two containers under Docker Compose, one firewall rule. See
 * **Storage**: 50 GB `pd-balanced` persistent disk mounted at `/mnt/disks/data`
 * **Containers**:
   * `app`: Streamlit research assistant UI and Agent 0–8 pipeline (port 8080)
-  * `grobid`: `grobid/grobid:0.8.1` with `JAVA_OPTS="-Xmx3g"` (internal port 8070)
-* **Backend**: OpenAI for chat (`gpt-4.1-mini`) and embeddings (`text-embedding-3-small`)
-* **Secrets**: `OPENAI_API_KEY` stored in Google Secret Manager, pulled into `/etc/app.env` at VM boot
-* **Access**: GCE firewall rule permitting port 8080 from caller's single `/32` IP
+* **Backend**:
+  * **Default (CPU VM / Local)**: Ollama for chat, synthesis & judgement (`gemma4:e2b`, `num_ctx: 4096`) and embeddings (`nomic-embed-text`).
+  * **Cloud Hosted**: Google Gemini (`gemini-3.5-flash-lite` via OpenAI-compatible endpoint) when `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) is set; embeddings remain on Ollama (`nomic-embed-text`) so existing vector indexes stay consistent.
+* **Secrets**: `GEMINI_API_KEY` (or `OPENAI_API_KEY` / `HF_TOKEN`) stored in Google Secret Manager, pulled into `/etc/app.env` (or persistent `/mnt/disks/data/.env`) at VM boot.
 
 ---
 

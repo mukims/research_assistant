@@ -21,7 +21,7 @@ from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.shared import pipeline_status
 
-st.set_page_config(page_title="Research Assistant", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Citation Needed! · Marvin the Citebot", page_icon="📚", layout="wide")
 os.makedirs(config.DATA_DIR, exist_ok=True)
 
 
@@ -1029,11 +1029,11 @@ with st.sidebar:
 
 # ─── Main ───────────────────────────────────────────────────────────────────
 
-st.title("📚 Research Assistant")
+st.title("📚 Citation Needed!")
 st.caption(
-    "Autonomous AI Research Assistant — Give it a research idea → it builds a "
-    "corpus from the literature and tells you what's already been done. Or hand it "
-    "a sentence and it finds the citation."
+    "Marvin the Citebot — Autonomous AI Research Assistant. Give it a research idea → "
+    "it builds a corpus from the literature and tells you what's already been done. "
+    "Or hand it a sentence and it finds the citation."
 )
 
 tab_build, tab_cite, tab_batch, tab_chat, tab_help = st.tabs(

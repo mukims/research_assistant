@@ -104,6 +104,18 @@ second thread on every run. `app.py` and `watch.py` can also be pointed at one
 can take minutes. It logs that it is waiting on the lock rather than blocking
 silently.
 
+### 1.5 Cooperative cancellation at discrete item boundaries
+
+Long-running pipelines and batch operations support cooperative cancellation via `pipeline_status.cancel_requested` (`is_cancel_requested()`, `request_cancel()`, `clear_cancel_request()`).
+
+**Why.** Hard process termination (`SIGKILL`, thread aborts) during ingestion or vector store writes risks leaving ChromaDB in an inconsistent state or leaving orphaned locks. Cooperative cancellation polls for an abort signal between discrete item boundaries:
+- At every LangGraph graph node boundary
+- Between individual PDF downloads during reference fetching (Agent 2)
+- Between individual PDF parsings and summarization calls during ingestion (Agent 3)
+- Between individual sentence judgments in citation auditing (Agent 8)
+
+Cancellation is never checked inside an in-flight LLM call, ensuring network requests finish cleanly and resources are released. Raising `PipelineCancelledError` unwinds execution gracefully, cleans up temporary files, and leaves persistent data stores intact. Future logging or transcript wrappers (such as `runlog`) must build directly on top of this cooperative protocol rather than establishing competing cancellation channels.
+
 ---
 
 ## 2. Orchestration
@@ -338,6 +350,16 @@ description is a separate `figure_description` chunk whose text opens with
 peaks at ±0.5 where the axis read ±1.0. Descriptions are retrievable for
 synthesis and chat; Agent 8 excludes them as evidence (`exclude_types`), so
 a citation verdict rests on the paper's text.
+
+### 4.10 Ingestion v2: Deliberate scope boundaries and accepted losses
+
+During the design and migration to Ingestion v2 (`CITATION_INDEX_VERSION=2`), five specific data sources were evaluated and intentionally excluded from indexing scope. These are documented architectural trade-offs, not unresolved defects:
+
+1. **Table cell contents**: GROBID `<tei:table>` rows and cell text are omitted from prose chunks. Table captions are always indexed as first-class `caption` chunks; fine-grained tabular cell retrieval is deferred.
+2. **Appendices**: Back-matter annexes (`<back><div type="annex">`) are skipped to prioritize peer-reviewed core body findings and maintain window coherence.
+3. **Display formulas**: Complex mathematical formulas are excluded from paragraph text chunks to prevent ASCII/Unicode glyph degradation from confounding dense and BM25 retrievals.
+4. **Vector-figure crops**: Rasterized crops rely on GROBID coordinate bounding boxes. For vector-only figures where coordinate bounding boxes are missing or approximate, crop generation is skipped gracefully while preserving the textual caption.
+5. **Legacy seed papers missing on-disk PDFs**: 19 seed papers from the early v1 corpus lacked full-text PDFs on disk (only cached summary/TEI records existed). The v2 index indexes only papers with confirmed full-text PDF files, keeping the on-disk PDF directory and ChromaDB index strictly in 1-to-1 parity.
 
 ---
 

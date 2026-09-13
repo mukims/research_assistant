@@ -1,6 +1,6 @@
-# 📚 Autonomous Academic Research Assistant — User & Developer Guide
+# 📚 Citation Needed! (Marvin the Citebot) — User & Developer Guide
 
-Welcome to the **Autonomous Academic Research Assistant**. This guide provides comprehensive documentation on using the web application across all five tabs, understanding the AI pipeline outputs, and running or developing the system locally.
+Welcome to **Citation Needed!**, powered by **Marvin the Citebot** (Autonomous Academic Research Assistant). This guide provides comprehensive documentation on using the web application across all five tabs, understanding the AI pipeline outputs, and running or developing the system locally.
 
 ---
 

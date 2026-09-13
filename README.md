@@ -1,4 +1,6 @@
-# Marvin the Citebot 🤖
+# Citation Needed! 🤖
+
+*Featuring Marvin the Citebot — Autonomous Academic Research Assistant*
 
 [![tests](https://github.com/mukims/research_assistant/actions/workflows/tests.yml/badge.svg)](https://github.com/mukims/research_assistant/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)

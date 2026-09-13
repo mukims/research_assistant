@@ -41,6 +41,7 @@ from research_assistant.config import (
     CHAT_OLLAMA_OPTIONS,
     CHAT_PER_DOC_CAP,
     CHAT_TEMPERATURE,
+    CHAT_WINDOW_TOKENS,
     DRAFTS_DIR,
 )
 from research_assistant.prompts import (
@@ -199,7 +200,9 @@ class ResearchChat:
 
     def _fit(self, user_content: str, mode: str | None = None) -> tuple[list[dict], int]:
         """Fit history within window, folding older turns into memory if needed."""
-        num_ctx = CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096)
+        num_ctx = CHAT_WINDOW_TOKENS
+        if CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096) != 4096:
+            num_ctx = CHAT_OLLAMA_OPTIONS["num_ctx"]
         folded = 0
         for _ in range(2):
             fixed = (
@@ -210,7 +213,7 @@ class ResearchChat:
             kept, dropped = fit_history(self.history, max(0, num_ctx - fixed))
             if not dropped:
                 break
-            logger.info("Folding %d earlier message(s) into memory to fit num_ctx=%d.", len(dropped), num_ctx)
+            logger.info("Folding %d earlier message(s) into memory to fit window=%d.", len(dropped), num_ctx)
             self._fold_memory(dropped)
             self.history = kept
             folded += 1
@@ -238,9 +241,12 @@ class ResearchChat:
         messages = [{"role": "system", "content": self._system_prompt(active_mode)}] + kept + [
             {"role": "user", "content": user_content}
         ]
-        num_ctx = CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096)
+        num_ctx = CHAT_WINDOW_TOKENS
+        if CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096) != 4096:
+            num_ctx = CHAT_OLLAMA_OPTIONS["num_ctx"]
         self.last_budget = {
             "num_ctx": num_ctx,
+            "window": num_ctx,
             "prompt_tokens_est": messages_tokens(messages),
             "reserve": CHAT_ANSWER_RESERVE_TOKENS,
             "context_chars": len(context),

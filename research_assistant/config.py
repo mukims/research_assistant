@@ -98,6 +98,10 @@ EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
 CHAT_OLLAMA_OPTIONS = {
     "num_ctx": 4096,           # Context window
 }
+CHAT_WINDOW_TOKENS          = _env_int(
+    "CITATION_CHAT_WINDOW_TOKENS",
+    32768 if LLM_BACKEND == "openai" else CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096),
+)
 CHAT_CONDENSE               = _env_bool("CITATION_CHAT_CONDENSE", True)
 CHAT_CONTEXT_MAX_CHARS      = _env_int("CITATION_CHAT_CONTEXT_MAX_CHARS", 7000)
 CHAT_ANSWER_RESERVE_TOKENS  = _env_int("CITATION_CHAT_ANSWER_RESERVE_TOKENS", 700)
