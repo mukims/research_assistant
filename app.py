@@ -1141,7 +1141,14 @@ with tab_build:
 
         if submitted:
             if not uploaded_files:
-                st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
+                if pdf_query.strip():
+                    st.info(
+                        f"💡 **Looking to research *\"{pdf_query.strip()}\"* without uploading a PDF?**\n\n"
+                        "Switch to the **'🔍 Search for a paper'** mode above, enter your topic into **Research idea**, and click **Build corpus** to automatically find and download literature from arXiv, OpenAlex, and Semantic Scholar.",
+                        icon="💡",
+                    )
+                else:
+                    st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
             else:
                 from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
 
