@@ -89,8 +89,10 @@ def _graph():
     return orchestrate.build_graph()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def _corpus_stats():
     """(chunks, papers) — cheap, tolerant of a missing/empty store."""
+
     chunks = 0
     try:
         import chromadb

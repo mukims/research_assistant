@@ -7,6 +7,13 @@ or a path only requires editing one file.
 
 import os
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=True)
+except ImportError:
+    pass
+
 # ─── Roots ───────────────────────────────────────────────────────────────────
 # config.py now lives inside the package, so the project root is two levels up.
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +23,14 @@ PROJECT_ROOT = os.path.dirname(PACKAGE_ROOT)
 # tree. Set CITATION_DATA_DIR to a writable path (e.g. /data) on a read-only or
 # ephemeral host.
 DATA_DIR = os.environ.get("CITATION_DATA_DIR", os.path.join(PROJECT_ROOT, "data"))
+
+# Also load from DATA_DIR/.env if present
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(DATA_DIR, ".env"), override=True)
+except ImportError:
+    pass
 
 
 # ─── Env helpers ─────────────────────────────────────────────────────────────
@@ -39,26 +54,45 @@ def _env_int(name: str, default: int) -> int:
 
 # ─── LLM / Embedding Backend ─────────────────────────────────────────────────
 # "ollama" (default) talks to a local Ollama daemon. "openai" talks to any
-# OpenAI-compatible chat endpoint — set OPENAI_BASE_URL / OPENAI_API_KEY. This
-# is what the Hugging Face Space uses (base URL = the HF router).
-LLM_BACKEND     = os.environ.get("LLM_BACKEND", "ollama").lower()
-# Embeddings can use a different provider from chat (e.g. hosted chat +
-# HF-hosted embeddings). Defaults to whatever LLM_BACKEND is; "huggingface"
-# uses huggingface_hub.InferenceClient feature-extraction.
-EMBED_BACKEND   = os.environ.get("CITATION_EMBED_BACKEND", LLM_BACKEND).lower()
+# OpenAI-compatible chat endpoint (including Google Gemini) — set OPENAI_BASE_URL
+# and OPENAI_API_KEY, or set GEMINI_API_KEY.
+GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://router.huggingface.co/v1")
-OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY") or os.environ.get("HF_TOKEN")
-HF_TOKEN        = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
+LLM_BACKEND     = os.environ.get("LLM_BACKEND")
+if GEMINI_API_KEY and (LLM_BACKEND is None or LLM_BACKEND.lower() == "ollama"):
+    # When GEMINI_API_KEY is supplied, default to OpenAI-compatible Gemini endpoint
+    LLM_BACKEND = "openai"
+elif LLM_BACKEND is None:
+    LLM_BACKEND = "ollama"
+LLM_BACKEND     = LLM_BACKEND.lower()
+
+# When Gemini is used, default to the official Google OpenAI-compatible endpoint
+# and gemini-3.6-flash, but keep EMBED_BACKEND="ollama" by default so existing
+# 25k chunks in ChromaDB work without re-indexing.
+if LLM_BACKEND == "openai" and GEMINI_API_KEY:
+    _default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    _default_llm_model = "gemini-3.5-flash-lite"
+    _default_embed_backend = "ollama"
+    if os.environ.get("CITATION_LLM_MODEL") in (None, "", "gemma4:e2b"):
+        os.environ["CITATION_LLM_MODEL"] = _default_llm_model
+    if os.environ.get("CITATION_CHAT_MODEL") in (None, "", "gemma4:e2b"):
+        os.environ["CITATION_CHAT_MODEL"] = _default_llm_model
+else:
+    _default_base_url = "https://router.huggingface.co/v1"
+    _default_llm_model = "gemma4:e2b"
+    _default_embed_backend = LLM_BACKEND
+
+EMBED_BACKEND   = os.environ.get("CITATION_EMBED_BACKEND", _default_embed_backend).lower()
+
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", _default_base_url)
+OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY") or os.environ.get("HF_TOKEN") or GEMINI_API_KEY
+HF_TOKEN        = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
 
 # ─── Models ──────────────────────────────────────────────────────────────────
-# Defaults are Ollama tags. Override every one by env when pointing at a hosted
-# backend, e.g. CITATION_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct.
-# (gemma4:latest is not a published Ollama tag — the registry 404s on it —
-#  gemma4:e2b is the variant that actually pulls.)
-LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", "gemma4:e2b")
-CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", "gemma4:e2b")
+LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", _default_llm_model)
+CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", _default_llm_model)
 EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
+
 
 # ─── Chat Model Runtime Options ──────────────────────────────────────────────
 CHAT_OLLAMA_OPTIONS = {
