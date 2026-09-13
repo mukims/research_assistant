@@ -501,6 +501,9 @@ def cross_check_seed_audit(
 
     downloaded_manifest = _load_downloaded_manifest()
     newly_judged_count = 0
+    initial_judged_count = sum(
+        1 for r in report.get("results", []) if r.get("outcome") == "judged"
+    )
 
     # 1. Identify claims whose reference PDFs became available since previous audit
     unresolved_claims = [
@@ -520,13 +523,18 @@ def cross_check_seed_audit(
         matched = _match_downloaded_paper(ref_info, seed_pdf_name, downloaded_manifest)
         if matched:
             item["downloaded"] = True
-            doc_name = (
-                matched.get("title")
-                or matched.get("key")
-                or os.path.basename(matched.get("path", ""))
+            doc_file = (
+                os.path.basename(matched["path"])
+                if matched.get("path")
+                else (matched.get("key") or matched.get("title") or "unknown.pdf")
             )
-            item["document"] = doc_name
-            item["citation_source"] = doc_name
+            item["document"] = doc_file
+            item["citation_source"] = (
+                matched.get("title")
+                or matched.get("raw_reference")
+                or matched.get("key")
+                or doc_file
+            )
             claims_to_rejudge.append(item)
 
     if claims_to_rejudge:
@@ -613,7 +621,7 @@ def cross_check_seed_audit(
     summary = {
         "duration_seconds": round(elapsed, 2),
         "total_claims": len(results),
-        "already_judged_count": totals["judged"] - newly_judged_count,
+        "already_judged_count": initial_judged_count,
         "newly_judged_count": newly_judged_count,
         "from_cache": True,
     }

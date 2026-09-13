@@ -724,6 +724,21 @@ This policy is deterministic, fully inspectable, and eliminates opaque heuristic
 - **Held-Out Guard (`split_held_out`)**: Any transform or case derived from prompt few-shot exemplars is held out from headline accuracy scoring to prevent data contamination and guarantee true out-of-distribution generalization.
 - **Scientific Metrics (`metrics.py`)**: Computes 5x5 confusion matrix, *Contradicts* vs *Does not support* error boundary counts, stability across repeated runs, and rubric violation frequencies.
 
+### 9.11 Persistent Audit Caching & Fast-Path Cross-Checking
+
+Auditing a paper's full bibliography from scratch takes 10–15 minutes on CPU VMs (GROBID reference extraction, Unpaywall/arXiv queries, PDF downloading, chunking, and 20 LLM claim verifications). Re-uploading an already-audited paper should never incur this cost again.
+
+`seed_audit.py` introduces persistent caching and sub-minute incremental cross-checking:
+- **Canonical Key Lookup (`get_cached_seed_audit`)**: Resolves an uploaded PDF to its deterministic key (`arxiv:<id>`, `doi:<doi>`, or `file:<sha1>`) matching `data/raw/seed_audits/{stem}_audit.json`.
+- **Sub-Minute Cross-Check Fast Path (`cross_check_seed_audit`)**:
+  1. Loads existing claims and verdicts in ~15 milliseconds.
+  2. Inspects `downloaded.json` to detect if any previously unresolved or deferred references have since been added to the corpus.
+  3. Incremental LLM evaluation: runs `_judge_claim_entry` *only* for the newly available reference claims (capped at 10 per pass).
+  4. Real-time in-memory policy refresh: re-evaluates `assess_source` and `evaluate_reliability` across all claims (< 50ms) to ensure badges, source grades, and totals reflect current policy logic.
+  5. Atomically writes the updated report to `{stem}_audit.json` and `{stem}_audit.md`.
+  6. Total turnaround is **2 to 12 seconds** (well under the 60-second limit).
+- **UI Integration**: In Tab 1 (`app.py`), single-paper uploads bypass the 5-stage ingestion pipeline when a cache entry exists, instantly displaying the verified audit report with an audit badge (`⚡ Loaded from Persistent Audit Cache in Xs`). Users can still opt for a full scratch rebuild by checking "Force re-run".
+
 ---
 
 ## 10. Things deliberately not done
