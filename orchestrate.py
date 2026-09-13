@@ -216,7 +216,10 @@ def respond(state: PipelineState) -> dict:
             try:
                 from research_assistant.shared import seed_audit
                 pipeline_status.add_event("🔍 Auditing in-text citations from seed paper…")
-                audit_result = seed_audit.audit_seed_citations(state["seed_path"])
+                audit_result = seed_audit.audit_seed_citations(
+                    state["seed_path"],
+                    force=state.get("force", False),
+                )
                 pipeline_status.add_event("✅ Seed citation audit complete")
             except Exception as e:
                 logger.warning("Seed citation audit encountered an error: %s", e)

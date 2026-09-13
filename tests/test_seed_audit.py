@@ -14,10 +14,12 @@ from research_assistant.shared.seed_audit import (
     _clean_claim_punctuation,
     _match_downloaded_paper,
     audit_seed_citations,
+    cross_check_seed_audit,
     explain_rubric_verdict,
     extract_seed_citation_claims,
     find_tei_for_seed,
     generate_seed_audit_markdown,
+    get_cached_seed_audit,
     get_deferred_missing_references,
     save_and_register_reference_pdf,
 )
@@ -142,6 +144,15 @@ MULTI_PARAGRAPH_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 class TestSeedAudit(unittest.TestCase):
+    def setUp(self):
+        self._audit_tmp = tempfile.TemporaryDirectory()
+        self._audit_patcher = patch("research_assistant.shared.seed_audit.AUDIT_DIR", self._audit_tmp.name)
+        self._audit_patcher.start()
+
+    def tearDown(self):
+        self._audit_patcher.stop()
+        self._audit_tmp.cleanup()
+
     def test_clean_claim_punctuation(self):
         self.assertEqual(
             _clean_claim_punctuation("Experiments confirmed this [ ] ."),
@@ -1146,5 +1157,147 @@ class TestSeedAudit(unittest.TestCase):
                 )
 
 
+class TestSeedAuditCaching(unittest.TestCase):
+    def test_get_cached_seed_audit_hit_and_miss(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmpdir):
+                # 1. Non-existent cache returns None
+                self.assertIsNone(get_cached_seed_audit("/path/to/nonexistent_paper.pdf"))
+
+                # 2. Corrupt json returns None without crashing
+                corrupt_file = os.path.join(tmpdir, "corrupt_audit.json")
+                with open(corrupt_file, "w") as f:
+                    f.write("{invalid-json")
+                self.assertIsNone(get_cached_seed_audit("corrupt.pdf"))
+
+                # 3. Valid cache is successfully loaded
+                valid_data = {
+                    "seed_name": "valid_paper.pdf",
+                    "totals": {"total": 1, "Supports": 1},
+                    "results": [{"claim": "Claim 1", "judgement": "Supports", "outcome": "judged"}],
+                }
+                valid_file = os.path.join(tmpdir, "valid_paper_audit.json")
+                with open(valid_file, "w") as f:
+                    json.dump(valid_data, f)
+
+                loaded = get_cached_seed_audit("/somewhere/valid_paper.pdf")
+                self.assertIsNotNone(loaded)
+                self.assertEqual(loaded["seed_name"], "valid_paper.pdf")
+                self.assertEqual(len(loaded["results"]), 1)
+
+    def test_cross_check_seed_audit_fast_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmpdir), \
+                 patch("research_assistant.shared.seed_audit._load_downloaded_manifest", return_value={}):
+                cached = {
+                    "seed_name": "sample_seed.pdf",
+                    "generated": "2026-09-13T10:00:00Z",
+                    "totals": {"total": 2, "judged": 1, "not_downloaded": 1},
+                    "results": [
+                        {
+                            "claim": "Graphene is 2D carbon.",
+                            "judgement": "Supports",
+                            "outcome": "judged",
+                            "confidence": "High",
+                            "ref": {"title": "Physical Review B Paper", "doi": "10.1103/PhysRevB.99.123456"},
+                        },
+                        {
+                            "claim": "Unchecked statement.",
+                            "judgement": "Unclear / insufficient evidence",
+                            "outcome": "not_downloaded",
+                            "ref": {"title": "Paywalled Paper", "doi": "10.1016/j.paywall.2020"},
+                        },
+                    ],
+                }
+
+                report, summary = cross_check_seed_audit("sample_seed.pdf", cached)
+                self.assertTrue(summary["from_cache"])
+                self.assertIn("duration_seconds", summary)
+                self.assertLess(summary["duration_seconds"], 1.0)
+                self.assertEqual(summary["newly_judged_count"], 0)
+                self.assertEqual(report["totals"]["total"], 2)
+                self.assertIn("reliability", report["totals"])
+                # First result is Physical Review B -> Rigorous Primary -> High reliability
+                self.assertEqual(report["results"][0]["reliability"], "HIGH")
+                # Second result is not downloaded -> Unresolved
+                self.assertEqual(report["results"][1]["reliability"], "UNRESOLVED")
+
+    def test_cross_check_seed_audit_with_newly_downloaded_reference(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_manifest = {
+                "arxiv_2201.00001": {
+                    "key": "arxiv:2201.00001",
+                    "title": "Quantum Transport Measurement",
+                    "doi": "10.1103/PhysRevLett.120.00001",
+                    "path": "/data/pulled/arxiv_2201.00001.pdf",
+                }
+            }
+            cached = {
+                "seed_name": "seed.pdf",
+                "totals": {"total": 1, "not_downloaded": 1, "judged": 0},
+                "results": [
+                    {
+                        "claim": "Quantum transport shows conductance quantization.",
+                        "judgement": "Unclear / insufficient evidence",
+                        "outcome": "not_downloaded",
+                        "ref": {
+                            "title": "Quantum Transport Measurement",
+                            "doi": "10.1103/PhysRevLett.120.00001",
+                        },
+                    }
+                ],
+            }
+
+            with patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmpdir), \
+                 patch("research_assistant.shared.seed_audit._load_downloaded_manifest", return_value=fake_manifest), \
+                 patch("research_assistant.shared.seed_audit._judge_claim_entry") as mock_judge:
+
+                def fake_judge(item, *args, **kwargs):
+                    item["outcome"] = "judged"
+                    item["judgement"] = "Supports"
+                    item["confidence"] = "High"
+                    item["span_verified"] = True
+                    return item
+
+                mock_judge.side_effect = fake_judge
+
+                report, summary = cross_check_seed_audit(
+                    "seed.pdf", cached, search_resources=(MagicMock(), MagicMock(), [], [])
+                )
+                self.assertEqual(summary["newly_judged_count"], 1)
+                self.assertEqual(report["totals"]["Supports"], 1)
+                self.assertEqual(report["totals"]["reliability"]["high"], 1)
+                mock_judge.assert_called_once()
+
+    def test_audit_seed_citations_skip_if_cached(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cached_report = {
+                "seed_name": "paper.pdf",
+                "totals": {"total": 1, "judged": 1, "Supports": 1},
+                "results": [{"claim": "Test claim", "judgement": "Supports", "outcome": "judged"}],
+            }
+            with patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmpdir), \
+                 patch("research_assistant.shared.seed_audit.get_cached_seed_audit", return_value=cached_report) as mock_get_cached, \
+                 patch("research_assistant.shared.seed_audit.cross_check_seed_audit") as mock_cross_check:
+
+                mock_cross_check.return_value = (cached_report, {"duration_seconds": 0.02, "from_cache": True})
+
+                # Call with skip_if_cached=True (default)
+                rep = audit_seed_citations("paper.pdf")
+                self.assertTrue(rep.get("from_cache"))
+                mock_get_cached.assert_called_once()
+                mock_cross_check.assert_called_once()
+
+                # Call with force=True -> bypasses cache
+                mock_get_cached.reset_mock()
+                mock_cross_check.reset_mock()
+                with patch("research_assistant.shared.seed_audit.find_tei_for_seed", return_value=None):
+                    rep_force = audit_seed_citations("paper.pdf", force=True)
+                    mock_get_cached.assert_not_called()
+                    mock_cross_check.assert_not_called()
+                    self.assertFalse(rep_force.get("from_cache", False))
+
+
 if __name__ == "__main__":
     unittest.main()
+

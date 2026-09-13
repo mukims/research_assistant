@@ -521,6 +521,19 @@ def _render_seed_citation_audit(final):
             else "seed_paper"
         )
 
+        if final.get("from_cache") or audit.get("from_cache"):
+            summary = final.get("cross_check_summary") or audit.get("cross_check_summary") or {}
+            dur = summary.get("duration_seconds")
+            dur_str = f" in **{dur:.1f}s**" if dur is not None else ""
+            rejudged = summary.get("newly_judged_count", 0)
+            rejudged_str = f" · {rejudged} newly available reference(s) evaluated" if rejudged > 0 else ""
+            st.info(
+                f"⚡ **Loaded from Persistent Audit Cache{dur_str}**: "
+                f"Cross-checked {totals.get('total', 0)} citation claims against current corpus{rejudged_str}. "
+                f"Reliability policy and source assessments verified in real time.",
+                icon="⚡",
+            )
+
         # Header with Title and Download Buttons
         c_title, c_dl1, c_dl2 = st.columns([3, 1, 1])
         with c_title:
@@ -1346,16 +1359,54 @@ with tab_audit:
             elif len(staged) == 1:
                 seed_file_path = staged[0]["path"]
                 effective_q = pdf_query.strip()
-                final = _run_pipeline_job(
-                    query=effective_q,
-                    seed_url_val=None,
-                    seed_file_path=seed_file_path,
-                    ask=ask,
-                    force=force,
-                    describe_figures=describe_figures,
-                    audit_citations=audit_citations,
+                from research_assistant.shared.seed_audit import (
+                    cross_check_seed_audit,
+                    get_cached_seed_audit,
                 )
-                effective_final_q = final.get("query") or effective_q or final.get("seed_label", "")
+
+                cached = get_cached_seed_audit(seed_file_path) if not force else None
+                if cached:
+                    with st.status(
+                        "⚡ Found existing audit — cross-checking references and reliability…",
+                        expanded=True,
+                    ) as status:
+                        cached_res = get_cached_search_resources(_get_resources_mtime())
+                        audit_res, summary = cross_check_seed_audit(
+                            seed_file_path, cached, search_resources=cached_res
+                        )
+                        status.update(
+                            label=f"Done — cross-checked in {summary['duration_seconds']:.1f}s!",
+                            state="complete",
+                        )
+
+                    effective_final_q = (
+                        effective_q
+                        or staged[0].get("title")
+                        or os.path.basename(seed_file_path)
+                    )
+                    final = {
+                        "seed_path": seed_file_path,
+                        "seed_label": effective_final_q,
+                        "citation_audit": audit_res,
+                        "from_cache": True,
+                        "cross_check_summary": summary,
+                    }
+                else:
+                    final = _run_pipeline_job(
+                        query=effective_q,
+                        seed_url_val=None,
+                        seed_file_path=seed_file_path,
+                        ask=ask,
+                        force=force,
+                        describe_figures=describe_figures,
+                        audit_citations=audit_citations,
+                    )
+                    effective_final_q = (
+                        final.get("query")
+                        or effective_q
+                        or final.get("seed_label", "")
+                    )
+
                 st.session_state["audit_result"] = final
                 st.session_state["audit_query"] = effective_final_q
                 st.session_state["build_result"] = final
@@ -1462,7 +1513,12 @@ with tab_audit:
                     _corpus_stats.clear()
 
     audit_res = st.session_state.get("audit_result") or st.session_state.get("build_result")
-    if audit_res and (audit_res.get("audit") or audit_res.get("batch_uploaded")):
+    if audit_res and (
+        audit_res.get("citation_audit")
+        or audit_res.get("audit")
+        or audit_res.get("batch_uploaded")
+        or audit_res.get("seed_path")
+    ):
         _render_build(audit_res, st.session_state.get("audit_query") or st.session_state.get("build_query", ""))
     else:
         st.markdown("---")

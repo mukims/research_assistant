@@ -4,9 +4,11 @@ and verify them against downloaded/ingested reference PDFs using the Agent 8 jud
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -346,11 +348,285 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
     return None
 
 
+def _judge_claim_entry(
+    item: dict,
+    collection,
+    bm25,
+    texts,
+    metadatas,
+    top_k: int = JUDGEMENT_TOP_K,
+    escalate_k: int = JUDGEMENT_ESCALATE_TOP_K,
+) -> dict:
+    """Evaluate a single claim against its cited document in the vector store."""
+    from research_assistant.judgement.judge import (
+        DERIVED_FIELDS,
+        REQUIRED_FIELDS,
+        JudgementParseError,
+    )
+
+    retrieve_k = max(top_k, escalate_k if escalate_k > top_k else 0)
+
+    try:
+        hits = hybrid_search(
+            item["claim"],
+            collection,
+            bm25,
+            texts,
+            metadatas,
+            top_k=retrieve_k,
+            doc_filter={item["document"]},
+            exclude_types={"figure_description"},
+        )
+    except Exception as exc:
+        logger.warning("Retrieval failed for %s: %s", item.get("document"), exc)
+        item["outcome"] = "retrieval_failed"
+        item["judgement"] = "Unclear / insufficient evidence"
+        item["reason"] = f"Retrieval failed: {exc}"
+        return item
+
+    if not hits:
+        item["outcome"] = "no_evidence"
+        item["judgement"] = "Unclear / insufficient evidence"
+        item["reason"] = "No relevant passages found in the cited document."
+        return item
+
+    expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+    item["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
+
+    try:
+        verdict = _judge_once(item["claim"], item["evidence"])
+        if escalate_k and len(hits) > top_k and needs_escalation(verdict):
+            item["first_judgement"] = verdict.get("judgement")
+            item["evidence"] = assemble_evidence(
+                hits[:escalate_k], JUDGEMENT_EVIDENCE_MAX_CHARS
+            )
+            verdict = _judge_once(item["claim"], item["evidence"])
+
+        item["outcome"] = "judged"
+        for k in REQUIRED_FIELDS:
+            if k in verdict:
+                item[k] = verdict[k]
+        for k in DERIVED_FIELDS:
+            if k in verdict:
+                item[k] = verdict[k]
+        logger.info(
+            " -> %s (%s confidence)",
+            verdict.get("judgement"),
+            verdict.get("confidence"),
+        )
+    except JudgementParseError as exc:
+        logger.warning("Judgement parse failed: %s", exc)
+        item["outcome"] = "parse_failed"
+        item["judgement"] = "Unclear / insufficient evidence"
+        item["reason"] = "Model returned unparseable response."
+    except Exception as exc:
+        logger.warning("Judgement call failed: %s", exc)
+        item["outcome"] = "call_failed"
+        item["judgement"] = "Unclear / insufficient evidence"
+        item["reason"] = f"Model evaluation error: {exc}"
+
+    return item
+
+
+def get_cached_seed_audit(seed_path: str) -> dict | None:
+    """Retrieve an existing audit report for a seed paper if available on disk.
+
+    Checks by filename stem, canonical arXiv/DOI/content-hash keys, and returns
+    the parsed report dict, or None if no valid audit exists.
+    """
+    if not seed_path:
+        return None
+
+    stem = os.path.splitext(os.path.basename(seed_path))[0]
+    candidates = [
+        os.path.join(AUDIT_DIR, f"{stem}_audit.json"),
+        os.path.join(AUDIT_DIR, f"arxiv_{stem}_audit.json"),
+    ]
+
+    # Try inspecting PDF on disk to resolve canonical key (e.g. if uploaded with a temp name)
+    if os.path.exists(seed_path):
+        try:
+            from research_assistant.agents.agent0_discoverer import _inspect_pdf
+            from research_assistant.shared.fetch import filename_for
+            _, doi, arxiv_id = _inspect_pdf(seed_path)
+            if arxiv_id:
+                k = f"arxiv:{arxiv_id.strip().lower()}"
+                s = os.path.splitext(filename_for(k))[0]
+                candidates.append(os.path.join(AUDIT_DIR, f"{s}_audit.json"))
+            elif doi:
+                norm_d = normalise_doi(doi) or doi.lower().strip()
+                k = f"doi:{norm_d}"
+                s = os.path.splitext(filename_for(k))[0]
+                candidates.append(os.path.join(AUDIT_DIR, f"{s}_audit.json"))
+            else:
+                with open(seed_path, "rb") as f:
+                    digest = hashlib.sha1(f.read()).hexdigest()[:16]
+                k = f"file:{digest}"
+                s = os.path.splitext(filename_for(k))[0]
+                candidates.append(os.path.join(AUDIT_DIR, f"{s}_audit.json"))
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    report = json.load(f)
+                if isinstance(report, dict) and report.get("results") is not None:
+                    return report
+            except Exception as exc:
+                logger.warning("Failed to load cached audit from %s: %s", candidate, exc)
+
+    return None
+
+
+def cross_check_seed_audit(
+    seed_path: str,
+    cached_report: dict,
+    search_resources=None,
+    max_new_claims: int = 10,
+) -> tuple[dict, dict]:
+    """Cross-check an existing audit report against the current knowledge base.
+
+    Verifies whether previously unretrieved / deferred citations are now available,
+    evaluates any newly available references, refreshes the Source Assessor and
+    Reliability Policy across all items in memory, recomputes totals, and persists
+    the updated report.
+    """
+    t0 = time.perf_counter()
+    report = dict(cached_report)
+    results = [dict(r) for r in report.get("results", [])]
+    seed_pdf_name = report.get("seed_name") or os.path.basename(seed_path)
+    stem = os.path.splitext(os.path.basename(seed_path))[0] if seed_path else "unknown"
+
+    downloaded_manifest = _load_downloaded_manifest()
+    newly_judged_count = 0
+
+    # 1. Identify claims whose reference PDFs became available since previous audit
+    unresolved_claims = [
+        r for r in results
+        if r.get("outcome") in (
+            "not_downloaded",
+            "deferred_paywalled",
+            "cap_exceeded",
+            "no_evidence",
+            "retrieval_failed",
+        )
+    ]
+
+    claims_to_rejudge = []
+    for item in unresolved_claims:
+        ref_info = item.get("ref")
+        matched = _match_downloaded_paper(ref_info, seed_pdf_name, downloaded_manifest)
+        if matched:
+            item["downloaded"] = True
+            doc_name = (
+                matched.get("title")
+                or matched.get("key")
+                or os.path.basename(matched.get("path", ""))
+            )
+            item["document"] = doc_name
+            item["citation_source"] = doc_name
+            claims_to_rejudge.append(item)
+
+    if claims_to_rejudge:
+        logger.info(
+            "Found %d previously unresolved citation(s) now available in corpus. Judging...",
+            len(claims_to_rejudge),
+        )
+        if search_resources is None:
+            from research_assistant.shared.db import load_search_resources
+
+            search_resources = load_search_resources()
+        collection, bm25, texts, metadatas = search_resources
+
+        for item in claims_to_rejudge[:max_new_claims]:
+            _judge_claim_entry(item, collection, bm25, texts, metadatas)
+            newly_judged_count += 1
+
+    # 2. In-memory refresh of Source Assessor and Reliability Policy across all claims
+    for r in results:
+        source_eval = assess_source(metadata=r.get("metadata") or {}, ref_info=r.get("ref"))
+        r["source_grade"] = source_eval["grade"]
+        r["source_assessment"] = source_eval
+        rel_eval = evaluate_reliability(
+            relation=r.get("judgement", "Unclear / insufficient evidence"),
+            source_grade=source_eval["grade"],
+            confidence=r.get("confidence", "Medium"),
+            span_verified=r.get("span_verified"),
+            rubric_violations=r.get("rubric_violations"),
+            rubric_mismatch=r.get("rubric_mismatch", False),
+        )
+        r["reliability"] = rel_eval["rating"]
+        r["reliability_badge"] = rel_eval["badge"]
+        r["reliability_label"] = rel_eval["rating_label"]
+        r["reliability_explanation"] = rel_eval["explanation"]
+
+    # 3. Recalculate totals
+    totals = {
+        "total": len(results),
+        "downloaded": sum(1 for r in results if r.get("downloaded")),
+        "judged": sum(1 for r in results if r.get("outcome") == "judged"),
+        "Supports": sum(1 for r in results if r.get("judgement") == "Supports"),
+        "Partially supports": sum(
+            1 for r in results if r.get("judgement") == "Partially supports"
+        ),
+        "Contradicts": sum(1 for r in results if r.get("judgement") == "Contradicts"),
+        "Does not support": sum(
+            1 for r in results if r.get("judgement") == "Does not support"
+        ),
+        "Unclear / insufficient evidence": sum(
+            1 for r in results if r.get("judgement") == "Unclear / insufficient evidence"
+        ),
+        "not_downloaded": sum(1 for r in results if r.get("outcome") == "not_downloaded"),
+        "deferred_paywalled": sum(
+            1 for r in results if r.get("outcome") == "deferred_paywalled"
+        ),
+        "reliability": {
+            "high": sum(1 for r in results if r.get("reliability") == "HIGH"),
+            "moderate": sum(1 for r in results if r.get("reliability") == "MODERATE"),
+            "low": sum(1 for r in results if r.get("reliability") == "LOW"),
+            "contradicted": sum(
+                1 for r in results if r.get("reliability") == "CONTRADICTED"
+            ),
+            "unresolved": sum(1 for r in results if r.get("reliability") == "UNRESOLVED"),
+        },
+    }
+
+    report["totals"] = totals
+    report["results"] = results
+    report["cross_checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # 4. Save refreshed report
+    os.makedirs(AUDIT_DIR, exist_ok=True)
+    out_file = os.path.join(AUDIT_DIR, f"{stem}_audit.json")
+    atomic_write_json(out_file, report)
+    try:
+        md_content = generate_seed_audit_markdown(report)
+        out_md = os.path.join(AUDIT_DIR, f"{stem}_audit.md")
+        with open(out_md, "w", encoding="utf-8") as fh:
+            fh.write(md_content)
+    except Exception as exc:
+        logger.warning("Could not update markdown audit report: %s", exc)
+
+    elapsed = time.perf_counter() - t0
+    summary = {
+        "duration_seconds": round(elapsed, 2),
+        "total_claims": len(results),
+        "already_judged_count": totals["judged"] - newly_judged_count,
+        "newly_judged_count": newly_judged_count,
+        "from_cache": True,
+    }
+    return report, summary
+
+
 def audit_seed_citations(
     seed_path: str,
     search_resources=None,
     max_claims: int = 20,
     top_k: int = JUDGEMENT_TOP_K,
+    force: bool = False,
+    skip_if_cached: bool = True,
 ) -> dict:
     """Audit the in-text citation claims of an uploaded seed paper against the local corpus.
 
@@ -359,10 +635,22 @@ def audit_seed_citations(
         search_resources: Tuple of (collection, bm25, texts, metadatas) or None to load.
         max_claims: Maximum number of claims citing downloaded papers to judge with the LLM.
         top_k: Number of hits to retrieve per claim.
+        force: If True, bypasses any cached audit and runs from scratch.
+        skip_if_cached: If True and an audit already exists, cross-checks and returns it.
 
     Returns:
         Structured audit report dict containing totals and detailed item results.
     """
+    if not force and skip_if_cached:
+        cached = get_cached_seed_audit(seed_path)
+        if cached:
+            logger.info("Found cached audit report for %s — running fast cross-check", seed_path)
+            report, summary = cross_check_seed_audit(
+                seed_path, cached, search_resources=search_resources
+            )
+            report["from_cache"] = True
+            report["cross_check_summary"] = summary
+            return report
     stem = os.path.splitext(os.path.basename(seed_path))[0] if seed_path else "unknown"
     seed_pdf_name = os.path.basename(seed_path) if seed_path else ""
 
@@ -537,65 +825,15 @@ def audit_seed_citations(
                 ref_lbl[:40],
                 item["claim"][:80],
             )
-
-            try:
-                hits = hybrid_search(
-                    item["claim"],
-                    collection,
-                    bm25,
-                    texts,
-                    metadatas,
-                    top_k=retrieve_k,
-                    doc_filter={item["document"]},
-                    exclude_types={"figure_description"},
-                )
-            except Exception as exc:
-                logger.warning("Retrieval failed for %s: %s", item["document"], exc)
-                item["outcome"] = "retrieval_failed"
-                item["judgement"] = "Unclear / insufficient evidence"
-                item["reason"] = f"Retrieval failed: {exc}"
-                continue
-
-            if not hits:
-                item["outcome"] = "no_evidence"
-                item["judgement"] = "Unclear / insufficient evidence"
-                item["reason"] = "No relevant passages found in the cited document."
-                continue
-
-            expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
-            item["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
-
-            try:
-                verdict = _judge_once(item["claim"], item["evidence"])
-                if escalate_k and len(hits) > top_k and needs_escalation(verdict):
-                    item["first_judgement"] = verdict.get("judgement")
-                    item["evidence"] = assemble_evidence(
-                        hits[:escalate_k], JUDGEMENT_EVIDENCE_MAX_CHARS
-                    )
-                    verdict = _judge_once(item["claim"], item["evidence"])
-
-                item["outcome"] = "judged"
-                for k in REQUIRED_FIELDS:
-                    if k in verdict:
-                        item[k] = verdict[k]
-                for k in DERIVED_FIELDS:
-                    if k in verdict:
-                        item[k] = verdict[k]
-                logger.info(
-                    " -> %s (%s confidence)",
-                    verdict.get("judgement"),
-                    verdict.get("confidence"),
-                )
-            except JudgementParseError as exc:
-                logger.warning("Judgement parse failed: %s", exc)
-                item["outcome"] = "parse_failed"
-                item["judgement"] = "Unclear / insufficient evidence"
-                item["reason"] = "Model returned unparseable response."
-            except Exception as exc:
-                logger.warning("Judgement call failed: %s", exc)
-                item["outcome"] = "call_failed"
-                item["judgement"] = "Unclear / insufficient evidence"
-                item["reason"] = f"Model evaluation error: {exc}"
+            _judge_claim_entry(
+                item,
+                collection,
+                bm25,
+                texts,
+                metadatas,
+                top_k=top_k,
+                escalate_k=escalate_k,
+            )
 
     for c in downloaded_claims[max_claims:]:
         if not c.get("outcome"):
