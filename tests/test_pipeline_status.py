@@ -251,8 +251,31 @@ def test_stale_detection_not_stale_if_pid_running(temp_status_file, monkeypatch)
     monkeypatch.setattr(pipeline_status, "_is_ingest_locked", lambda: False)
 
     status = pipeline_status.get_status()
-    # Process is running, so not marked stale
+    # Process is running, so not marked stale at 6 mins (< 10 mins)
     assert status["active"] is True
+
+
+def test_stale_detection_stale_if_abandoned_in_long_running_server(temp_status_file, monkeypatch):
+    twelve_mins_ago = (datetime.now(timezone.utc) - timedelta(minutes=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(temp_status_file, "w") as f:
+        json.dump(
+            {
+                "active": True,
+                "stage": "ingest_seed",
+                "current_item_name": "BM25 Index",
+                "updated_at": twelve_mins_ago,
+                "pid": 1234,
+            },
+            f,
+        )
+    # Long-running server PID is alive, but lock is not held and no heartbeat for > 10m
+    monkeypatch.setattr(pipeline_status, "_is_pid_running", lambda pid: True)
+    monkeypatch.setattr(pipeline_status, "_is_ingest_locked", lambda: False)
+
+    status = pipeline_status.get_status()
+    assert status["active"] is False
+    assert status["stage"] == "idle"
+    assert "timed out" in status["detail"].lower()
 
 
 def test_thread_safety(temp_status_file):

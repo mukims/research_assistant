@@ -873,6 +873,10 @@ def rebuild_bm25():
     clear_search_cache()
     elapsed = time.perf_counter() - t0
     pipeline_status.add_event(f"✅ BM25 index rebuilt ({len(paired)} chunks)")
+    pipeline_status.update_progress(
+        current_item_name="",
+        detail=f"BM25 index rebuilt ({len(paired)} chunks)",
+    )
     logger.info("✓ BM25 index rebuilt (%d documents, tokenizer %s) in %.1fs.",
                 len(paired), TOKENIZER_VERSION, elapsed)
 

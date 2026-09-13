@@ -358,7 +358,7 @@ def _check_and_resolve_stale(status: dict[str, Any]) -> dict[str, Any]:
             now = datetime.now(timezone.utc)
             age = (now - updated_time).total_seconds()
             if age > STALE_TIMEOUT_SECONDS:
-                is_stale = not _is_ingest_locked() and not _is_pid_running(pid)
+                is_stale = not _is_ingest_locked() and (not _is_pid_running(pid) or age > STALE_TIMEOUT_SECONDS * 2)
         except (ValueError, TypeError):
             is_stale = not _is_ingest_locked() and not _is_pid_running(pid)
 
@@ -380,8 +380,9 @@ def _check_and_resolve_stale(status: dict[str, Any]) -> dict[str, Any]:
                     u_t = datetime.fromisoformat(c)
                     if u_t.tzinfo is None:
                         u_t = u_t.replace(tzinfo=timezone.utc)
-                    if (datetime.now(timezone.utc) - u_t).total_seconds() > STALE_TIMEOUT_SECONDS:
-                        disk_stale = not _is_ingest_locked() and not _is_pid_running(disk_pid)
+                    disk_age = (datetime.now(timezone.utc) - u_t).total_seconds()
+                    if disk_age > STALE_TIMEOUT_SECONDS:
+                        disk_stale = not _is_ingest_locked() and (not _is_pid_running(disk_pid) or disk_age > STALE_TIMEOUT_SECONDS * 2)
                 except (ValueError, TypeError):
                     disk_stale = not _is_ingest_locked() and not _is_pid_running(disk_pid)
 
