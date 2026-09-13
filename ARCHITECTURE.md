@@ -690,6 +690,40 @@ failure; now it drives one.
 
 `judgement/prompt.md` puts the rubric and worked examples first and the `## Input` block (`{{CLAIM}}`, `{{CITATION_EVIDENCE}}`) last. On Ollama (`gemma4:e2b`), moving the variable input to the end gives Ollama a 3.7k-token invariant prompt prefix to cache across judgements. Benchmarking the regression suite (`scripts/judge_bench.py`) confirmed accuracy is preserved (6/6 pass) while warm median latency dropped by 35% (68.8s baseline → 44.4s reordered, max 128.5s → 45.9s).
 
+### 9.8 Scientific Source Assessor & Peer-Review Quality Grading
+
+`judgement/source_assessor.py` elevates citation audit from simple factual relation checking into true scientific rigor assessment. It inspects publication type, DOI prefixes, journal titles, and venue impact to classify cited evidence into standardized tiers (`SourceGrade`):
+- `RIGOROUS_PRIMARY`: High-impact peer-reviewed primary research journals (e.g. *Physical Review Letters*, *Physical Review B*, *Nature*, *Science*, *IEEE Transactions*). Special care is taken to recognize *Physical Review* publications as premier primary research despite the word "Review" in the publisher title.
+- `STANDARD_PRIMARY`: General peer-reviewed journal or conference publications.
+- `SECONDARY_REVIEW`: Secondary surveys, reviews, or meta-analyses (*Reviews of Modern Physics*, *Chemical Reviews*, *Annual Reviews*) synthesizing existing primary studies.
+- `PREPRINT_UNREVIEWED`: Non-peer-reviewed preprints (identified via arXiv `10.48550`, bioRxiv `10.1101`, SSRN, Research Square, etc.).
+- `RETRACTED_OR_FLAWED`: Flagged or retracted literature containing corrupted data or withdrawn findings.
+- `UNKNOWN`: Insufficient metadata to evaluate publication status.
+
+### 9.9 Deterministic Reliability Policy
+
+`judgement/policy.py` combines the LLM's factual relation verdict (*Supports*, *Partially supports*, *Contradicts*, *Does not support*, *Unclear*) with the objective `SourceGrade`, confidence score, and verbatim span verification into an actionable scientific reliability rating (`ReliabilityRating`):
+- `🟢 HIGH`: Requires factual support from peer-reviewed primary literature (`RIGOROUS_PRIMARY` or `STANDARD_PRIMARY`) with verbatim text match (`span_verified=True`) and high evaluation confidence.
+- `🟡 MODERATE`: Awarded when a claim is supported, but the evidence is drawn from an unreviewed preprint (`PREPRINT_UNREVIEWED`), a secondary survey (`SECONDARY_REVIEW`), or when the relation is qualified (*Partially supports*).
+- `🟠 LOW`: Assigned when the source is retracted/withdrawn, when the quoted evidence span fails verbatim match in the source PDF (hallucination risk), or when severe rubric violations occur.
+- `🔴 CONTRADICTED`: Hard refutation where cited peer-reviewed literature directly contradicts the assertion under equivalent experimental/theoretical regimes.
+- `⏳ UNRESOLVED`: Insufficient evidence, scope mismatch (*Does not support*), paywalled reference, or ambiguous findings.
+
+This policy is deterministic, fully inspectable, and eliminates opaque heuristic scoring.
+
+### 9.10 Held-Out Evaluation Harness & Systematic Perturbation Transforms
+
+`evaluate_judge.py`, `evalset.py`, and `transforms.py` establish a rigorous regression and benchmarking discipline:
+- **Evaluation Sets**: Partitioned into `human.jsonl` (hand-crafted test cases and negations) and `transforms.jsonl` (programmatic counterfactual perturbations).
+- **Perturbation Generators**: Five deterministic transforms stress-test specific error surfaces:
+  1. `cross_pair`: Mismatches claim with an unrelated chunk from the same paper.
+  2. `scope_swap`: Alters qualifiers, dimensionalities (e.g. 2D vs 3D), temperatures, or doping limits.
+  3. `number_swap`: Replaces numerical quantities, percentages, or order-of-magnitude estimates.
+  4. `delete_key_sentence`: Drops the essential corroborating statement to verify *sufficiency* drops to *Insufficient*.
+  5. `hedge_evidence`: Rewrites firm affirmations into speculative conjectures to verify calibration on *Partially supports*.
+- **Held-Out Guard (`split_held_out`)**: Any transform or case derived from prompt few-shot exemplars is held out from headline accuracy scoring to prevent data contamination and guarantee true out-of-distribution generalization.
+- **Scientific Metrics (`metrics.py`)**: Computes 5x5 confusion matrix, *Contradicts* vs *Does not support* error boundary counts, stability across repeated runs, and rubric violation frequencies.
+
 ---
 
 ## 10. Things deliberately not done
@@ -839,3 +873,25 @@ text-only fallback, nothing upstream stopped the *next* document attempting the
 same construction — a config that cannot load made every paper in a batch pay
 for a full Detectron2 build that was guaranteed to fail. The failure is now
 cached alongside successful models and re-raised without retrying.
+
+---
+
+## 12. Streamlit Application UI Architecture
+
+The interactive user interface (`app.py`) is structured into five distinct, specialized workspaces:
+
+1. **⚖️ Tab 1: Citation Auditor (`tab_audit`)**:
+   - The primary research verification tool. Accepts an uploaded seed PDF or searches the literature via arXiv.
+   - Extracts every in-text citation, downloads referenced literature, and computes both factual claim–evidence verdicts and scientific reliability grades.
+   - Features top-level Scientific Evidence Reliability metrics (High, Moderate, Low, Contradicted, Unresolved) and deep per-citation inspection cards with verbatim evidence highlights, source grades, and retry controls.
+2. **💡 Tab 2: Research Idea (`tab_idea`)**:
+   - Exploratory idea discovery engine (Agent 0 & Agent 4). Users type high-level research questions, hypotheses, or topics.
+   - Automatically crawls and indexes related literature, synthesizing state-of-the-art overviews and identifying unexplored research gaps.
+3. **✍️ Tab 3: Cite a Draft (`tab_draft`)**:
+   - Authoring assistant (Agent 5). Accepts draft paragraphs or LaTeX manuscript sections.
+   - Discovers where citations are needed across the text and injects precision citations matched against the indexed corpus.
+4. **💬 Tab 4: Research Chat (`tab_chat`)**:
+   - Multi-turn conversational brainstorming partner (Agent 7).
+   - Features query condensation (resolving pronouns and implicit references into standalone queries), multi-lens perspective selectors (Methodology, Contradictions, Hypotheses, Gaps, Explore), and persistent evidence scratchpad.
+5. **📖 Tab 5: How to Use (`tab_help`)**:
+   - Comprehensive interactive documentation (`HOW_TO_USE.md`) rendering workflows, troubleshooting guides, and system architecture directly within the interface.
