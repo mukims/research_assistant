@@ -364,13 +364,17 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         source_eval = assess_source({"venue": entry.get("citation_source")})
         entry["source_grade"] = source_eval["grade"]
         entry["source_assessment"] = source_eval
+        # A rating is a statement about a verdict; an orphaned, unresolved or
+        # failed entry has none, and must not be rated as if the judge had
+        # looked and shrugged.
         rel_eval = evaluate_reliability(
-            relation=entry.get("judgement", "Unclear / insufficient evidence"),
+            relation=entry.get("judgement"),
             source_grade=source_eval["grade"],
-            confidence=entry.get("confidence", "Medium"),
+            confidence=entry.get("confidence"),
             span_verified=entry.get("span_verified"),
             rubric_violations=entry.get("rubric_violations"),
             rubric_mismatch=entry.get("rubric_mismatch", False),
+            outcome=entry.get("outcome") or "judged",
         )
         entry["reliability"] = rel_eval["rating"]
         entry["reliability_badge"] = rel_eval["badge"]

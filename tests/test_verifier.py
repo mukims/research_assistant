@@ -414,6 +414,16 @@ class TestRetrievalFailure(VerifyDraftTestCase):
         self.assertEqual([r["outcome"] for r in report["results"]],
                          ["retrieval_failed", "judged"])
 
+    def test_a_failed_entry_gets_no_verdict_shaped_reliability(self):
+        """A retrieval failure was never judged. Its reliability line must say
+        "not assessed", not that the judge could not decide."""
+        _, report = self._run_flaky()
+        failed, judged = report["results"]
+        self.assertEqual(failed["reliability"], "UNRESOLVED")
+        self.assertTrue(failed["reliability_explanation"].startswith("Not assessed"))
+        self.assertIn("retrieval", failed["reliability_explanation"])
+        self.assertFalse(judged["reliability_explanation"].startswith("Not assessed"))
+
     def test_the_exception_type_is_recorded(self):
         """'RuntimeError: chroma is unreachable' and 'the model replied with
         garbage' are different bugs; the report has to tell them apart."""

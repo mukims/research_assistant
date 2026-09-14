@@ -35,6 +35,9 @@ NOT_ASSESSED_EXPLANATIONS = {
     "not_a_claim": "Not assessed — this citation is not a verifiable claim about the cited paper (software, pointer, or method reference).",
     "malformed_claim": "Not assessed — the extracted sentence is a fragment and could not be judged.",
     "unresolved_ref": "Not assessed — the citation could not be matched to a bibliography entry.",
+    # Agent 8 (draft verification) outcomes.
+    "orphaned": "Not assessed — the citation key in the draft is not in the citation mapping.",
+    "unresolved": "Not assessed — the cited source has no chunks in the corpus.",
     "not_downloaded": "Not assessed — the cited paper is not in the corpus.",
     "deferred_paywalled": "Not assessed — deferred because most references in this paragraph are missing.",
 }
