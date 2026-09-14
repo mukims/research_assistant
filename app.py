@@ -1172,7 +1172,84 @@ def _render_live_pipeline_status(key_suffix="tab1"):
 _render_tab1_live_status = _render_live_pipeline_status
 
 
-def _run_pipeline_job(
+def _execute_pipeline(inputs: dict, cfg: dict, display_q: str, on_snapshot=None) -> dict:
+    """Run the graph to completion and return its final state.
+
+    Runs in a job thread (see shared/run_jobs.py): it must never touch
+    Streamlit. Progress goes through pipeline_status — the file every
+    session already polls — and *on_snapshot* receives the partial state
+    after each node so a session can show the seed and its downloads while
+    the run continues. Cancellation is the pipeline_status flag the sidebar
+    button sets. Failure raises; the job records it.
+    """
+    graph = _graph()
+    final: dict = {}
+    pipeline_status.set_status(
+        active=True,
+        stage="discover",
+        stage_label="Finding seed paper",
+        current_step=1,
+        total_steps=5,
+        detail=f"Starting pipeline for: {display_q[:50]}",
+    )
+    pipeline_status.add_event(f"🚀 Pipeline started for: {display_q[:40]}")
+    try:
+        for update in graph.stream(inputs, cfg, stream_mode="updates"):
+            if pipeline_status.is_cancel_requested():
+                break
+            for node, payload in update.items():
+                final.update(payload or {})
+                if on_snapshot is not None:
+                    on_snapshot({**final, "_last_node": node})
+                if payload and payload.get("stopped"):
+                    break
+            if pipeline_status.is_cancel_requested():
+                break
+        if pipeline_status.is_cancel_requested():
+            pipeline_status.add_event("⏹️ Pipeline stopped by user")
+            pipeline_status.set_status(active=False, stage="idle", stage_label="Idle",
+                                       detail="Pipeline stopped by user")
+            raise pipeline_status.PipelineCancelledError("Pipeline stopped by user")
+        final = graph.get_state(cfg).values
+        if final.get("stopped"):
+            pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
+            pipeline_status.set_status(active=False, stage="idle", stage_label="Idle",
+                                       detail=f"Stopped: {final['stopped'][:60]}")
+        else:
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
+            pipeline_status.set_status(
+                active=False, stage="idle", stage_label="Idle", detail="Pipeline complete",
+                last_completed_at=now_iso, last_summary=f"Completed {display_q[:40]}",
+            )
+        return final
+    except pipeline_status.PipelineCancelledError:
+        raise
+    except BaseException as e:  # noqa: BLE001
+        if pipeline_status.is_cancellation(e):
+            pipeline_status.add_event("⚠️ Pipeline cancelled")
+            pipeline_status.set_status(active=False, stage="idle", stage_label="Idle",
+                                       detail="Pipeline cancelled")
+        else:
+            detail_str = pipeline_status.format_exception_detail(e)
+            pipeline_status.add_event(f"❌ Pipeline failed: {detail_str}")
+            pipeline_status.set_status(active=False, stage="idle", stage_label="Idle",
+                                       detail=f"Pipeline failed: {detail_str}")
+        raise
+    finally:
+        seed_file_path = inputs.get("seed_file")
+        if seed_file_path:
+            try:
+                raw_dir_abs = os.path.abspath(config.RAW_DIR)
+                seed_abs = os.path.abspath(seed_file_path)
+                if not (seed_abs == raw_dir_abs or seed_abs.startswith(raw_dir_abs + os.sep)):
+                    if os.path.exists(seed_file_path):
+                        os.unlink(seed_file_path)
+            except OSError:
+                pass
+
+
+def _start_pipeline_job(
     query: str,
     seed_url_val: str | None = None,
     seed_file_path: str | None = None,
@@ -1180,10 +1257,20 @@ def _run_pipeline_job(
     force: bool = False,
     describe_figures: bool = False,
     audit_citations: bool = True,
-) -> dict:
-    graph = _graph()
+    origin: str = "audit",
+) -> str | None:
+    """Start the pipeline as a server-side job and remember it in the URL.
+
+    Returns the job id, or None when another run is active (a warning is
+    shown). The id is deterministic in the input, so re-submitting the same
+    paper while its run is active attaches to that run instead of starting
+    a second one.
+    """
+    from research_assistant.shared import run_jobs
+
     thread_seed = query or (os.path.basename(seed_file_path) if seed_file_path else "run")
-    cfg = {"configurable": {"thread_id": hashlib.sha1(thread_seed.encode()).hexdigest()[:16]}}
+    job_id = run_jobs.job_id_for(thread_seed)
+    cfg = {"configurable": {"thread_id": job_id}}
     inputs = {
         "query": query,
         "workers": 1,
@@ -1194,161 +1281,156 @@ def _run_pipeline_job(
         "describe_figures": describe_figures,
         "audit_citations": audit_citations,
     }
+    display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
 
-    live = st.empty()
-    final = {}
+    def runner(on_snapshot):
+        return _execute_pipeline(inputs, cfg, display_q, on_snapshot=on_snapshot)
 
-    with st.status("Running the pipeline…", expanded=True) as status:
-        prog_bar = st.progress(0.0, text="Starting pipeline…")
-        stage_ranges = {
-            "discover": (0.0, 0.2),
-            "ingest_seed": (0.2, 0.4),
-            "extract": (0.4, 0.6),
-            "fetch": (0.6, 0.8),
-            "ingest_refs": (0.8, 0.95),
-            "respond": (0.95, 1.0),
-            "fallback": (0.95, 1.0),
-        }
-
-        def _on_pipeline_progress(st_data):
-            try:
-                st_stage = st_data.get("stage", "discover")
-                p_low, p_high = stage_ranges.get(st_stage, (0.0, 0.2))
-                try:
-                    ic = int(st_data.get("item_current") or 0)
-                    it = int(st_data.get("item_total") or 0)
-                    cs = int(st_data.get("current_step") or 1)
-                    ts = int(st_data.get("total_steps") or 5)
-                except (ValueError, TypeError):
-                    ic, it, cs, ts = 0, 0, 1, 5
-                lbl = st_data.get("stage_label") or st_stage
-                if it > 0:
-                    frac = min(1.0, max(0.0, ic / it))
-                    val = p_low + (p_high - p_low) * frac
-                    txt = f"Step {cs}/{ts}: {lbl} — {ic}/{it} papers ({int(frac * 100)}%)"
-                else:
-                    val = p_low + (p_high - p_low) * 0.25
-                    txt = f"Step {cs}/{ts}: {lbl}"
-                detail = st_data.get("detail")
-                if detail:
-                    txt += f" · {detail[:40]}"
-                prog_bar.progress(min(0.98, max(0.0, val)), text=txt)
-                curr_item = st_data.get("current_item_name")
-                if curr_item:
-                    status.update(label=f"Pipeline: {lbl} — {curr_item[:40]}")
-            except Exception:
-                pass
-
-        unreg_pipeline = pipeline_status.register_progress_callback(_on_pipeline_progress)
-
-        node_weights = {
-            "discover": (1, 0.2),
-            "ingest_seed": (2, 0.4),
-            "extract": (3, 0.6),
-            "fetch": (4, 0.8),
-            "ingest_refs": (5, 0.95),
-            "respond": (5, 1.0),
-            "fallback": (5, 1.0),
-        }
-        display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
-        pipeline_status.set_status(
-            active=True,
-            stage="discover",
-            stage_label="Finding seed paper",
-            current_step=1,
-            total_steps=5,
-            detail=f"Starting pipeline for: {display_q[:50]}",
+    try:
+        run_jobs.start_job(job_id, display_q, runner, origin=origin)
+    except run_jobs.JobBusy as busy:
+        st.warning(
+            f"A run is already active on the server ({busy.job.label}). "
+            "Wait for it to finish, or stop it from the sidebar, then submit again.",
+            icon="⏳",
         )
-        pipeline_status.add_event(f"🚀 Pipeline started for: {display_q[:40]}")
+        return None
+    st.query_params["job"] = job_id
+    st.session_state["active_job"] = job_id
+    st.session_state["active_job_origin"] = origin
+    return job_id
+
+
+def _resolve_job(job_id: str):
+    """(state, final, error, origin) for a job id, from the registry first
+    and the run record on disk second — the disk is what survives a server
+    restart. state is running | done | failed | cancelled | None."""
+    from research_assistant.shared import run_jobs
+
+    job = run_jobs.get_job(job_id)
+    if job is not None:
+        if job.state == "running":
+            return "running", None, None, job.origin
+        if job.state == "done":
+            return "done", job.result, None, job.origin
+        return job.state, None, job.error, job.origin
+    record = run_jobs.load_run(job_id)
+    if record:
+        return "done", record.get("final") or {}, None, record.get("origin", "audit")
+    return None, None, None, None
+
+
+def _adopt_job_result(final: dict, origin: str) -> None:
+    """Put a finished run where the tabs already look for it."""
+    label = final.get("query") or final.get("seed_label") or os.path.basename(final.get("seed_path") or "") or ""
+    if origin == "idea":
+        st.session_state["idea_result"] = final
+        st.session_state["idea_query"] = label
+    else:
+        st.session_state["audit_result"] = final
+        st.session_state["audit_query"] = label
+        st.session_state["build_result"] = final
+        st.session_state["build_query"] = label
+    st.session_state.pop("active_job", None)
+    st.session_state.pop("active_job_origin", None)
+
+
+@st.fragment(run_every="2s")
+def _render_job_progress(job_id: str):
+    """The live view of a running job. Rerenders every 2 s from
+    pipeline_status and the job's snapshot; when the job ends, reruns the
+    whole app so the tab renders the result."""
+    from research_assistant.shared import run_jobs
+
+    job = run_jobs.get_job(job_id)
+    if job is None or job.state != "running":
+        st.rerun(scope="app")
+        return
+    with st.container(border=True):
+        st.markdown(f"#### ⏳ Running: `{job.label}`")
+        st.caption(
+            "This run continues on the server. You can refresh this page, open it in another tab, "
+            "or come back later — the URL keeps the job id, and the report will be here when it finishes."
+        )
+        status = pipeline_status.get_status()
+        stage = status.get("stage_label") or "Starting"
         try:
-            for update in graph.stream(inputs, cfg, stream_mode="updates"):
-                if pipeline_status.is_cancel_requested():
-                    break
-                for node, payload in update.items():
-                    icon, label = STEPS.get(node, ("•", node))
-                    st.write(f"{icon} {label}")
-                    step_num, progress_val = node_weights.get(node, (1, 0.2))
-                    prog_bar.progress(progress_val, text=f"Step {step_num}/5: {label}")
-                    final.update(payload or {})
-                    if node in ("discover", "ingest_seed", "extract", "fetch", "ingest_refs"):
-                        with live.container():
-                            effective_display_q = final.get("query") or query
-                            _render_seed_and_downloads(effective_display_q, final)
-                    if payload and payload.get("stopped"):
-                        break
-                if pipeline_status.is_cancel_requested():
-                    break
-            if pipeline_status.is_cancel_requested():
-                status.update(label="Pipeline stopped by user", state="error")
-                st.warning("Pipeline execution stopped by user.", icon="⏹️")
-            else:
-                final = graph.get_state(cfg).values
-                prog_bar.progress(1.0, text="Pipeline complete!")
-                if final.get("stopped"):
-                    status.update(label="Stopped early", state="error")
-                    pipeline_status.add_event(f"⚠️ Pipeline stopped early: {final['stopped'][:60]}")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail=f"Stopped: {final['stopped'][:60]}",
-                    )
-                else:
-                    status.update(label="Done", state="complete")
-                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    pipeline_status.add_event(f"✅ Pipeline completed: {display_q[:40]}")
-                    pipeline_status.set_status(
-                        active=False,
-                        stage="idle",
-                        stage_label="Idle",
-                        detail="Pipeline complete",
-                        last_completed_at=now_iso,
-                        last_summary=f"Completed {display_q[:40]}",
-                    )
-        except BaseException as e:  # noqa: BLE001
-            if pipeline_status.is_cancellation(e):
-                try:
-                    status.update(label="Pipeline cancelled", state="error")
-                except Exception:
-                    pass
-                pipeline_status.add_event("⚠️ Pipeline cancelled (session reloaded or stopped)")
-                pipeline_status.set_status(
-                    active=False,
-                    stage="idle",
-                    stage_label="Idle",
-                    detail="Pipeline cancelled",
-                )
-                raise
-            else:
-                try:
-                    status.update(label="Pipeline failed", state="error")
-                except Exception:
-                    pass
-                detail_str = pipeline_status.format_exception_detail(e)
-                pipeline_status.add_event(f"❌ Pipeline failed: {detail_str}")
-                pipeline_status.set_status(
-                    active=False,
-                    stage="idle",
-                    stage_label="Idle",
-                    detail=f"Pipeline failed: {detail_str}",
-                )
-                if isinstance(e, Exception):
-                    st.exception(e)
-                else:
-                    raise
-        finally:
-            unreg_pipeline()
-            if seed_file_path:
-                try:
-                    raw_dir_abs = os.path.abspath(config.RAW_DIR)
-                    seed_abs = os.path.abspath(seed_file_path)
-                    if not (seed_abs == raw_dir_abs or seed_abs.startswith(raw_dir_abs + os.sep)):
-                        if os.path.exists(seed_file_path):
-                            os.unlink(seed_file_path)
-                except OSError:
-                    pass
-    live.empty()
-    return final
+            step, total = int(status.get("current_step") or 1), int(status.get("total_steps") or 5)
+        except (ValueError, TypeError):
+            step, total = 1, 5
+        try:
+            item_c, item_t = int(status.get("item_current") or 0), int(status.get("item_total") or 0)
+        except (ValueError, TypeError):
+            item_c, item_t = 0, 0
+        if item_t > 0:
+            st.progress(min(1.0, max(0.0, item_c / item_t)), text=f"Step {step}/{total}: {stage} — {item_c}/{item_t}")
+        else:
+            st.progress(min(1.0, max(0.0, step / max(1, total))), text=f"Step {step}/{total}: {stage}")
+        if status.get("detail"):
+            st.caption(f"⚙️ {status['detail']}")
+        if status.get("recent_events"):
+            with st.expander("📋 Live Activity Log", expanded=False):
+                for ev in reversed(status["recent_events"][-8:]):
+                    st.write(ev)
+        if job.snapshot:
+            _render_seed_and_downloads(job.snapshot.get("query") or job.label, job.snapshot)
+
+
+def _handle_job_state(origin: str) -> bool:
+    """Show a running job, adopt a finished one, explain a failed one.
+
+    The job id comes from this session (it started the run) or from the
+    URL (the page was refreshed, or opened elsewhere). Returns True when a
+    running job was rendered and the tab should show nothing else.
+    """
+    from research_assistant.shared import run_jobs
+
+    job_id = st.session_state.get("active_job") or st.query_params.get("job")
+    if not job_id:
+        return False
+    state, final, error, job_origin = _resolve_job(job_id)
+    if job_origin not in (None, origin):
+        return False  # belongs to the other tab
+    if state == "running":
+        _render_job_progress(job_id)
+        return True
+    if state == "done":
+        already = st.session_state.get("idea_result" if origin == "idea" else "audit_result")
+        if not already or st.session_state.get("active_job") == job_id:
+            _adopt_job_result(final or {}, job_origin or origin)
+        return False
+    if state in ("failed", "cancelled"):
+        st.session_state.pop("active_job", None)
+        if state == "failed":
+            st.error(f"The run failed: {error}", icon="❌")
+        else:
+            st.warning("The run was stopped before it finished.", icon="⏹️")
+        return False
+    st.info(
+        f"No record of run `{job_id}` on this server — it may have been started before the last restart "
+        "and not finished. Pick a recent run below or start a new one.",
+        icon="ℹ️",
+    )
+    st.session_state.pop("active_job", None)
+    return False
+
+
+def _render_recent_runs(origin: str) -> None:
+    """Open a finished run from disk without re-uploading anything."""
+    from research_assistant.shared import run_jobs
+
+    runs = [r for r in run_jobs.list_runs() if r.get("origin", "audit") == origin]
+    if not runs:
+        return
+    options = {f"{r['label'] or r['seed_name'] or r['job_id']} — {r['saved_at'][:16].replace('T', ' ')}": r["job_id"] for r in runs}
+    with st.container(border=True):
+        st.markdown("###### 🗂️ Recent runs on this server")
+        choice = st.selectbox("Open a finished run", list(options), key=f"recent_runs_{origin}", label_visibility="collapsed")
+        if st.button("Open", key=f"open_recent_run_{origin}"):
+            st.query_params["job"] = options[choice]
+            st.session_state["active_job"] = options[choice]
+            st.session_state["active_job_origin"] = origin
+            st.rerun()
 
 
 # ─── Tab 1: citation auditor ───────────────────────────────────────────────
@@ -1437,8 +1519,17 @@ with tab_audit:
                         "from_cache": True,
                         "cross_check_summary": summary,
                     }
+                    st.session_state["audit_result"] = final
+                    st.session_state["audit_query"] = effective_final_q
+                    st.session_state["build_result"] = final
+                    st.session_state["build_query"] = effective_final_q
                 else:
-                    final = _run_pipeline_job(
+                    # The ten-minute path runs as a server-side job: this
+                    # session (or any other, after a refresh) follows it by
+                    # the job id in the URL and adopts the result when done.
+                    for key in ("audit_result", "audit_query", "build_result", "build_query"):
+                        st.session_state.pop(key, None)
+                    _start_pipeline_job(
                         query=effective_q,
                         seed_url_val=None,
                         seed_file_path=seed_file_path,
@@ -1446,17 +1537,8 @@ with tab_audit:
                         force=force,
                         describe_figures=describe_figures,
                         audit_citations=audit_citations,
+                        origin="audit",
                     )
-                    effective_final_q = (
-                        final.get("query")
-                        or effective_q
-                        or final.get("seed_label", "")
-                    )
-
-                st.session_state["audit_result"] = final
-                st.session_state["audit_query"] = effective_final_q
-                st.session_state["build_result"] = final
-                st.session_state["build_query"] = effective_final_q
             else:
                 with st.status(f"Batch ingesting {len(staged)} papers into corpus…", expanded=True) as status:
                     batch_progress = st.progress(0.0, text=f"Preparing to ingest {len(staged)} papers…")
@@ -1558,8 +1640,13 @@ with tab_audit:
                     st.session_state["build_query"] = effective_final_q
                     _corpus_stats.clear()
 
+    # A running job renders its own live view; a finished one is adopted
+    # into session state here, so the read below must come after the call.
+    job_running = _handle_job_state("audit")
     audit_res = st.session_state.get("audit_result") or st.session_state.get("build_result")
-    if audit_res and (
+    if job_running:
+        pass
+    elif audit_res and (
         audit_res.get("citation_audit")
         or audit_res.get("audit")
         or audit_res.get("batch_uploaded")
@@ -1567,6 +1654,7 @@ with tab_audit:
     ):
         _render_build(audit_res, st.session_state.get("audit_query") or st.session_state.get("build_query", ""))
     else:
+        _render_recent_runs("audit")
         st.markdown("---")
         st.markdown(
             "#### 🔍 How Seed Paper Citation Auditing Works\n\n"
@@ -1615,7 +1703,9 @@ with tab_idea:
         else:
             q = query.strip()
             seed_url_val = seed_url.strip() or None
-            final = _run_pipeline_job(
+            for key in ("idea_result", "idea_query"):
+                st.session_state.pop(key, None)
+            _start_pipeline_job(
                 query=q,
                 seed_url_val=seed_url_val,
                 seed_file_path=None,
@@ -1623,16 +1713,17 @@ with tab_idea:
                 force=force,
                 describe_figures=describe_figures,
                 audit_citations=False,
+                origin="idea",
             )
-            effective_final_q = final.get("query") or q or final.get("seed_label", "")
-            st.session_state["idea_result"] = final
-            st.session_state["idea_query"] = effective_final_q
-            _corpus_stats.clear()
 
-    idea_res = st.session_state.get("idea_result")
-    if idea_res:
+    if _handle_job_state("idea"):
+        pass  # a run is in progress; its live view is on screen
+    elif st.session_state.get("idea_result"):
+        idea_res = st.session_state["idea_result"]
+        _corpus_stats.clear()
         _render_build(idea_res, st.session_state.get("idea_query", ""))
     else:
+        _render_recent_runs("idea")
         st.markdown("---")
         st.markdown(
             "#### 💡 How Literature Discovery Works\n\n"
