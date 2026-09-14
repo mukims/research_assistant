@@ -1809,6 +1809,68 @@ class TestLeadingMarkerBelongsToPreviousSentence(unittest.TestCase):
         self.assertTrue(by_ref["b2"]["claim"].startswith("Smith et al. (2020) showed"))
 
 
+class TestAbortedAuditsAreNotCached(unittest.TestCase):
+    """Seen live on 2026-09-14: a run that hit the backend-failure breaker
+    (Ollama still starting after a container restart) was saved to disk;
+    every later upload of the same paper was served that record from the
+    cache — abort banner, 0 of 48 assessed — while Ollama had long been up.
+    A report the judge never got to run on is not a cache hit."""
+
+    def _write(self, tmp, report):
+        with open(os.path.join(tmp, "seed_audit.json"), "w", encoding="utf-8") as fh:
+            json.dump(report, fh)
+
+    def test_aborted_report_is_not_a_cache_hit(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmp):
+            self._write(tmp, {"results": [{"outcome": "not_attempted"}], "aborted": {"reason": "Failed to connect to Ollama", "after_attempted": 3}})
+            self.assertIsNone(get_cached_seed_audit("seed.pdf"))
+
+    def test_report_with_no_verdicts_and_backend_failures_is_not_a_cache_hit(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmp):
+            self._write(tmp, {"results": [{"outcome": "retrieval_failed"}, {"outcome": "not_downloaded"}], "aborted": None})
+            self.assertIsNone(get_cached_seed_audit("seed.pdf"))
+
+    def test_include_failed_returns_the_stale_report_for_an_audit_only_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmp):
+            self._write(tmp, {"results": [{"outcome": "not_attempted"}], "aborted": {"reason": "down", "after_attempted": 3}})
+            self.assertIsNone(get_cached_seed_audit("seed.pdf"))
+            self.assertIsNotNone(get_cached_seed_audit("seed.pdf", include_failed=True))
+
+    def test_healthy_report_is_still_a_cache_hit(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmp):
+            self._write(tmp, {"results": [{"outcome": "judged", "judgement": "Supports"}, {"outcome": "retrieval_failed"}], "aborted": None})
+            self.assertIsNotNone(get_cached_seed_audit("seed.pdf"))
+
+    def test_cross_check_rejudges_backend_failures_even_with_the_default_cap(self):
+        """Rows that failed on the backend already carry their document; they
+        are re-judged on the next cross-check regardless of max_new_claims,
+        which only budgets *newly available* references."""
+        cached = {
+            "seed_name": "seed.pdf",
+            "totals": {"total": 3, "judged": 1},
+            "results": [
+                {"claim": "c1", "outcome": "judged", "judgement": "Supports", "document": "a.pdf", "ref": {"title": "A"}},
+                {"claim": "c2", "outcome": "retrieval_failed", "judgement": None, "document": "b.pdf", "downloaded": True,
+                 "reason": "Retrieval failed: Failed to connect to Ollama", "ref": {"title": "B"}},
+                {"claim": "c3", "outcome": "not_attempted", "judgement": None, "document": "c.pdf", "downloaded": True,
+                 "reason": "Audit stopped", "ref": {"title": "C"}},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("research_assistant.shared.seed_audit.AUDIT_DIR", tmp), \
+             patch("research_assistant.shared.seed_audit._load_downloaded_manifest", return_value={}), \
+             patch("research_assistant.shared.seed_audit._judge_claim_entry") as mock_judge:
+            def fake_judge(item, *a, **k):
+                item["outcome"] = "judged"; item["judgement"] = "Supports"; item["confidence"] = "High"; item["span_verified"] = True
+                return item
+            mock_judge.side_effect = fake_judge
+            report, summary = cross_check_seed_audit("seed.pdf", cached, search_resources=(MagicMock(), MagicMock(), [], []))
+        self.assertEqual(summary["newly_judged_count"], 2)
+        self.assertEqual(report["totals"]["judged"], 3)
+        self.assertEqual(report["totals"]["not_assessed"], {})
+        self.assertIsNone(report.get("aborted"))
+
+
 class TestManifestPathPortability(unittest.TestCase):
     """downloaded.json records absolute paths. When the data directory moves
     (another mount, another machine), the PDFs are still there under

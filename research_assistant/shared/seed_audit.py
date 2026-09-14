@@ -543,11 +543,14 @@ def _judge_claim_entry(
     return item
 
 
-def get_cached_seed_audit(seed_path: str) -> dict | None:
+def get_cached_seed_audit(seed_path: str, include_failed: bool = False) -> dict | None:
     """Retrieve an existing audit report for a seed paper if available on disk.
 
     Checks by filename stem, canonical arXiv/DOI/content-hash keys, and returns
-    the parsed report dict, or None if no valid audit exists.
+    the parsed report dict, or None if no valid audit exists. A report the
+    judge never ran on (the backend was down) is not returned unless
+    *include_failed* — the caller then knows the corpus is ready and only the
+    audit needs re-running.
     """
     if not seed_path:
         return None
@@ -588,11 +591,29 @@ def get_cached_seed_audit(seed_path: str) -> dict | None:
                 with open(candidate, "r", encoding="utf-8") as f:
                     report = json.load(f)
                 if isinstance(report, dict) and report.get("results") is not None:
+                    if _audit_never_ran(report) and not include_failed:
+                        logger.info("Ignoring cached audit %s: the judge never ran (backend was down).", candidate)
+                        return None
                     return report
             except Exception as exc:
                 logger.warning("Failed to load cached audit from %s: %s", candidate, exc)
 
     return None
+
+
+BACKEND_FAILURE_OUTCOMES_ALL = ("retrieval_failed", "call_failed", "not_attempted")
+
+
+def _audit_never_ran(report: dict) -> bool:
+    """A report the judge never got to work on — the run tripped the
+    backend-failure breaker, or produced no verdict and only backend
+    failures. Serving it from cache repeats an outage that is over."""
+    if report.get("aborted"):
+        return True
+    results = report.get("results") or []
+    judged = any(r.get("outcome") == "judged" for r in results)
+    failed = any(r.get("outcome") in BACKEND_FAILURE_OUTCOMES_ALL for r in results)
+    return failed and not judged
 
 
 VERDICTS = (
@@ -726,8 +747,18 @@ def cross_check_seed_audit(
         )
     ]
 
+    # Rows that failed on the backend already know their document; a
+    # re-judge costs one call each and is what turns an outage into
+    # verdicts. They do not count against max_new_claims, which budgets
+    # references that only became available since the last run.
+    backend_failed = [
+        item for item in unresolved_claims
+        if item.get("outcome") in BACKEND_FAILURE_OUTCOMES_ALL and item.get("document")
+    ]
     claims_to_rejudge = []
     for item in unresolved_claims:
+        if item in backend_failed:
+            continue
         ref_info = item.get("ref")
         matched = _match_downloaded_paper(ref_info, seed_pdf_name, downloaded_manifest)
         if matched:
@@ -746,11 +777,11 @@ def cross_check_seed_audit(
             )
             claims_to_rejudge.append(item)
 
-    if claims_to_rejudge and max_new_claims > 0:
+    to_judge = backend_failed + claims_to_rejudge[:max_new_claims]
+    if to_judge:
         logger.info(
-            "Found %d previously unresolved citation(s) now available in corpus. Judging up to %d...",
-            len(claims_to_rejudge),
-            max_new_claims,
+            "Cross-check: re-judging %d backend-failed citation(s) and %d newly available (cap %d).",
+            len(backend_failed), min(len(claims_to_rejudge), max_new_claims), max_new_claims,
         )
         if search_resources is None:
             from research_assistant.shared.db import load_search_resources
@@ -758,9 +789,12 @@ def cross_check_seed_audit(
             search_resources = load_search_resources()
         collection, bm25, texts, metadatas = search_resources
 
-        for item in claims_to_rejudge[:max_new_claims]:
+        for item in to_judge:
             _judge_claim_entry(item, collection, bm25, texts, metadatas)
             newly_judged_count += 1
+        # The outage the old record describes is over once anything was
+        # re-judged; the banner must not outlive it.
+        report["aborted"] = None
 
     # 2. In-memory refresh of Source Assessor and Reliability Policy across all claims
     for r in results:

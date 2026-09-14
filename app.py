@@ -1301,6 +1301,44 @@ def _start_pipeline_job(
     return job_id
 
 
+def _start_audit_job(seed_file_path: str, label: str, origin: str = "audit") -> str | None:
+    """Re-run only the citation audit for a paper whose seed and references
+    are already in the corpus — the case where a cached report exists but
+    the judge never ran on it. Same job machinery as the full pipeline, so
+    it too survives a refresh."""
+    from research_assistant.shared import run_jobs
+    from research_assistant.shared.seed_audit import audit_seed_citations
+
+    job_id = run_jobs.job_id_for(os.path.basename(seed_file_path))
+
+    def runner():
+        pipeline_status.set_status(
+            active=True, stage="respond", stage_label="Auditing citations",
+            current_step=5, total_steps=5, detail=f"Re-running citation audit for: {label[:50]}",
+        )
+        pipeline_status.add_event(f"🔍 Re-running citation audit: {label[:40]}")
+        try:
+            audit = audit_seed_citations(seed_file_path, force=True, skip_if_cached=False)
+            pipeline_status.add_event("✅ Seed citation audit complete")
+            return {"seed_path": seed_file_path, "seed_label": label, "citation_audit": audit, "audit_only": True}
+        finally:
+            pipeline_status.set_status(active=False, stage="idle", stage_label="Idle", detail="Audit complete")
+
+    try:
+        run_jobs.start_job(job_id, label, runner, origin=origin)
+    except run_jobs.JobBusy as busy:
+        st.warning(
+            f"A run is already active on the server ({busy.job.label}). "
+            "Wait for it to finish, or stop it from the sidebar, then submit again.",
+            icon="⏳",
+        )
+        return None
+    st.query_params["job"] = job_id
+    st.session_state["active_job"] = job_id
+    st.session_state["active_job_origin"] = origin
+    return job_id
+
+
 def _resolve_job(job_id: str):
     """(state, final, error, origin) for a job id, from the registry first
     and the run record on disk second — the disk is what survives a server
@@ -1493,7 +1531,27 @@ with tab_audit:
                 )
 
                 cached = get_cached_seed_audit(seed_file_path) if not force else None
-                if cached:
+                # A record exists but the judge never ran on it (backend was
+                # down): the corpus already holds the seed and its references,
+                # so only the audit is re-run — as a job, not in this session.
+                stale = (
+                    None if (cached or force)
+                    else get_cached_seed_audit(seed_file_path, include_failed=True)
+                )
+                if stale:
+                    for key in ("audit_result", "audit_query", "build_result", "build_query"):
+                        st.session_state.pop(key, None)
+                    st.info(
+                        "The previous audit of this paper never reached the judge (the model backend was down). "
+                        "Its references are already indexed — re-running just the audit.",
+                        icon="🔁",
+                    )
+                    _start_audit_job(
+                        seed_file_path,
+                        label=effective_q or staged[0].get("title") or os.path.basename(seed_file_path),
+                        origin="audit",
+                    )
+                elif cached:
                     with st.status(
                         "⚡ Found existing audit — cross-checking references and reliability…",
                         expanded=True,
