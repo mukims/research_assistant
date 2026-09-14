@@ -41,7 +41,9 @@ _PHYS_REV_PRIMARY = re.compile(
 
 _REVIEW_VENUES = re.compile(
     r"\b(reviews?\s+of\s+modern\s+physics|chem(?:ical)?\.?\s*rev(?:iews?)?|annual\s+review|"
-    r"nature\s+reviews?|trends\s+in|advances\s+in|surveys?\s+in|progress\s+in)\b",
+    r"nature\s+reviews?|trends\s+in|advances\s+in|surveys?\s+in|progress\s+in|"
+    r"physics\s+reports|phys\.?\s*rep\.?|reports?\s+on\s+progress|rep\.?\s*prog\.?|"
+    r"science\s+reports|reviews?\s+in)\b",
     re.IGNORECASE,
 )
 

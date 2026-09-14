@@ -277,6 +277,43 @@ class TestEnforceRubric(unittest.TestCase):
         self.assertEqual(out["judgement"], "Supports")
         self.assertEqual(out["confidence"], "Medium")
 
+    def test_absence_cannot_be_asserted_from_insufficient_evidence(self):
+        """Seen on 2026-09-14 (gemini-3.5-flash-lite, arxiv_2007.12504v1): five
+        of six verdicts were "Does not support" at High confidence with
+        evidence_sufficiency "insufficient" and a null span — "the retrieved
+        passages don't mention it" reported as "the paper does not say it".
+        Three chunks cannot establish absence; the rubric's own reading of
+        "insufficient" is "too fragmentary to assess"."""
+        r = _reply(finding="Does not support", scope="Does not support", judgement="Does not support",
+                   span=None, sufficiency="insufficient")
+        out = judge_mod.enforce_rubric(r, "unrelated evidence text")
+        self.assertEqual(out["judgement"], "Unclear / insufficient evidence")
+        self.assertEqual(out["model_judgement"], "Does not support")
+        self.assertTrue(out["rubric_mismatch"])
+        self.assertIn("absence", " ".join(out["rubric_violations"]))
+        self.assertEqual(out["confidence"], "Medium")
+
+    def test_does_not_support_stands_when_evidence_was_partial_or_sufficient(self):
+        for suff in ("partial", "sufficient"):
+            r = _reply(finding="Does not support", judgement="Does not support", span=None, sufficiency=suff)
+            out = judge_mod.enforce_rubric(r, "evidence")
+            self.assertEqual(out["judgement"], "Does not support", suff)
+            self.assertFalse(out["rubric_mismatch"], suff)
+
+    def test_span_that_cites_another_work_is_flagged(self):
+        """"In specific cases, this ergodic hypothesis has been proved 18 ." —
+        the cited paper is attributing the statement to reference 18. The
+        verdict stands; the record says the support is secondhand."""
+        for span in ("In specific cases, this ergodic hypothesis has been proved 18 .",
+                     "This was shown by Smith et al. for graphene.",
+                     "The effect is well established [12, 13] in this regime.",
+                     "As reported in Ref. 7, the gap opens."):
+            out = judge_mod.enforce_rubric(_reply(span=span), span)
+            self.assertTrue(out["span_cites_others"], span)
+        out = judge_mod.enforce_rubric(_reply(span="We measured a gap of 18 meV at 4 K."), "We measured a gap of 18 meV at 4 K.")
+        self.assertFalse(out["span_cites_others"])
+        self.assertIsNone(judge_mod.enforce_rubric(_reply(span=None), "x")["span_cites_others"])
+
     def test_low_confidence_is_not_raised_to_medium(self):
         out = judge_mod.enforce_rubric(_reply(span="not in there", confidence="Low"), "the evidence text")
         self.assertEqual(out["confidence"], "Low")

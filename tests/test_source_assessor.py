@@ -72,6 +72,13 @@ class TestSourceAssessor(unittest.TestCase):
         res = assess_source({})
         self.assertEqual(res["grade"], SourceGrade.UNKNOWN.value)
 
+    def test_review_journals_are_secondary(self):
+        for venue in ("Physics Reports", "Reports on Progress in Physics", "Rep. Prog. Phys.",
+                      "Surface Science Reports", "Reviews of Modern Physics", "Annual Review of Condensed Matter Physics"):
+            res = assess_source({"title": "Random-matrix theories in quantum physics: common concepts",
+                                 "venue": venue, "doi": "10.1016/s0370-1573(97)00088-4"})
+            self.assertEqual(res["grade"], SourceGrade.SECONDARY_REVIEW.value, venue)
+
     def test_doi_without_venue_is_unknown(self):
         res = assess_source({"title": "Nanoscale direct mapping of noise source activities", "doi": "10.1021/acsnano"})
         self.assertEqual(res["grade"], SourceGrade.UNKNOWN.value)

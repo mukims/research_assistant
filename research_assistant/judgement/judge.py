@@ -59,7 +59,9 @@ SLOT_VOCAB = {
 
 # Added by enforce_rubric(); merged into the verifier's record alongside
 # REQUIRED_FIELDS. Additive: no existing field changes meaning.
-DERIVED_FIELDS = {"model_judgement", "rubric_mismatch", "rubric_violations", "span_verified"}
+DERIVED_FIELDS = {
+    "model_judgement", "rubric_mismatch", "rubric_violations", "span_verified", "span_cites_others",
+}
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 
@@ -106,6 +108,23 @@ def span_is_verbatim(span, evidence: str):
     return _normalise(str(span)) in _normalise(evidence)
 
 
+# A supporting sentence that itself carries a citation — "[12]", "Ref. 7",
+# "Smith et al.", or GROBID's spaced superscript "proved 18 ." — is the cited
+# paper attributing the statement to someone else. The verdict stands; the
+# support is secondhand and the reliability policy treats it as such.
+_CITES_OTHERS_RE = re.compile(
+    r"(\[\d+[^\]]*\]|\bRefs?\.\s*\d|\bet al\.|[A-Za-z]\s\d{1,3}\s[.,;])"
+)
+
+
+def span_cites_others(span) -> bool | None:
+    """Does the supporting span attribute its statement to another work?
+    None when there is no span."""
+    if span is None or not str(span).strip() or str(span).strip().lower() == "null":
+        return None
+    return bool(_CITES_OTHERS_RE.search(str(span)))
+
+
 def enforce_rubric(result: dict, evidence: str) -> dict:
     """Make the record say what the rubric says, and where the model differed.
 
@@ -114,6 +133,13 @@ def enforce_rubric(result: dict, evidence: str) -> dict:
     outside their vocabulary are listed in rubric_violations. The supporting
     span is checked verbatim. Any of those three caps confidence at Medium:
     the model's High was self-reported about a reply that broke its rules.
+
+    One more rule the slots cannot express: "Does not support" asserts that
+    the paper reports nothing about the relationship, and the judge only ever
+    sees a few chunks of it. When it also rates that evidence "insufficient"
+    — too fragmentary to assess — it has not established absence, only that
+    the retrieved passages were silent. That is a retrieval gap, and the
+    record says "Unclear", not "the paper does not say this".
     """
     slots = result["slots"]
     violations = [
@@ -122,11 +148,18 @@ def enforce_rubric(result: dict, evidence: str) -> dict:
         if slots[name]["verdict"] not in SLOT_VOCAB[name]
     ]
     derived = derive_judgement(slots)
+    if derived == "Does not support" and result.get("evidence_sufficiency") == "insufficient":
+        violations.append(
+            "absence asserted from insufficient evidence: retrieved passages were silent, "
+            "which does not show the paper is"
+        )
+        derived = "Unclear / insufficient evidence"
     result["model_judgement"] = result["judgement"]
     result["rubric_mismatch"] = derived != result["judgement"]
     result["rubric_violations"] = violations
     result["judgement"] = derived
     result["span_verified"] = span_is_verbatim(result.get("supporting_span"), evidence)
+    result["span_cites_others"] = span_cites_others(result.get("supporting_span"))
 
     if violations or result["rubric_mismatch"] or result["span_verified"] is False:
         if _CONFIDENCE_RANK[result["confidence"]] > _CONFIDENCE_RANK["Medium"]:

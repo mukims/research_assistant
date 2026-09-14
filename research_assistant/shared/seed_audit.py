@@ -748,6 +748,7 @@ def cross_check_seed_audit(
             rubric_violations=r.get("rubric_violations"),
             rubric_mismatch=r.get("rubric_mismatch", False),
             outcome=r.get("outcome") or "judged",
+            span_cites_others=r.get("span_cites_others"),
         )
         r["reliability"] = rel_eval["rating"]
         r["reliability_badge"] = rel_eval["badge"]
@@ -1046,6 +1047,7 @@ def audit_seed_citations(
             rubric_violations=r.get("rubric_violations"),
             rubric_mismatch=r.get("rubric_mismatch", False),
             outcome=r.get("outcome") or "judged",
+            span_cites_others=r.get("span_cites_others"),
         )
         r["reliability"] = rel_eval["rating"]
         r["reliability_badge"] = rel_eval["badge"]

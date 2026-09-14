@@ -83,13 +83,30 @@ class TestReliabilityPolicy(unittest.TestCase):
         self.assertEqual(res["rating"], ReliabilityRating.CONTRADICTED.value)
         self.assertIn("🔴", res["badge"])
 
+    def test_secondhand_support_is_capped_at_moderate(self):
+        """The supporting sentence carries a citation: the cited paper is
+        attributing the statement to another work. Verified, but not primary."""
+        res = evaluate_reliability(relation="Supports", source_grade=SourceGrade.RIGOROUS_PRIMARY.value,
+                                   confidence="High", span_verified=True, span_cites_others=True)
+        self.assertEqual(res["rating"], ReliabilityRating.MODERATE.value)
+        self.assertIn("another work", res["explanation"])
+        res = evaluate_reliability(relation="Supports", source_grade=SourceGrade.RIGOROUS_PRIMARY.value,
+                                   confidence="High", span_verified=True, span_cites_others=False)
+        self.assertEqual(res["rating"], ReliabilityRating.HIGH.value)
+
+    def test_unsupported_explanation_is_about_retrieved_passages(self):
+        res = evaluate_reliability(relation="Does not support", source_grade=SourceGrade.STANDARD_PRIMARY.value,
+                                   confidence="High")
+        self.assertEqual(res["rating"], ReliabilityRating.UNSUPPORTED.value)
+        self.assertIn("retrieved passages", res["explanation"])
+
     def test_does_not_support_is_unsupported(self):
         res = evaluate_reliability(
             relation="Does not support",
             source_grade=SourceGrade.STANDARD_PRIMARY.value,
         )
         self.assertEqual(res["rating"], ReliabilityRating.UNSUPPORTED.value)
-        self.assertIn("does not report", res["explanation"])
+        self.assertIn("do not report", res["explanation"])
 
     def test_judged_unclear_is_unresolved_with_judge_explanation(self):
         res = evaluate_reliability(relation="Unclear / insufficient evidence",

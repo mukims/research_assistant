@@ -375,6 +375,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             rubric_violations=entry.get("rubric_violations"),
             rubric_mismatch=entry.get("rubric_mismatch", False),
             outcome=entry.get("outcome") or "judged",
+            span_cites_others=entry.get("span_cites_others"),
         )
         entry["reliability"] = rel_eval["rating"]
         entry["reliability_badge"] = rel_eval["badge"]

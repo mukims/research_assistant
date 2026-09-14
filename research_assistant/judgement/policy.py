@@ -51,6 +51,7 @@ def evaluate_reliability(
     rubric_violations: list[str] | None = None,
     rubric_mismatch: bool = False,
     outcome: str = "judged",
+    span_cites_others: bool | None = None,
 ) -> dict[str, Any]:
     """Derive scientific reliability from the relation verdict and source grade.
 
@@ -89,7 +90,7 @@ def evaluate_reliability(
             "rating": ReliabilityRating.UNSUPPORTED.value,
             "badge": "🟠 Unsupported",
             "rating_label": "Unsupported Citation",
-            "explanation": "The cited paper does not report the finding or the conditions this sentence attributes to it.",
+            "explanation": "The retrieved passages from the cited paper do not report the finding or the conditions this sentence attributes to it.",
         }
 
     # 2. Contradicted Claims (Refutations)
@@ -124,6 +125,17 @@ def evaluate_reliability(
             "badge": "🟠 Low Reliability",
             "rating_label": "Unverified Evidence Span",
             "explanation": "The supporting evidence span could not be matched verbatim in the source document.",
+        }
+
+    # 4b. Secondhand support: the supporting sentence carries a citation, so
+    # the cited paper is attributing the statement to another work. Verified,
+    # but this paper is not the primary source for it.
+    if span_cites_others and rel in ("Supports", "Partially supports"):
+        return {
+            "rating": ReliabilityRating.MODERATE.value,
+            "badge": "🟡 Moderate Reliability",
+            "rating_label": "Secondhand Support",
+            "explanation": "The supporting sentence in the cited paper itself cites another work for this statement; the cited paper is not the primary source.",
         }
 
     # 5. Partially Supported Claims
