@@ -109,11 +109,28 @@ def is_running_header(heading: str) -> bool:
 
 # ─── TEI helpers ─────────────────────────────────────────────────────────────
 
+def _raw_text(el) -> str:
+    """Text of *el* with a space at every sentence boundary and nowhere else.
+
+    GROBID's text nodes carry their own spacing around <ref>, <hi> and the
+    like, so inserting one at every element boundary turns "(Figure 1b)"
+    into "( Figure 1b )" — hence "".join. But it emits "</s><s>" with no
+    whitespace at all, and joining those with "" glued 89% of the v2 index's
+    chunks ("two-fold.First"): BM25 saw one token, the judge read
+    corruption, and a quoted span that repaired the glue failed the
+    verbatim check.
+    """
+    bits = [el.text or ""]
+    for child in el:
+        if child.tag == f"{TEI}s":
+            bits.append(" ")
+        bits.append(_raw_text(child))
+        bits.append(child.tail or "")
+    return "".join(bits)
+
+
 def _text(el) -> str:
-    # "".join, not " ".join: GROBID's text nodes carry their own spacing, and
-    # inserting one at every element boundary turns "(Figure 1b)" into
-    # "( Figure 1b )".
-    return " ".join("".join(el.itertext()).split()) if el is not None else ""
+    return " ".join(_raw_text(el).split()) if el is not None else ""
 
 
 def _first_page(coords: str | None) -> int:
