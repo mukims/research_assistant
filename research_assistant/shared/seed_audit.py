@@ -577,6 +577,44 @@ def compute_totals(results: list[dict]) -> dict:
     return totals
 
 
+SECTION_RANK = {"results": 0, "discussion": 0, "conclusion": 0, "methods": 1}
+MAX_PAIRS_PER_SENTENCE = 3
+MAX_CONSECUTIVE_BACKEND_FAILURES = 3
+BACKEND_FAILURE_OUTCOMES = ("retrieval_failed", "call_failed")
+
+
+def prioritise_claims(claims: list[dict]) -> tuple[list[dict], list[dict]]:
+    """The order the budget is spent in, and the pairs it never reaches.
+
+    Results and discussion before methods before introduction; sentences
+    with few citations before "[13]–[27] have been proposed"; document order
+    last. At most MAX_PAIRS_PER_SENTENCE pairs per sentence — the rest are
+    cluster_skipped, which a re-run with a larger budget does not revisit.
+    """
+    ordered = sorted(
+        claims,
+        key=lambda c: (
+            SECTION_RANK.get(c.get("section", "other"), 2),
+            c.get("cite_count", 1),
+            c.get("paragraph_index", 0),
+            c.get("sentence_index", 0),
+        ),
+    )
+    per_sentence: dict[tuple, int] = {}
+    to_judge, skipped = [], []
+    for c in ordered:
+        key = (c.get("paragraph_index", 0), c.get("sentence_index", 0))
+        per_sentence[key] = per_sentence.get(key, 0) + 1
+        if per_sentence[key] > MAX_PAIRS_PER_SENTENCE:
+            c["outcome"] = "cluster_skipped"
+            c["judgement"] = None
+            c["reason"] = f"Sentence cites {c.get('cite_count')} papers; only {MAX_PAIRS_PER_SENTENCE} judged."
+            skipped.append(c)
+        else:
+            to_judge.append(c)
+    return to_judge, skipped
+
+
 def cross_check_seed_audit(
     seed_path: str,
     cached_report: dict,
@@ -900,7 +938,10 @@ def audit_seed_citations(
         len(deferred_claims),
     )
 
-    claims_to_judge = downloaded_claims[:max_claims]
+    ordered, cluster_skipped = prioritise_claims(downloaded_claims)
+    claims_to_judge = ordered[:max_claims]
+    overflow = ordered[max_claims:]
+    aborted = None
 
     if claims_to_judge:
         if search_resources is None:
@@ -912,40 +953,41 @@ def audit_seed_citations(
         from research_assistant.judgement.judge import DERIVED_FIELDS, REQUIRED_FIELDS, JudgementParseError
 
         escalate_k = JUDGEMENT_ESCALATE_TOP_K if JUDGEMENT_ESCALATE_TOP_K > top_k else 0
-        retrieve_k = max(top_k, escalate_k)
+        consecutive_failures = 0
 
         for i, item in enumerate(claims_to_judge, 1):
+            if aborted:
+                item["outcome"] = "not_attempted"
+                item["judgement"] = None
+                item["reason"] = f"Audit stopped after {aborted['after_attempted']} attempts: {aborted['reason']}"
+                continue
             ref_info = item.get("ref") or {}
-            ref_lbl = (
-                f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
-            )
+            ref_lbl = f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
             pipeline_status.update_progress(
                 detail=f"Judging citation ({i}/{len(claims_to_judge)}): {ref_lbl[:40]}"
             )
-            logger.info(
-                "[%d/%d] Auditing citation %s: %s",
-                i,
-                len(claims_to_judge),
-                ref_lbl[:40],
-                item["claim"][:80],
-            )
-            _judge_claim_entry(
-                item,
-                collection,
-                bm25,
-                texts,
-                metadatas,
-                top_k=top_k,
-                escalate_k=escalate_k,
-            )
+            logger.info("[%d/%d] Auditing citation %s: %s", i, len(claims_to_judge), ref_lbl[:40], item["claim"][:80])
+            _judge_claim_entry(item, collection, bm25, texts, metadatas, top_k=top_k, escalate_k=escalate_k)
 
-    for c in downloaded_claims[max_claims:]:
+            # A backend that is down fails every call the same way; three in a
+            # row is that, not three unlucky citations. Stop, say so, keep
+            # the budget for a run that can use it.
+            if item.get("outcome") in BACKEND_FAILURE_OUTCOMES:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_BACKEND_FAILURES:
+                    aborted = {"reason": item.get("reason", item["outcome"]), "after_attempted": i}
+                    logger.warning("Audit stopped after %d consecutive backend failures: %s", i, aborted["reason"])
+                    pipeline_status.add_event(f"⚠️ Citation audit stopped: {aborted['reason'][:80]}")
+            else:
+                consecutive_failures = 0
+
+    for c in overflow:
         if not c.get("outcome"):
             c["outcome"] = "cap_exceeded"
             c["judgement"] = None
             c["reason"] = "Maximum claims evaluation budget reached."
 
-    all_results = claims_to_judge + downloaded_claims[max_claims:] + undownloaded_claims + deferred_claims + skipped_claims
+    all_results = claims_to_judge + overflow + cluster_skipped + undownloaded_claims + deferred_claims + skipped_claims
 
     for r in all_results:
         source_eval = assess_source(metadata=r.get("metadata") or {}, ref_info=r.get("ref"))
@@ -974,12 +1016,21 @@ def audit_seed_citations(
         "model": _judgement_model(),
         "totals": totals,
         "results": all_results,
+        "aborted": aborted,
     }
 
     os.makedirs(AUDIT_DIR, exist_ok=True)
     out_file = os.path.join(AUDIT_DIR, f"{stem}_audit.json")
     atomic_write_json(out_file, report)
     logger.info("Saved seed citation audit to %s", out_file)
+
+    # Every run is kept: the latest overwrites <stem>_audit.json as before,
+    # and a timestamped copy accumulates real (claim, evidence, verdict)
+    # triples for the judge evaluation set.
+    history_dir = os.path.join(AUDIT_DIR, "history")
+    os.makedirs(history_dir, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    atomic_write_json(os.path.join(history_dir, f"{stem}_{stamp}_audit.json"), report)
 
     try:
         md_content = generate_seed_audit_markdown(report)

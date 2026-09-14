@@ -1507,6 +1507,86 @@ class TestHonestOutcomes(unittest.TestCase):
         os.unlink(tei_file); os.unlink(pdf)
 
 
+BREAKER_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+<div><head>Results</head>
+<p xml:id="p_0"><s>Graphene shows extraordinary electronic mobility in suspended flakes <ref type="bibr" target="#b0">[1]</ref>.</s><s>Thermal conductance across grain boundaries is strongly suppressed <ref type="bibr" target="#b1">[2]</ref>.</s><s>A negative Poisson ratio was reported in the rippled lattice <ref type="bibr" target="#b2">[3]</ref>.</s><s>Shear strain opens a bandgap of several hundred meV <ref type="bibr" target="#b3">[4]</ref>.</s><s>Phase coherence survives up to room temperature in these devices <ref type="bibr" target="#b4">[5]</ref>.</s></p>
+</div></body>
+<back><listBibl>
+<biblStruct xml:id="b0"><analytic><title level="a" type="main">Paper b0</title></analytic><monogr><title level="j">Nano Letters</title></monogr></biblStruct>
+<biblStruct xml:id="b1"><analytic><title level="a" type="main">Paper b1</title></analytic><monogr><title level="j">Nano Letters</title></monogr></biblStruct>
+<biblStruct xml:id="b2"><analytic><title level="a" type="main">Paper b2</title></analytic><monogr><title level="j">Nano Letters</title></monogr></biblStruct>
+<biblStruct xml:id="b3"><analytic><title level="a" type="main">Paper b3</title></analytic><monogr><title level="j">Nano Letters</title></monogr></biblStruct>
+<biblStruct xml:id="b4"><analytic><title level="a" type="main">Paper b4</title></analytic><monogr><title level="j">Nano Letters</title></monogr></biblStruct>
+</listBibl></back></text></TEI>
+"""
+
+
+class TestBudgetAndBreaker(unittest.TestCase):
+    def _c(self, section, cite_count, p, s, xid):
+        return {"section": section, "cite_count": cite_count, "paragraph_index": p, "sentence_index": s,
+                "ref": {"xml_id": xid}, "claim": f"claim {xid}"}
+
+    def test_results_before_intro_and_singles_before_clusters(self):
+        from research_assistant.shared.seed_audit import prioritise_claims
+        intro_cluster = [self._c("other", 8, 0, 0, f"b{i}") for i in range(8)]
+        intro_single = self._c("introduction", 1, 1, 0, "b20")
+        methods_single = self._c("methods", 1, 5, 0, "b30")
+        results_pair = [self._c("results", 2, 9, 2, "b40"), self._c("results", 2, 9, 2, "b41")]
+        ordered, skipped = prioritise_claims(intro_cluster + [intro_single, methods_single] + results_pair)
+        self.assertEqual([c["ref"]["xml_id"] for c in ordered[:4]], ["b40", "b41", "b30", "b20"])
+        self.assertEqual(len(ordered), 4 + 3)          # at most 3 of the 8-cite sentence
+        self.assertEqual(len(skipped), 5)
+        self.assertTrue(all(c["outcome"] == "cluster_skipped" for c in skipped))
+
+    @patch("research_assistant.shared.seed_audit._judge_once")
+    @patch("research_assistant.shared.seed_audit.hybrid_search")
+    @patch("research_assistant.shared.seed_audit.find_tei_for_seed")
+    @patch("research_assistant.shared.seed_audit._load_downloaded_manifest")
+    def test_three_consecutive_backend_failures_stop_the_run(self, mock_manifest, mock_find_tei, mock_search, mock_judge):
+        # Five evidential claims on five references, all "downloaded": three
+        # failures trip the breaker and two are left not_attempted.
+        with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
+            tf.write(BREAKER_TEI_XML); tei_file = tf.name
+        with tempfile.NamedTemporaryFile("w", suffix=".pdf", delete=False) as dummy_pdf:
+            pdf = dummy_pdf.name
+        mock_find_tei.return_value = tei_file
+        mock_manifest.return_value = {
+            x: {"key": x, "path": pdf, "xml_id": x, "cited_by": "seed.pdf", "title": f"Paper {x}"}
+            for x in ("b0", "b1", "b2", "b3", "b4")
+        }
+        mock_search.side_effect = ConnectionError("Failed to connect to Ollama")
+        with _audit_dirs():
+            report = audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []),
+                                          max_claims=50, skip_if_cached=False)
+        outcomes = [r["outcome"] for r in report["results"] if r.get("downloaded")]
+        self.assertEqual(outcomes.count("retrieval_failed"), 3)
+        self.assertEqual(outcomes.count("not_attempted"), 2)
+        self.assertIsNotNone(report["aborted"])
+        self.assertEqual(report["aborted"]["after_attempted"], 3)
+        self.assertIn("Ollama", report["aborted"]["reason"])
+        self.assertEqual(mock_judge.call_count, 0)
+        self.assertEqual(report["totals"]["Unclear / insufficient evidence"], 0)
+        os.unlink(tei_file); os.unlink(pdf)
+
+    @patch("research_assistant.shared.seed_audit._judge_once")
+    @patch("research_assistant.shared.seed_audit.hybrid_search")
+    @patch("research_assistant.shared.seed_audit.find_tei_for_seed")
+    @patch("research_assistant.shared.seed_audit._load_downloaded_manifest")
+    def test_history_copy_is_written(self, mock_manifest, mock_find_tei, mock_search, mock_judge):
+        with _audit_dirs() as tmp:
+            with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
+                tf.write(SAMPLE_TEI_XML); tei_file = tf.name
+            mock_find_tei.return_value = tei_file
+            mock_manifest.return_value = {}
+            audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []), skip_if_cached=False)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "seed_audit.json")))
+            history = os.listdir(os.path.join(tmp, "history"))
+            self.assertEqual(len(history), 1)
+            self.assertTrue(history[0].startswith("seed_") and history[0].endswith("_audit.json"))
+            os.unlink(tei_file)
+
+
 if __name__ == "__main__":
     unittest.main()
 
