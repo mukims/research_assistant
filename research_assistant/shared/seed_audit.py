@@ -15,6 +15,21 @@ from typing import Optional
 from bs4 import BeautifulSoup
 
 from research_assistant.agents.agent5_batch_citer import split_into_sentences
+from research_assistant.shared.claim_text import (
+    CITE_TOKEN_RE,
+    SKIP_ROLES,
+    cite_token,
+    claim_quality,
+    classify_citation_role,
+    clean_text,
+    is_numeric_cite,
+    paragraph_sentences,
+    render_claim,
+    render_sentence,
+    sentence_context,
+    tidy_punctuation,
+)
+from research_assistant.shared.extract import normalise_section_kind
 from research_assistant.agents.agent8_verifier import (
     _judge_once,
     _judgement_model,
@@ -54,10 +69,7 @@ def _clean(node) -> str:
 
 def _clean_claim_punctuation(text: str) -> str:
     """Tidy punctuation spaces left behind by stripped citation markers."""
-    text = re.sub(r"\(\s*\)", "", text)
-    text = re.sub(r"\[\s*\]", "", text)
-    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
-    return " ".join(text.split()).strip()
+    return tidy_punctuation(text)
 
 
 def _person_name(pers) -> str:
@@ -88,18 +100,98 @@ def find_tei_for_seed(seed_path: str) -> Optional[str]:
     return matches[0] if matches else None
 
 
+_NUM_RE = re.compile(r"\d+")
+_YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
+
+
+def _paragraph_section(p) -> str:
+    """Section kind of the <div> the paragraph sits in; GROBID often leaves
+    the introduction headless, which lands as "other"."""
+    div = p.find_parent("div")
+    head = div.find("head") if div is not None else None
+    return normalise_section_kind(clean_text(head)) if head is not None else "other"
+
+
+def _build_number_map(body, bib_by_id: dict) -> dict[int, dict]:
+    """What GROBID itself linked: every targeted ref with a numeric text
+    teaches "[k] means this entry". Consulted for the refs it left untargeted."""
+    number_map: dict[int, dict] = {}
+    for ref in body.find_all("ref", type="bibr"):
+        target = (ref.get("target") or "").lstrip("#")
+        txt = clean_text(ref)
+        if target in bib_by_id and is_numeric_cite(txt):
+            nums = _NUM_RE.findall(txt)
+            if len(nums) == 1:
+                number_map.setdefault(int(nums[0]), bib_by_id[target])
+    return number_map
+
+
+def _position_map_consistent(number_map: dict[int, dict]) -> bool:
+    """True when every number GROBID linked sits at its own list position —
+    the only condition under which "[k] is the k-th entry" is safe. A
+    footnote swept into the bibliography breaks it for everything after."""
+    return all(info.get("xml_id") == f"b{k - 1}" for k, info in number_map.items())
+
+
+def _unknown_ref(target: str, txt: str) -> dict:
+    return {
+        "xml_id": target or f"unknown_{txt}",
+        "index": None,
+        "title": txt or "Unknown reference",
+        "authors": [],
+        "year": None,
+        "doi": None,
+        "raw_reference": txt,
+        "venue": None,
+        "is_monograph": False,
+    }
+
+
+def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map, position_ok) -> tuple[Optional[dict], str]:
+    """(reference, how). Never guesses: a numeric marker nobody linked is
+    resolved by position only when positions are known to be consistent, and
+    a surname match needs the whole word and, when both sides have one, the
+    year."""
+    if target in bib_by_id:
+        return bib_by_id[target], "target"
+    if is_numeric_cite(txt):
+        nums = _NUM_RE.findall(txt)
+        if nums:
+            k = int(nums[0])
+            if k in number_map:
+                return number_map[k], "number_map"
+            if position_ok and k in bib_by_index:
+                return bib_by_index[k], "position"
+        return None, "unresolved"
+    year = _YEAR_RE.search(txt or "")
+    for info in bib_by_id.values():
+        surnames = [a.split()[-1] for a in info.get("authors", []) if a.split()]
+        if any(len(s) > 2 and re.search(rf"\b{re.escape(s)}\b", txt) for s in surnames):
+            if year is None or info.get("year") is None or int(year.group(1)) == info["year"]:
+                return info, "surname"
+    return None, "unresolved"
+
+
 def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
     """Extract in-text citation claims from TEI XML.
 
     Returns a list of dicts with keys:
-        - sentence: original sentence with [citation] marker
-        - claim: cleaned sentence as plain prose (citations removed)
+        - sentence: display sentence with [citation] markers
+        - claim: cleaned sentence as plain prose (citations removed or narrative normalized)
         - cite_text: raw in-text citation text (e.g. "[14]", "Smith et al. (2020)")
         - target: xml:id target (e.g. "b13")
-        - ref: structured reference dict (xml_id, index, title, authors, year, doi, raw)
+        - ref: structured reference dict (xml_id, index, title, authors, year, doi, venue, is_monograph, raw)
+        - resolved: bool, whether ref was matched to bibliography
+        - resolution: 'target' | 'number_map' | 'position' | 'surname' | 'unresolved'
+        - role: 'software' | 'pointer' | 'method' | 'evidential'
+        - claim_quality: list of issues flagged
+        - context: 3-sentence window with «focus»
+        - section: normalised section kind
+        - cite_count: number of citations in sentence
+        - sentence_index: 0-based index of sentence in paragraph
         - paragraph_id: identifier of the body paragraph (e.g. "p_0" or xml:id)
         - paragraph_index: 0-based integer index of the body paragraph
-        - paragraph_refs: list of all unique reference dicts cited in this paragraph
+        - paragraph_refs: list of unique evidential resolved reference dicts cited in this paragraph
     """
     if isinstance(tei_source, BeautifulSoup):
         soup = tei_source
@@ -149,6 +241,11 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             raw_node = b.find("note", type="raw_reference")
             raw_reference = _clean(raw_node) if raw_node else None
 
+            journal = monogr.find("title", level="j") if monogr else None
+            book = monogr.find("title", level="m") if monogr else None
+            venue = _clean(journal) if journal else (_clean(book) if book else None)
+            is_monograph = bool(book) and not (analytic and analytic.find("title"))
+
             ref_info = {
                 "xml_id": xid,
                 "index": idx + 1,
@@ -156,6 +253,8 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                 "authors": authors,
                 "year": year,
                 "doi": doi,
+                "venue": venue,
+                "is_monograph": is_monograph,
                 "raw_reference": raw_reference,
             }
             bib_by_id[xid] = ref_info
@@ -166,6 +265,9 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
     if not body:
         return []
 
+    number_map = _build_number_map(body, bib_by_id)
+    position_ok = _position_map_consistent(number_map)
+
     claims = []
     seen_pairs = set()
 
@@ -175,129 +277,74 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             continue
 
         p_id = p.get("xml:id") or p.get("id") or f"p_{p_idx}"
+        section = _paragraph_section(p)
 
-        # Resolve all unique reference dicts cited in this paragraph
-        p_refs_dict = {}
-        for idx, ref in enumerate(refs):
+        # Citations become period-free tokens; what the old placeholder
+        # embedded lives in this table instead.
+        cites = {}
+        for n, ref in enumerate(refs):
             target = (ref.get("target") or "").lstrip("#")
-            txt = _clean(ref)
-            ref_info = bib_by_id.get(target)
-            if not ref_info:
-                # Try numeric citation e.g. [14]
-                nums = re.findall(r"\d+", txt)
-                if nums:
-                    try:
-                        ref_info = bib_by_index.get(int(nums[0]))
-                    except (ValueError, TypeError):
-                        pass
+            txt = clean_text(ref)
+            ref_info, resolution = _resolve_ref(
+                target, txt, bib_by_id, bib_by_index, number_map, position_ok
+            )
+            cites[n] = {"target": target, "txt": txt, "ref": ref_info, "resolution": resolution}
+            ref.replace_with(f" {cite_token(n)} ")
 
-            if not ref_info and txt:
-                for r in bib_by_id.values():
-                    if any(
-                        author.split()[-1].lower() in txt.lower()
-                        for author in r.get("authors", [])
-                        if author.split()
-                    ):
-                        ref_info = r
-                        break
+        sentences = paragraph_sentences(p)
+        display = [render_sentence(s, cites) for s in sentences]
 
-            if not ref_info:
-                ref_info = {
-                    "xml_id": target or f"unknown_{txt}",
-                    "index": None,
-                    "title": txt or "Unknown reference",
-                    "authors": [],
-                    "year": None,
-                    "doi": None,
-                    "raw_reference": txt,
-                }
-
-            rk = ref_info.get("xml_id") or normalise_doi(ref_info.get("doi")) or ref_info.get("title") or target or txt
-            if rk:
-                p_refs_dict[rk] = ref_info
-
-            # Replace ref tag with identifiable token
-            ref.replace_with(f" __CITE_{idx}_{target}_{txt}__ ")
-
-        p_unique_refs = list(p_refs_dict.values())
-
-        clean_p = _clean(p)
-        sentences = split_into_sentences(clean_p)
-
+        # The deferral ratio counts the references a paragraph leans on for
+        # evidence — not the software it used or the review it points to.
+        p_refs_dict = {}
         paragraph_claims = []
-        for sent in sentences:
-            matches = re.findall(r"__CITE_\d+_([^_]*)_([^_]*)__", sent)
-            if not matches:
+        for s_idx, sent in enumerate(sentences):
+            tokens = [int(m) for m in CITE_TOKEN_RE.findall(sent)]
+            if not tokens:
                 continue
 
-            # Produce clean claim
-            claim_text = re.sub(r"__CITE_\d+_[^_]*_[^_]*__", "", sent)
-            claim_text = _clean_claim_punctuation(claim_text)
+            claim_text = render_claim(sent, cites)
             if len(claim_text) < 15:
                 continue
+            quality = claim_quality(claim_text)
+            context = sentence_context(display, s_idx)
 
-            # Readable sentence with citations
-            human_sent = sent
-            for target, txt in matches:
-                display_tag = f"[{txt.strip('[]')}]" if txt else ""
-                human_sent = re.sub(
-                    rf"__CITE_\d+_{re.escape(target)}_{re.escape(txt)}__",
-                    display_tag,
-                    human_sent,
-                    count=1,
-                )
-            human_sent = " ".join(human_sent.split()).strip()
+            for n in tokens:
+                cite = cites[n]
+                resolved = cite["ref"] is not None
+                ref_info = cite["ref"] or _unknown_ref(cite["target"], cite["txt"])
+                role = classify_citation_role(sent, cite_token(n), ref_info)
 
-            for target, txt in matches:
-                ref_info = bib_by_id.get(target)
-                if not ref_info:
-                    # Try numeric citation e.g. [14]
-                    nums = re.findall(r"\d+", txt)
-                    if nums:
-                        try:
-                            ref_info = bib_by_index.get(int(nums[0]))
-                        except (ValueError, TypeError):
-                            pass
-
-                # If still not found and txt has author name, try matching surname
-                if not ref_info and txt:
-                    for r in bib_by_id.values():
-                        if any(
-                            author.split()[-1].lower() in txt.lower()
-                            for author in r.get("authors", [])
-                            if author.split()
-                        ):
-                            ref_info = r
-                            break
-
-                if not ref_info:
-                    ref_info = {
-                        "xml_id": target or f"unknown_{txt}",
-                        "index": None,
-                        "title": txt or "Unknown reference",
-                        "authors": [],
-                        "year": None,
-                        "doi": None,
-                        "raw_reference": txt,
-                    }
-
-                ref_key = ref_info.get("xml_id") if ref_info else (target or txt)
+                ref_key = ref_info.get("xml_id") or cite["target"] or cite["txt"]
                 dedup_key = (claim_text, ref_key)
                 if dedup_key in seen_pairs:
                     continue
                 seen_pairs.add(dedup_key)
 
+                if resolved and role == "evidential":
+                    p_refs_dict.setdefault(ref_key, ref_info)
+
                 paragraph_claims.append({
-                    "sentence": human_sent,
+                    "sentence": display[s_idx],
                     "claim": claim_text,
-                    "cite_text": txt,
-                    "target": target,
+                    "cite_text": cite["txt"],
+                    "target": cite["target"],
                     "ref": ref_info,
+                    "resolved": resolved,
+                    "resolution": cite["resolution"],
+                    "role": role,
+                    "claim_quality": quality,
+                    "context": context,
+                    "section": section,
+                    "cite_count": len(tokens),
+                    "sentence_index": s_idx,
                     "paragraph_id": p_id,
                     "paragraph_index": p_idx,
-                    "paragraph_refs": p_unique_refs,
                 })
 
+        p_unique_refs = list(p_refs_dict.values())
+        for c in paragraph_claims:
+            c["paragraph_refs"] = p_unique_refs
         claims.extend(paragraph_claims)
 
     return claims

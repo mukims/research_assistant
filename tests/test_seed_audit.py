@@ -1301,6 +1301,107 @@ class TestSeedAuditCaching(unittest.TestCase):
                     self.assertFalse(rep_force.get("from_cache", False))
 
 
+AUTHOR_YEAR_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+<div><head>Introduction</head>
+<p><s>Target-oriented methods have been proposed by several groups (<ref type="bibr" target="#b27">Vasconcelos et al. 2017</ref>; <ref type="bibr" target="#b6">C.A.N. da Costa et al. 2018</ref>).</s><s>A similar idea was explored by <ref type="bibr" target="#b16">Landa et al. (2006)</ref> with a path-integral formulation of depth migration.</s></p>
+</div>
+<div><head>Results</head>
+<p><s>Following <ref type="bibr" target="#b25">Silva et al. (2021)</ref>, the computational time for each method is described next.</s><s>The PGF time grows with M, while the RPGF time decreases.</s></p>
+<p><s>We use UMFPACK (<ref type="bibr" target="#b9">Davis 2004</ref>) for LU factorization of sparse matrices.</s></p>
+</div></body>
+<back><listBibl>
+<biblStruct xml:id="b6"><analytic><title level="a" type="main">Target-level waveform inversion</title><author><persName><forename>C</forename><surname>Costa</surname></persName></author></analytic><monogr><title level="j">Geophysical Prospecting</title><imprint><date when="2018">2018</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b9"><analytic><title level="a" type="main">Algorithm 832</title><author><persName><forename>T</forename><surname>Davis</surname></persName></author></analytic><monogr><title level="j">ACM Trans. Math. Softw.</title><imprint><date when="2004">2004</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b16"><analytic><title level="a" type="main">Path-integral seismic imaging</title><author><persName><forename>E</forename><surname>Landa</surname></persName></author></analytic><monogr><title level="j">Geophysical Prospecting</title><imprint><date when="2006">2006</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b25"><analytic><title level="a" type="main">Target-oriented inversion using the patched green's function method</title><author><persName><forename>D</forename><surname>Silva</surname></persName></author></analytic><monogr><title level="j">Geophysics</title><imprint><date when="2021">2021</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b27"><analytic><title level="a" type="main">Subsurface-domain objective functions</title><author><persName><forename>I</forename><surname>Vasconcelos</surname></persName></author></analytic><monogr><title level="j">Geophysics</title><imprint><date when="2017">2017</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b40"><monogr><title level="m">Semiconductor Nanostructures</title><author><persName><forename>T</forename><surname>Ihn</surname></persName></author><imprint><date when="2010">2010</date></imprint></monogr></biblStruct>
+</listBibl></back></text></TEI>
+"""
+
+# A footnote GROBID swept into the bibliography: b20 is not reference [21].
+# GROBID linked [21] to b53 elsewhere; a targetless [21] must follow that, and
+# a targetless number nobody linked must not be guessed from list position.
+FOOTNOTE_BIB_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+<p><s>We compute everything with the kernel polynomial method <ref type="bibr" target="#b53">[21]</ref> on large flakes.</s></p>
+<p><s>The same method was used for the disordered case <ref type="bibr">[21]</ref> and the clean case <ref type="bibr">[22]</ref> respectively.</s></p>
+</body>
+<back><listBibl>
+<biblStruct xml:id="b19"><analytic><title level="a" type="main">Machine learning phases of matter</title></analytic></biblStruct>
+<biblStruct xml:id="b20"><note type="raw_reference">An alternative definition of β(E), shown in the SM [21], may extend the validity</note></biblStruct>
+<biblStruct xml:id="b21"><analytic><title level="a" type="main">Z2pack</title></analytic></biblStruct>
+<biblStruct xml:id="b53"><analytic><title level="a" type="main">KITE: high-performance accurate modelling of electronic structure</title></analytic></biblStruct>
+</listBibl></back></text></TEI>
+"""
+
+
+class TestExtractionOnClaimText(unittest.TestCase):
+    def _claims(self, xml):
+        return extract_seed_citation_claims(BeautifulSoup(xml, "xml"))
+
+    def test_sentence_tags_give_one_claim_per_sentence(self):
+        claims = self._claims(AUTHOR_YEAR_TEI_XML)
+        by_claim = {c["claim"] for c in claims}
+        self.assertIn("Target-oriented methods have been proposed by several groups.", by_claim)
+        self.assertIn("A similar idea was explored by Landa et al. (2006) with a path-integral formulation of depth migration.", by_claim)
+        self.assertIn("Following Silva et al. (2021), the computational time for each method is described next.", by_claim)
+
+    def test_no_placeholder_ever_leaks(self):
+        for c in self._claims(AUTHOR_YEAR_TEI_XML):
+            self.assertNotIn("__CITE_", c["claim"]); self.assertNotIn("⟦", c["claim"])
+            self.assertNotIn("__CITE_", c["sentence"]); self.assertNotIn("⟦", c["sentence"])
+            self.assertEqual(c["claim_quality"], [], c["claim"])
+
+    def test_display_sentence_and_context(self):
+        landa = next(c for c in self._claims(AUTHOR_YEAR_TEI_XML) if c["ref"]["xml_id"] == "b16")
+        self.assertEqual(landa["sentence"], "A similar idea was explored by [Landa et al. (2006)] with a path-integral formulation of depth migration.")
+        self.assertTrue(landa["context"].startswith("Target-oriented methods have been proposed by several groups ( [Vasconcelos"))
+        self.assertIn("«A similar idea", landa["context"])
+        self.assertEqual(landa["sentence_index"], 1)
+        self.assertEqual(landa["cite_count"], 1)
+
+    def test_section_and_role(self):
+        claims = self._claims(AUTHOR_YEAR_TEI_XML)
+        landa = next(c for c in claims if c["ref"]["xml_id"] == "b16")
+        silva = next(c for c in claims if c["ref"]["xml_id"] == "b25")
+        davis = next(c for c in claims if c["ref"]["xml_id"] == "b9")
+        self.assertEqual(landa["section"], "introduction"); self.assertEqual(landa["role"], "evidential")
+        self.assertEqual(silva["section"], "results"); self.assertEqual(silva["role"], "method")
+        self.assertEqual(davis["role"], "software")
+
+    def test_paragraph_refs_count_only_evidential_resolved_references(self):
+        davis = next(c for c in self._claims(AUTHOR_YEAR_TEI_XML) if c["ref"]["xml_id"] == "b9")
+        self.assertEqual(davis["paragraph_refs"], [])
+
+    def test_venue_and_monograph_on_ref(self):
+        claims = self._claims(AUTHOR_YEAR_TEI_XML)
+        landa = next(c for c in claims if c["ref"]["xml_id"] == "b16")
+        self.assertEqual(landa["ref"]["venue"], "Geophysical Prospecting")
+        self.assertFalse(landa["ref"]["is_monograph"])
+
+    def test_targetless_number_follows_what_grobid_linked_elsewhere(self):
+        claims = self._claims(FOOTNOTE_BIB_TEI_XML)
+        second = [c for c in claims if c["sentence"].startswith("The same method")]
+        twenty_one = next(c for c in second if c["cite_text"] == "[21]")
+        self.assertEqual(twenty_one["ref"]["xml_id"], "b53")
+        self.assertEqual(twenty_one["resolution"], "number_map")
+        self.assertTrue(twenty_one["resolved"])
+
+    def test_unlinked_number_is_not_guessed_when_positions_are_inconsistent(self):
+        claims = self._claims(FOOTNOTE_BIB_TEI_XML)
+        twenty_two = next(c for c in claims if c["cite_text"] == "[22]")
+        self.assertFalse(twenty_two["resolved"])
+        self.assertEqual(twenty_two["resolution"], "unresolved")
+
+    def test_position_fallback_still_works_when_consistent(self):
+        # SAMPLE_TEI_XML: [1]→b0 is linked, so [2] at position 2 is safe.
+        claims = extract_seed_citation_claims(BeautifulSoup(SAMPLE_TEI_XML, "xml"))
+        self.assertEqual(claims[1]["resolution"], "position")
+        self.assertTrue(claims[1]["resolved"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
