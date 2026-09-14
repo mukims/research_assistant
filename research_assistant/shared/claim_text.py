@@ -135,6 +135,13 @@ _POINTER_RE = re.compile(
     r"\bfor (?:instance|example)\b|\brefs?\.?\s*$)",
     re.I,
 )
+# A sentence that opens as a pointer is a pointer wherever its citation sits.
+_POINTER_START_RE = re.compile(
+    r"^(see\b|cf\.|for (?:a |an )?(?:review|details|introduction|overview|discussion|derivation|"
+    r"proof|survey)\b|as (?:described|discussed|explained|reviewed|shown|detailed|derived|outlined) in\b|"
+    r"(?:further|more) details\b|the reader is referred\b)",
+    re.I,
+)
 _METHOD_RE = re.compile(
     r"\b(following|according to|as in|adapted from|adopted from|based on|"
     r"we (?:use|used|adopt|adopted|follow|followed|employ|employed|apply|applied))\b",
@@ -152,7 +159,7 @@ def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> 
     ref_text = f"{ref.get('title') or ''} {ref.get('raw_reference') or ''}"
     if _SOFTWARE_REF_RE.search(ref_text) or _SOFTWARE_CONTEXT_RE.search(window):
         return "software"
-    if _POINTER_RE.search(window):
+    if _POINTER_RE.search(window) or _POINTER_START_RE.match(sentence.lstrip()):
         return "pointer"
     if _METHOD_RE.search(window):
         return "method"

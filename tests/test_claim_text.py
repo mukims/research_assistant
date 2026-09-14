@@ -118,6 +118,12 @@ class TestCitationRole(unittest.TestCase):
         self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {"title": "Semiconductor Nanostructures"}), "pointer")
         self.assertEqual(ct.classify_citation_role("See ⟦C0⟧ for a review of the field.", "⟦C0⟧", {}), "pointer")
 
+    def test_pointer_at_sentence_start_with_citation_far_away(self):
+        s = "See SM for details, including a brief discussion on the choices available to extract TB parameters from DFT calculations ⟦C0⟧ ."
+        self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {"title": "Wannier90 as a community code"}), "pointer")
+        s = "For a review of the multi-terminal formalism and its applications to graphene devices the reader is referred to ⟦C0⟧ ."
+        self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {}), "pointer")
+
     def test_method(self):
         s = "Following ⟦C0⟧ , we also apply a taper to the target gradient."
         self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {"title": "Target-oriented inversion"}), "method")

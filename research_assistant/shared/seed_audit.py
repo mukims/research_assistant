@@ -133,11 +133,12 @@ def _build_number_map(body, bib_by_id: dict) -> dict[int, dict]:
     return number_map
 
 
-def _position_map_consistent(number_map: dict[int, dict]) -> bool:
-    """True when every number GROBID linked sits at its own list position —
-    the only condition under which "[k] is the k-th entry" is safe. A
-    footnote swept into the bibliography breaks it for everything after."""
-    return all(info.get("xml_id") == f"b{k - 1}" for k, info in number_map.items())
+def _looks_like_reference(entry: Optional[dict]) -> bool:
+    """A bibliography entry with an author, a year, a DOI or a venue. A
+    footnote GROBID swept into the list has none of them."""
+    return bool(entry) and bool(
+        entry.get("authors") or entry.get("year") or entry.get("doi") or entry.get("venue")
+    )
 
 
 def _unknown_ref(target: str, txt: str) -> dict:
@@ -154,29 +155,54 @@ def _unknown_ref(target: str, txt: str) -> dict:
     }
 
 
-def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map, position_ok) -> tuple[Optional[dict], str]:
-    """(reference, how). Never guesses: a numeric marker nobody linked is
-    resolved by position only when positions are known to be consistent, and
-    a surname match needs the whole word and, when both sides have one, the
-    year."""
-    if target in bib_by_id:
-        return bib_by_id[target], "target"
-    if is_numeric_cite(txt):
-        nums = _NUM_RE.findall(txt)
-        if nums:
-            k = int(nums[0])
-            if k in number_map:
-                return number_map[k], "number_map"
-            if position_ok and k in bib_by_index:
-                return bib_by_index[k], "position"
-        return None, "unresolved"
-    year = _YEAR_RE.search(txt or "")
-    for info in bib_by_id.values():
-        surnames = [a.split()[-1] for a in info.get("authors", []) if a.split()]
-        if any(len(s) > 2 and re.search(rf"\b{re.escape(s)}\b", txt) for s in surnames):
-            if year is None or info.get("year") is None or int(year.group(1)) == info["year"]:
-                return info, "surname"
-    return None, "unresolved"
+def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map) -> tuple[Optional[dict], str, str]:
+    """(reference, how, note). Two witnesses for a numeric marker: the entry
+    GROBID linked it to, and the entry at that list position. On one paper
+    the links were off by one and position was right; elsewhere a footnote
+    in the list shifts every position after it. So: agreement resolves;
+    disagreement between two real entries is "ambiguous" and never judged;
+    a footnote-like entry at the position yields to the link. A surname
+    match needs the whole word and, when both sides have one, the year."""
+    tgt = bib_by_id.get(target)
+    if not is_numeric_cite(txt):
+        if tgt is not None:
+            return tgt, "target", ""
+        year = _YEAR_RE.search(txt or "")
+        for info in bib_by_id.values():
+            surnames = [a.split()[-1] for a in info.get("authors", []) if a.split()]
+            if any(len(s) > 2 and re.search(rf"\b{re.escape(s)}\b", txt) for s in surnames):
+                if year is None or info.get("year") is None or int(year.group(1)) == info["year"]:
+                    return info, "surname", ""
+        return None, "unresolved", ""
+
+    nums = _NUM_RE.findall(txt)
+    k = int(nums[0]) if nums else None
+    at_position = bib_by_index.get(k) if k is not None else None
+    pos = at_position if _looks_like_reference(at_position) else None
+    linked = number_map.get(k) if k is not None else None
+
+    def _name(entry):
+        return (entry.get("title") or entry.get("raw_reference") or entry.get("xml_id") or "?")[:60]
+
+    if tgt is not None and pos is not None:
+        if tgt is pos:
+            return tgt, "target", ""
+        return None, "ambiguous", (
+            f"GROBID links {txt} to '{_name(tgt)}' but list position {k} is '{_name(pos)}'; not judged against a guess."
+        )
+    if tgt is not None:
+        return tgt, "target", ""
+    if pos is not None and linked is not None and linked is not pos:
+        return None, "ambiguous", (
+            f"{txt} was linked elsewhere to '{_name(linked)}' but list position {k} is '{_name(pos)}'; not judged against a guess."
+        )
+    if pos is not None:
+        return pos, "position", ""
+    if linked is not None:
+        return linked, "number_map", ""
+    if at_position is not None:
+        return None, "unresolved", f"List position {k} is a note, not a reference: '{_name(at_position)}'."
+    return None, "unresolved", ""
 
 
 def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
@@ -273,7 +299,6 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         return []
 
     number_map = _build_number_map(body, bib_by_id)
-    position_ok = _position_map_consistent(number_map)
 
     claims = []
     seen_pairs = set()
@@ -292,10 +317,10 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         for n, ref in enumerate(refs):
             target = (ref.get("target") or "").lstrip("#")
             txt = clean_text(ref)
-            ref_info, resolution = _resolve_ref(
-                target, txt, bib_by_id, bib_by_index, number_map, position_ok
+            ref_info, resolution, note = _resolve_ref(
+                target, txt, bib_by_id, bib_by_index, number_map
             )
-            cites[n] = {"target": target, "txt": txt, "ref": ref_info, "resolution": resolution}
+            cites[n] = {"target": target, "txt": txt, "ref": ref_info, "resolution": resolution, "note": note}
             ref.replace_with(f" {cite_token(n)} ")
 
         sentences = paragraph_sentences(p)
@@ -339,6 +364,7 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                     "ref": ref_info,
                     "resolved": resolved,
                     "resolution": cite["resolution"],
+                    "resolution_note": cite["note"],
                     "role": role,
                     "claim_quality": quality,
                     "context": context,
@@ -873,7 +899,7 @@ def audit_seed_citations(
         c["judgement"] = None
         if not c.get("resolved", True):
             c["outcome"] = "unresolved_ref"
-            c["reason"] = "Citation marker could not be matched to a bibliography entry."
+            c["reason"] = c.get("resolution_note") or "Citation marker could not be matched to a bibliography entry."
         elif c.get("role") in SKIP_ROLES:
             c["outcome"] = "not_a_claim"
             c["reason"] = f"{c['role']} citation — not a verifiable claim about the cited paper."
@@ -1289,7 +1315,8 @@ def explain_rubric_verdict(item: dict) -> str:
     if outcome == "malformed_claim":
         return f"Not assessed: the extracted sentence is a fragment ({', '.join(item.get('claim_quality') or [])}) and could not be judged."
     if outcome == "unresolved_ref":
-        return "Not assessed: the citation marker could not be matched to a bibliography entry."
+        note = item.get("resolution_note") or item.get("reason")
+        return f"Not assessed: {note}" if note else "Not assessed: the citation marker could not be matched to a bibliography entry."
     if outcome != "judged":
         return item.get("reason") or f"Not assessed ({outcome})."
 

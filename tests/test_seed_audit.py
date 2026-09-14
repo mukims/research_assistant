@@ -1705,6 +1705,80 @@ if __name__ == "__main__":
 
 
 
+CONFLICT_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+<div><head>Results</head>
+<p><s>Link and position agree for this statement about graphene mobility <ref type="bibr" target="#b2">[3]</ref>.</s></p>
+<p><s>Link and position disagree for this statement about thermal transport <ref type="bibr" target="#b1">[3]</ref>.</s></p>
+<p><s>Position points at a footnote but the link at a real entry for this statement <ref type="bibr" target="#b3">[2]</ref>.</s></p>
+<p><s>Position points at a footnote and there is no link for this statement <ref type="bibr">[5]</ref>.</s></p>
+<p><s>Plain positional resolution for this statement about band gaps <ref type="bibr">[4]</ref>.</s></p>
+</div></body>
+<back><listBibl>
+<biblStruct xml:id="b0"><analytic><title level="a" type="main">Paper one</title><author><persName><forename>A</forename><surname>Alpha</surname></persName></author></analytic><monogr><imprint><date when="2001">2001</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b1"><note type="raw_reference">An alternative definition, shown in the SM, may extend the validity</note></biblStruct>
+<biblStruct xml:id="b2"><analytic><title level="a" type="main">Paper three</title><author><persName><forename>C</forename><surname>Gamma</surname></persName></author></analytic><monogr><imprint><date when="2003">2003</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b3"><analytic><title level="a" type="main">Paper four</title><author><persName><forename>D</forename><surname>Delta</surname></persName></author></analytic><monogr><imprint><date when="2004">2004</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b4"><note type="raw_reference">See Supplemental Material for the derivation</note></biblStruct>
+</listBibl></back></text></TEI>
+"""
+
+
+class TestResolutionConflicts(unittest.TestCase):
+    """GROBID's target links and list position are two witnesses for a
+    numeric marker. On arxiv_2007.12504v1 the links were off by one for
+    [24]-[34] and position was right; on another paper it could be the
+    reverse. When both are real references and disagree, nobody is judged
+    against a guess."""
+
+    def _by_sentence(self):
+        claims = extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml"))
+        return {c["sentence"].split(" ")[0] + c["sentence"].split(" ")[2]: c for c in claims}
+
+    def test_agreeing_witnesses_resolve_by_target(self):
+        c = self._by_sentence()["Linkposition"]
+        agree = [x for x in extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml")) if "agree for" in x["sentence"]][0]
+        self.assertEqual(agree["ref"]["xml_id"], "b2"); self.assertEqual(agree["resolution"], "target")
+
+    def test_disagreeing_real_entries_are_ambiguous_and_not_judged(self):
+        c = [x for x in extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml")) if "disagree for" in x["sentence"]][0]
+        self.assertFalse(c["resolved"]); self.assertEqual(c["resolution"], "ambiguous")
+        self.assertIn("Paper three", c["resolution_note"]); self.assertIn("SM", c["resolution_note"])
+
+    def test_footnote_at_position_yields_to_the_link(self):
+        c = [x for x in extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml")) if "but the link" in x["sentence"]][0]
+        self.assertEqual(c["ref"]["xml_id"], "b3"); self.assertEqual(c["resolution"], "target")
+
+    def test_footnote_at_position_with_no_link_is_unresolved(self):
+        c = [x for x in extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml")) if "no link for" in x["sentence"]][0]
+        self.assertFalse(c["resolved"]); self.assertEqual(c["resolution"], "unresolved")
+        self.assertIn("note, not a reference", c["resolution_note"])
+
+    def test_footnote_at_position_follows_a_link_seen_elsewhere(self):
+        # [2] is linked to b3 in another sentence; an untargeted [2] whose
+        # position is a footnote follows that link rather than the footnote.
+        claims = extract_seed_citation_claims(BeautifulSoup(
+            CONFLICT_TEI_XML.replace('<ref type="bibr">[5]</ref>', '<ref type="bibr">[2]</ref>'), "xml"))
+        c = [x for x in claims if "no link for" in x["sentence"]][0]
+        self.assertEqual(c["ref"]["xml_id"], "b3"); self.assertEqual(c["resolution"], "number_map")
+
+    def test_plain_position_still_resolves(self):
+        c = [x for x in extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml")) if "Plain positional" in x["sentence"]][0]
+        self.assertEqual(c["ref"]["xml_id"], "b3"); self.assertEqual(c["resolution"], "position")
+
+    def test_ambiguous_reference_reason_reaches_the_audit_record(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
+            tf.write(CONFLICT_TEI_XML); tei_file = tf.name
+        with patch("research_assistant.shared.seed_audit.find_tei_for_seed", return_value=tei_file), \
+             patch("research_assistant.shared.seed_audit._load_downloaded_manifest", return_value={}), _audit_dirs():
+            report = audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []), skip_if_cached=False)
+        amb = [r for r in report["results"] if r.get("resolution") == "ambiguous"][0]
+        self.assertEqual(amb["outcome"], "unresolved_ref")
+        self.assertIn("Paper three", amb["reason"])
+        self.assertIn("Paper three", explain_rubric_verdict(amb))
+        os.unlink(tei_file)
+
+
 class TestManifestPathPortability(unittest.TestCase):
     """downloaded.json records absolute paths. When the data directory moves
     (another mount, another machine), the PDFs are still there under
