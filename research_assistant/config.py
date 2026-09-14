@@ -65,9 +65,9 @@ if LLM_BACKEND is None:
 LLM_BACKEND     = LLM_BACKEND.lower()
 
 # When Gemini is used, default to the official Google OpenAI-compatible endpoint
-# and gemini-3.6-flash, but keep EMBED_BACKEND="ollama" by default so existing
+# and gemini-3.5-flash-lite, but keep EMBED_BACKEND="ollama" by default so existing
 # 25k chunks in ChromaDB work without re-indexing.
-if LLM_BACKEND == "openai" and GEMINI_API_KEY:
+if (LLM_BACKEND == "openai" or GEMINI_API_KEY) and GEMINI_API_KEY:
     _default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
     _default_llm_model = "gemini-3.5-flash-lite"
     _default_embed_backend = "ollama"
@@ -83,7 +83,10 @@ else:
 EMBED_BACKEND   = os.environ.get("CITATION_EMBED_BACKEND", _default_embed_backend).lower()
 
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", _default_base_url)
-OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY") or os.environ.get("HF_TOKEN") or GEMINI_API_KEY
+if "generativelanguage.googleapis.com" in OPENAI_BASE_URL and GEMINI_API_KEY:
+    OPENAI_API_KEY = GEMINI_API_KEY
+else:
+    OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY") or os.environ.get("HF_TOKEN") or GEMINI_API_KEY
 HF_TOKEN        = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
 
 # ─── Models ──────────────────────────────────────────────────────────────────
@@ -202,8 +205,9 @@ SUMMARY_MAX_CHARS        = _env_int("CITATION_SUMMARY_MAX_CHARS", 8000)
 CITATION_CHECK_BATCH_SIZE = 20
 
 # ─── Agent 8 — Verifier (judgement) ──────────────────────────────────────────
-# None → LLM_MODEL, matching SUMMARY_MODEL's pattern above.
-JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL", "") or None
+# Default citation check model: gemini-3.5-flash-lite when GEMINI_API_KEY is present
+_default_judgement_model = "gemini-3.5-flash-lite" if GEMINI_API_KEY else None
+JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL") or _default_judgement_model or None
 # The judgement prompt is a rubric, not a generation task, and its regression
 # cases assert exact verdicts — sampling makes both meaningless.
 JUDGEMENT_TEMPERATURE = 0.0

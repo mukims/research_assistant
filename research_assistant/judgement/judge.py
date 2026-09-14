@@ -17,6 +17,7 @@ import unicodedata
 from pathlib import Path
 
 from research_assistant.config import (
+    GEMINI_API_KEY,
     JUDGEMENT_MODEL,
     JUDGEMENT_OLLAMA_OPTIONS,
     JUDGEMENT_TEMPERATURE,
@@ -323,13 +324,26 @@ def parse_judgement(raw: str) -> dict:
     return _validate(result, raw)
 
 
-def judge(claim: str, citation_evidence: str, model: str | None = None, context: str | None = None) -> dict:
-    """Verdict on whether *citation_evidence* supports *claim*."""
+def judge(
+    claim: str,
+    citation_evidence: str,
+    model: str | None = None,
+    context: str | None = None,
+    backend: str | None = None,
+) -> dict:
+    """Verdict on whether *citation_evidence* supports *claim*.
+
+    When GEMINI_API_KEY is present, citation check is carried out by Gemini via
+    OpenAI-compatible endpoint unless an explicit backend/model is provided.
+    """
+    effective_backend = backend or ("openai" if GEMINI_API_KEY else None)
+    effective_model = model or JUDGEMENT_MODEL or ("gemini-3.5-flash-lite" if GEMINI_API_KEY else None)
     result = chat(
         [{"role": "user", "content": build_prompt(claim, citation_evidence, context=context)}],
-        model=model or JUDGEMENT_MODEL,
+        model=effective_model,
         temperature=JUDGEMENT_TEMPERATURE,
         options=JUDGEMENT_OLLAMA_OPTIONS,
+        backend=effective_backend,
     )
     if not result.content:
         raise JudgementParseError("LLM returned an empty response.", raw="")

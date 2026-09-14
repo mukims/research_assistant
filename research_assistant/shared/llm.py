@@ -23,9 +23,11 @@ from research_assistant.config import (
     LLM_BACKEND,
     EMBED_BACKEND,
     LLM_MODEL,
+    CHAT_MODEL,
     EMBED_MODEL,
     OPENAI_BASE_URL,
     OPENAI_API_KEY,
+    GEMINI_API_KEY,
     HF_TOKEN,
     INDEX_VERSION,
 )
@@ -44,7 +46,7 @@ class ChatResult:
 # ─── Chat ────────────────────────────────────────────────────────────────────
 
 
-def chat(messages, model=None, images=None, temperature=None, options=None) -> ChatResult:
+def chat(messages, model=None, images=None, temperature=None, options=None, backend=None) -> ChatResult:
     """Run a chat completion.
 
     Args:
@@ -56,13 +58,16 @@ def chat(messages, model=None, images=None, temperature=None, options=None) -> C
                   default in place, so existing callers are unaffected.
         options:  ollama runtime options (e.g. JUDGEMENT_OLLAMA_OPTIONS).
                   The openai backend has no equivalent and ignores it.
+        backend:  explicit backend ("ollama" or "openai"). None falls back
+                  to config.LLM_BACKEND.
     """
+    eff_backend = (backend or LLM_BACKEND).lower()
     model = model or LLM_MODEL
-    if LLM_BACKEND == "openai":
+    if eff_backend == "openai":
         return _openai_chat(messages, model, images, temperature)
-    if LLM_BACKEND == "ollama":
+    if eff_backend == "ollama":
         return _ollama_chat(messages, model, images, temperature, options)
-    raise ValueError(f"Unknown LLM_BACKEND {LLM_BACKEND!r} (expected 'ollama' or 'openai')")
+    raise ValueError(f"Unknown LLM_BACKEND {eff_backend!r} (expected 'ollama' or 'openai')")
 
 
 def _ollama_chat(messages, model, images, temperature=None, options=None) -> ChatResult:
@@ -105,7 +110,13 @@ def _b64_data_url(path):
 def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
     from openai import OpenAI
 
-    client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
+    base_url = OPENAI_BASE_URL
+    api_key = OPENAI_API_KEY
+    if model and str(model).startswith("gemini-") and GEMINI_API_KEY:
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        api_key = GEMINI_API_KEY
+
+    client = OpenAI(base_url=base_url, api_key=api_key)
 
     if images:
         messages = list(messages)
@@ -134,7 +145,7 @@ def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
 # so no agent has to import a provider SDK to do it.
 
 
-def chat_stream(messages, model=None, options=None, temperature=None):
+def chat_stream(messages, model=None, options=None, temperature=None, backend=None):
     """Yield content deltas as plain strings.
 
     Args:
@@ -143,17 +154,20 @@ def chat_stream(messages, model=None, options=None, temperature=None):
         options:  ollama runtime options (e.g. CHAT_OLLAMA_OPTIONS). The
                   OpenAI-compatible backend has no equivalent and ignores it.
         temperature: sampling temperature; None leaves the provider default.
+        backend:  explicit backend ("ollama" or "openai"). None falls back
+                  to config.LLM_BACKEND.
 
     Deliberately not a generator itself, so an unknown backend raises at the
     call rather than on the first ``next()``.
     """
-    model = model or LLM_MODEL
-    if LLM_BACKEND == "openai":
+    eff_backend = (backend or LLM_BACKEND).lower()
+    model = model or CHAT_MODEL
+    if eff_backend == "openai":
         return _openai_stream(messages, model, temperature=temperature)
-    if LLM_BACKEND == "ollama":
+    if eff_backend == "ollama":
         return _ollama_stream(messages, model, options, temperature=temperature)
     raise ValueError(
-        f"Unknown LLM_BACKEND {LLM_BACKEND!r} (expected 'ollama' or 'openai')"
+        f"Unknown LLM_BACKEND {eff_backend!r} (expected 'ollama' or 'openai')"
     )
 
 
@@ -178,7 +192,13 @@ def _ollama_stream(messages, model, options, temperature=None):
 def _openai_stream(messages, model, temperature=None):
     from openai import OpenAI
 
-    client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
+    base_url = OPENAI_BASE_URL
+    api_key = OPENAI_API_KEY
+    if model and str(model).startswith("gemini-") and GEMINI_API_KEY:
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        api_key = GEMINI_API_KEY
+
+    client = OpenAI(base_url=base_url, api_key=api_key)
     kwargs = {"model": model, "messages": messages, "stream": True}
     if temperature is not None:
         kwargs["temperature"] = temperature
