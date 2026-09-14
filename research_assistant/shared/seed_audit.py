@@ -105,11 +105,18 @@ _YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
 
 
 def _paragraph_section(p) -> str:
-    """Section kind of the <div> the paragraph sits in; GROBID often leaves
-    the introduction headless, which lands as "other"."""
+    """Section kind of the <div> the paragraph sits in. GROBID often leaves
+    the introduction headless: a headless div before any headed one is the
+    introduction; a headless div after a headed one is unknown ("other")."""
     div = p.find_parent("div")
     head = div.find("head") if div is not None else None
-    return normalise_section_kind(clean_text(head)) if head is not None else "other"
+    if head is not None:
+        return normalise_section_kind(clean_text(head))
+    if div is not None and not any(
+        sibling.find("head") is not None for sibling in div.find_previous_siblings("div")
+    ):
+        return "introduction"
+    return "other"
 
 
 def _build_number_map(body, bib_by_id: dict) -> dict[int, dict]:
@@ -621,16 +628,20 @@ def prioritise_claims(claims: list[dict]) -> tuple[list[dict], list[dict]]:
     """The order the budget is spent in, and the pairs it never reaches.
 
     Results and discussion before methods before introduction; sentences
-    with few citations before "[13]–[27] have been proposed"; document order
-    last. At most MAX_PAIRS_PER_SENTENCE pairs per sentence — the rest are
-    cluster_skipped, which a re-run with a larger budget does not revisit.
+    with few citations before "[13]–[27] have been proposed"; then, because
+    most physics headings are topical ("DFT-based tight-binding Hamiltonian")
+    and map to no rank, later paragraphs before earlier ones — the opening of
+    a paper is background, its later pages are where results are compared
+    with prior work. At most MAX_PAIRS_PER_SENTENCE pairs per sentence — the
+    rest are cluster_skipped, which a re-run with a larger budget does not
+    revisit.
     """
     ordered = sorted(
         claims,
         key=lambda c: (
             SECTION_RANK.get(c.get("section", "other"), 2),
             c.get("cite_count", 1),
-            c.get("paragraph_index", 0),
+            -c.get("paragraph_index", 0),
             c.get("sentence_index", 0),
         ),
     )

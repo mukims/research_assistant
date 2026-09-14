@@ -1559,6 +1559,38 @@ class TestBudgetAndBreaker(unittest.TestCase):
         self.assertEqual(len(skipped), 5)
         self.assertTrue(all(c["outcome"] == "cluster_skipped" for c in skipped))
 
+    def test_unmapped_sections_are_ordered_later_paragraphs_first(self):
+        """Physics papers use topical headings ("DFT-based tight-binding
+        Hamiltonian") that map to "other". Within that rank, a citation late
+        in the paper (results, comparison with prior work) is worth more of
+        the budget than one in the opening paragraphs."""
+        from research_assistant.shared.seed_audit import prioritise_claims
+        early = self._c("other", 1, 2, 0, "b_early")
+        late = self._c("other", 1, 40, 0, "b_late")
+        mid = self._c("other", 1, 20, 0, "b_mid")
+        ordered, _ = prioritise_claims([early, late, mid])
+        self.assertEqual([c["ref"]["xml_id"] for c in ordered], ["b_late", "b_mid", "b_early"])
+        # A mapped section still beats position.
+        results_early = self._c("results", 1, 1, 0, "b_res")
+        ordered, _ = prioritise_claims([late, results_early])
+        self.assertEqual(ordered[0]["ref"]["xml_id"], "b_res")
+
+    def test_leading_headless_div_is_the_introduction(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+<div><p><s>Opening background sentence with a citation <ref type="bibr" target="#b0">[1]</ref>.</s></p></div>
+<div><head>Nanoflower morphology</head><p><s>The model sentence cites <ref type="bibr" target="#b1">[2]</ref>.</s></p></div>
+<div><p><s>A later headless paragraph cites <ref type="bibr" target="#b1">[2]</ref> again.</s></p></div>
+</body><back><listBibl>
+<biblStruct xml:id="b0"><analytic><title level="a" type="main">Zero</title></analytic></biblStruct>
+<biblStruct xml:id="b1"><analytic><title level="a" type="main">One</title></analytic></biblStruct>
+</listBibl></back></text></TEI>"""
+        claims = extract_seed_citation_claims(BeautifulSoup(xml, "xml"))
+        by_sentence = {c["sentence"][:12]: c["section"] for c in claims}
+        self.assertEqual(by_sentence["Opening back"], "introduction")
+        self.assertEqual(by_sentence["The model se"], "other")
+        self.assertEqual(by_sentence["A later head"], "other")
+
     @patch("research_assistant.shared.seed_audit._judge_once")
     @patch("research_assistant.shared.seed_audit.hybrid_search")
     @patch("research_assistant.shared.seed_audit.find_tei_for_seed")
