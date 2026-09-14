@@ -125,7 +125,50 @@ def span_cites_others(span) -> bool | None:
     return bool(_CITES_OTHERS_RE.search(str(span)))
 
 
-def enforce_rubric(result: dict, evidence: str) -> dict:
+# Words that carry no content for the drift check: the model rephrases
+# freely around them ("the value is achieved", "the improvement occurs").
+_DRIFT_STOPWORDS = frozenset("""
+the a an and or of in on at to for with by from as is are was were be been being
+this that these those it its their there than then which who whom whose what when
+where while into onto over under between within without about above below across
+does do did done has have had having not no nor can could may might will would
+shall should must also only just more most less least very much many such same
+other another each every both either neither all any some few several own per
+""".split())
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9@_'-]{2,}")
+DRIFT_MIN_OVERLAP = 0.4
+
+
+_SUFFIXES = ("ies", "ing", "es", "ed", "er", "s")
+
+
+def _stem(word: str) -> str:
+    """Just enough to let reach/reaches, capacitance/capacitances,
+    large/larger agree."""
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            base = word[: -len(suffix)]
+            return base + "y" if suffix == "ies" else base
+    return word
+
+
+def _content_words(text: str) -> set:
+    text = unicodedata.normalize("NFKC", text or "").lower()
+    return {_stem(w) for w in _WORD_RE.findall(text) if w not in _DRIFT_STOPWORDS}
+
+
+def assertion_drift(assertion: str, *sources: str) -> float | None:
+    """Fraction of the assertion's content words that occur in any of the
+    *sources* (after NFKC folding and light stemming). None when the
+    assertion has no content words to compare."""
+    words = _content_words(assertion)
+    if not words:
+        return None
+    pool = set().union(*(_content_words(src) for src in sources))
+    return sum(1 for w in words if w in pool) / len(words)
+
+
+def enforce_rubric(result: dict, evidence: str, claim: str | None = None) -> dict:
     """Make the record say what the rubric says, and where the model differed.
 
     The model's stated judgement is kept as model_judgement; `judgement`
@@ -133,6 +176,15 @@ def enforce_rubric(result: dict, evidence: str) -> dict:
     outside their vocabulary are listed in rubric_violations. The supporting
     span is checked verbatim. Any of those three caps confidence at Medium:
     the model's High was self-reported about a reply that broke its rules.
+
+    With *claim* given, the decomposition is checked against it: a finding
+    assertion that shares fewer than DRIFT_MIN_OVERLAP of its content words
+    with the claim was decomposed from somewhere else — seen when the model
+    reads the context sentence instead of the marked one. The scope
+    assertion may legitimately name the evidence's system where the claim
+    is vague (rubric example F), so it is checked against claim and
+    evidence together. The verdict stands; the drift is recorded and
+    confidence capped.
 
     One more rule the slots cannot express: "Does not support" asserts that
     the paper reports nothing about the relationship, and the judge only ever
@@ -147,6 +199,13 @@ def enforce_rubric(result: dict, evidence: str) -> dict:
         for name in ("finding", "scope", "strength")
         if slots[name]["verdict"] not in SLOT_VOCAB[name]
     ]
+    if claim:
+        for name, sources in (("finding", (claim,)), ("scope", (claim, evidence))):
+            overlap = assertion_drift(str(slots[name].get("assertion") or ""), *sources)
+            if overlap is not None and overlap < DRIFT_MIN_OVERLAP:
+                violations.append(
+                    f"{name}: assertion drift — {overlap:.0%} of its content words occur in the claim"
+                )
     derived = derive_judgement(slots)
     if derived == "Does not support" and result.get("evidence_sufficiency") == "insufficient":
         violations.append(
@@ -266,4 +325,4 @@ def judge(claim: str, citation_evidence: str, model: str | None = None, context:
     )
     if not result.content:
         raise JudgementParseError("LLM returned an empty response.", raw="")
-    return enforce_rubric(parse_judgement(result.content), citation_evidence)
+    return enforce_rubric(parse_judgement(result.content), citation_evidence, claim=claim)

@@ -314,6 +314,40 @@ class TestEnforceRubric(unittest.TestCase):
         self.assertFalse(out["span_cites_others"])
         self.assertIsNone(judge_mod.enforce_rubric(_reply(span=None), "x")["span_cites_others"])
 
+    def test_slot_assertion_that_drifts_from_the_claim_is_flagged(self):
+        """Seen on 2026-09-14: for the claim about δE_cor scaling, the model's
+        finding assertion was "temperature has little effect on the inversion
+        procedure" — imported from the context sentence. The verdict stands;
+        the record says the decomposition drifted and confidence is capped."""
+        claim = ("In our case, where we consider variations of the system chemical potential, "
+                 "δE cor scales with the mean level density times the transmission, which makes "
+                 "δE cor much larger than typical thermal broadening.")
+        r = _reply()
+        r["slots"]["finding"]["assertion"] = "temperature has little effect on the inversion procedure because the correlation energy is large"
+        r["slots"]["scope"]["assertion"] = "variations of the system chemical potential"
+        out = judge_mod.enforce_rubric(r, "the sentence", claim=claim)
+        self.assertTrue(any(v.startswith("finding: assertion drift") for v in out["rubric_violations"]), out["rubric_violations"])
+        self.assertFalse(any(v.startswith("scope:") for v in out["rubric_violations"]))
+        self.assertEqual(out["confidence"], "Medium")
+        self.assertEqual(out["judgement"], "Supports")
+
+    def test_the_prompts_own_examples_do_not_trip_the_drift_check(self):
+        """The six worked examples are the floor: a guard that flags them
+        flags correct decompositions."""
+        import re as _re
+        text = judge_mod.PROMPT_TEMPLATE
+        blocks = _re.findall(r"Claim: \*(.+?)\*\nEvidence: \*(.+?)\*\n.*?```\n(\{.*?\})\n```", text, _re.S)
+        self.assertEqual(len(blocks), 6)
+        for claim, evidence, payload in blocks:
+            r = json.loads(payload)
+            out = judge_mod.enforce_rubric(r, evidence, claim=claim)
+            self.assertFalse(any("assertion drift" in v for v in out["rubric_violations"]), (claim, out["rubric_violations"]))
+
+    def test_no_claim_means_no_drift_check(self):
+        r = _reply(); r["slots"]["finding"]["assertion"] = "something entirely unrelated to anything"
+        out = judge_mod.enforce_rubric(r, "the sentence")
+        self.assertEqual(out["rubric_violations"], [])
+
     def test_low_confidence_is_not_raised_to_medium(self):
         out = judge_mod.enforce_rubric(_reply(span="not in there", confidence="Low"), "the evidence text")
         self.assertEqual(out["confidence"], "Low")

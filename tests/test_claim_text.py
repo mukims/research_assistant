@@ -124,6 +124,15 @@ class TestCitationRole(unittest.TestCase):
         s = "For a review of the multi-terminal formalism and its applications to graphene devices the reader is referred to ⟦C0⟧ ."
         self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {}), "pointer")
 
+    def test_definition_sentences_are_not_claims(self):
+        for s in ("In the linear response regime, the Landauer conductance reads G = 2e2/h dE(-∂f/∂E) Γ(E) ⟦C0⟧ , where f(E) is the Fermi distribution.",
+                  "The transmission T(E) is given by ⟦C0⟧ T = Tr[Γ_L G Γ_R G†].",
+                  "The correlation function is defined as C(δX) = Γ(X + δX/2) Γ(X − δX/2) ⟦C0⟧ ."):
+            self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {"title": "Electronic Transport in Mesoscopic Systems"}), "definition", s)
+        # "is given by" inside a finding is still a finding when there is no equation.
+        s = "The observed enhancement is given by the nanoflower morphology of the polymer ⟦C0⟧ ."
+        self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {"title": "X"}), "evidential")
+
     def test_method(self):
         s = "Following ⟦C0⟧ , we also apply a taper to the target gradient."
         self.assertEqual(ct.classify_citation_role(s, "⟦C0⟧", {"title": "Target-oriented inversion"}), "method")

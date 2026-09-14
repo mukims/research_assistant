@@ -28,7 +28,7 @@ CLAIM_MIN_WORDS = 5
 CLAIM_MAX_WORDS = 80
 
 # Roles that are not claims about the cited paper's findings and are not judged.
-SKIP_ROLES = frozenset({"software", "pointer", "method"})
+SKIP_ROLES = frozenset({"software", "pointer", "method", "definition"})
 
 
 def cite_token(n: int) -> str:
@@ -142,6 +142,16 @@ _POINTER_START_RE = re.compile(
     r"(?:further|more) details\b|the reader is referred\b)",
     re.I,
 )
+# "the conductance reads G = …", "T(E) is given by …", "is defined as …":
+# a definition cites its textbook; there is no finding to verify. Needs an
+# equation-like fragment in the sentence so that "the enhancement is given by
+# the morphology" (a finding) is not swept up.
+_DEFINITION_VERB_RE = re.compile(
+    r"\b(reads|is given by|are given by|is defined as|are defined as|can be written as|"
+    r"can be expressed as|takes the form|is expressed as|is written as)\b",
+    re.I,
+)
+_EQUATION_RE = re.compile(r"(=|\bTr\[|∂|∫|Σ|\bd[A-Za-z]\(|\^|_\{|†)")
 _METHOD_RE = re.compile(
     r"\b(following|according to|as in|adapted from|adopted from|based on|"
     r"we (?:use|used|adopt|adopted|follow|followed|employ|employed|apply|applied))\b",
@@ -150,7 +160,7 @@ _METHOD_RE = re.compile(
 
 
 def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> str:
-    """'software' | 'pointer' | 'method' | 'evidential', from the eight words
+    """'software' | 'pointer' | 'method' | 'definition' | 'evidential', from the eight words
     before the token and the reference's title. Heuristic and deliberately
     conservative: an unrecognised citation is evidential and gets judged."""
     before = sentence.split(token, 1)[0]
@@ -161,6 +171,8 @@ def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> 
         return "software"
     if _POINTER_RE.search(window) or _POINTER_START_RE.match(sentence.lstrip()):
         return "pointer"
+    if _DEFINITION_VERB_RE.search(sentence) and _EQUATION_RE.search(sentence):
+        return "definition"
     if _METHOD_RE.search(window):
         return "method"
     return "evidential"
