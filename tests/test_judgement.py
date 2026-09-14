@@ -72,6 +72,19 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertNotIn("{{CLAIM}}", prompt)
         self.assertNotIn("{{CITATION_EVIDENCE}}", prompt)
 
+    def test_context_block_is_absent_by_default(self):
+        prompt = build_prompt("claim text", "evidence text")
+        self.assertNotIn("{{CONTEXT_BLOCK}}", prompt)
+        self.assertNotIn("**Context", prompt)
+        self.assertLess(prompt.index("**Claim:**"), prompt.index("claim text"))
+
+    def test_context_block_precedes_the_claim(self):
+        prompt = build_prompt("claim text", "evidence text", context="Before. «claim text» After.")
+        self.assertIn("**Context", prompt)
+        self.assertIn("«claim text»", prompt)
+        self.assertLess(prompt.index("**Context"), prompt.index("**Claim:**"))
+        self.assertIn("judge only that sentence", prompt)
+
 
 class TestParseJudgement(unittest.TestCase):
     def test_plain_json(self):

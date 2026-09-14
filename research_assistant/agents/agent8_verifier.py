@@ -122,6 +122,9 @@ def citation_pairs(sentences: list, key_to_source: dict) -> list:
         if not keys:
             continue
         claim = strip_citations(sentence)
+        before = strip_citations(sentences[index - 1]) if index > 0 else ""
+        after = strip_citations(sentences[index + 1]) if index + 1 < len(sentences) else ""
+        context = " ".join(p for p in (before, f"«{claim}»", after) if p)
         compound = len(keys) >= 2 and len(claim.split()) > COMPOUND_WORDS
         if compound:
             logger.warning(
@@ -135,6 +138,7 @@ def citation_pairs(sentences: list, key_to_source: dict) -> list:
                 "sentence_index": index,
                 "sentence": sentence,
                 "claim": claim,
+                "context": context,
                 "cite_key": key,
                 "citation_source": source,
                 "compound_sentence": compound,
@@ -160,8 +164,8 @@ _JUDGE_ATTEMPTS = 2
 
 
 @retry(max_retries=_JUDGE_ATTEMPTS, backoff=1.0)
-def _judge_once(claim, evidence):
-    return judge(claim, evidence)
+def _judge_once(claim, evidence, context=None):
+    return judge(claim, evidence, context=context)
 
 
 def _judgement_model() -> str:
@@ -314,7 +318,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         entry["evidence_hits"] = min(top_k, len(hits))
         entry["escalated"] = False
         try:
-            verdict = _judge_once(entry["claim"], entry["evidence"])
+            verdict = _judge_once(entry["claim"], entry["evidence"], context=entry.get("context"))
             # Second look, once, only when the first verdict says it saw too
             # little and there is more of this paper to show it.
             if escalate_k and len(hits) > top_k and needs_escalation(verdict):
@@ -325,7 +329,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
                 entry["escalated"] = True
                 logger.info(" -> %s on %d hit(s), sufficiency %s — judging again with %d hit(s).",
                             verdict["judgement"], top_k, verdict["evidence_sufficiency"], entry["evidence_hits"])
-                verdict = _judge_once(entry["claim"], entry["evidence"])
+                verdict = _judge_once(entry["claim"], entry["evidence"], context=entry.get("context"))
         except JudgementParseError as exc:
             entry["outcome"] = "parse_failed"
             entry["raw"] = exc.raw

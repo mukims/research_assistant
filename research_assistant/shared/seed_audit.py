@@ -440,14 +440,25 @@ def _judge_claim_entry(
     expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
     item["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
 
+    def _provenance(k):
+        used = hits[:k]
+        item["evidence_hits"] = len(used)
+        item["evidence_sections"] = sorted({(h.get("metadata") or {}).get("section") for h in used} - {None})
+        item["evidence_pages"] = sorted({(h.get("metadata") or {}).get("page") for h in used} - {None})
+
+    _provenance(top_k)
+    item["escalated"] = False
+
     try:
-        verdict = _judge_once(item["claim"], item["evidence"])
+        verdict = _judge_once(item["claim"], item["evidence"], context=item.get("context"))
         if escalate_k and len(hits) > top_k and needs_escalation(verdict):
             item["first_judgement"] = verdict.get("judgement")
             item["evidence"] = assemble_evidence(
                 hits[:escalate_k], JUDGEMENT_EVIDENCE_MAX_CHARS
             )
-            verdict = _judge_once(item["claim"], item["evidence"])
+            _provenance(escalate_k)
+            item["escalated"] = True
+            verdict = _judge_once(item["claim"], item["evidence"], context=item.get("context"))
 
         item["outcome"] = "judged"
         for k in REQUIRED_FIELDS:

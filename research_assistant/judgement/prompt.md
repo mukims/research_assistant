@@ -254,7 +254,7 @@ Two contrasts are worth studying before you judge.
 
 Now apply Steps 1–5 to this claim and evidence. Return ONLY the JSON object.
 
-**Claim:**
+{{CONTEXT_BLOCK}}**Claim:**
 {{CLAIM}}
 
 **Citation Evidence:**

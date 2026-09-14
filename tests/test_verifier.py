@@ -139,6 +139,11 @@ class TestCitationPairs(unittest.TestCase):
     def test_no_citations_yields_nothing(self):
         self.assertEqual(citation_pairs(["Plain text."], {"cite_1": "Smith 2020"}), [])
 
+    def test_pairs_carry_neighbouring_sentences_as_context(self):
+        sentences = ["First sentence here.", "Graphene is a semimetal \\cite{k1}.", "Last sentence here."]
+        pairs = citation_pairs(sentences, {"k1": "Some paper"})
+        self.assertEqual(pairs[0]["context"], "First sentence here. «Graphene is a semimetal.» Last sentence here.")
+
 
 import json
 import os

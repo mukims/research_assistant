@@ -1506,6 +1506,26 @@ class TestHonestOutcomes(unittest.TestCase):
         self.assertEqual(by_xid["b9"]["reliability_explanation"][:12], "Not assessed")
         os.unlink(tei_file); os.unlink(pdf)
 
+    def test_judged_item_records_provenance_and_passes_context(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+        item = {"claim": "Graphene is a semimetal with linear dispersion.", "document": "x.pdf",
+                "context": "Before. «Graphene is a semimetal with linear dispersion.» After."}
+        hits = [{"text": "t1", "metadata": {"document": "x.pdf", "section": "results", "page": 4}},
+                {"text": "t2", "metadata": {"document": "x.pdf", "section": "introduction", "page": 1}}]
+        verdict = {"judgement": "Supports", "confidence": "High", "supporting_span": "t1", "reason": "r",
+                   "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"},
+                             "strength": {"assertion": "t", "verdict": "Not applicable"}},
+                   "evidence_sufficiency": "sufficient"}
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=hits), \
+             patch("research_assistant.shared.seed_audit._judge_once", return_value=verdict) as mj:
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [], top_k=1, escalate_k=0)
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["evidence_sections"], ["results"])
+        self.assertEqual(item["evidence_pages"], [4])
+        self.assertEqual(item["evidence_hits"], 1)
+        self.assertFalse(item["escalated"])
+        self.assertEqual(mj.call_args.kwargs.get("context") or mj.call_args.args[2], item["context"])
+
 
 BREAKER_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>

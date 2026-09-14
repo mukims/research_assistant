@@ -144,10 +144,20 @@ class JudgementParseError(ValueError):
         self.raw = raw
 
 
-def build_prompt(claim: str, citation_evidence: str) -> str:
-    """Fill the prompt input template."""
+_CONTEXT_HEADER = (
+    "**Context** (the sentences around the claim, from the citing paper; the claim is the "
+    "sentence between « and »; judge only that sentence, and use the rest only to resolve "
+    "what its words refer to — never as evidence):\n"
+)
+
+
+def build_prompt(claim: str, citation_evidence: str, context: str | None = None) -> str:
+    """Fill the prompt input template. The context block is present only when
+    there is context, so the six regression cases render exactly as before."""
+    context_block = f"{_CONTEXT_HEADER}{context.strip()}\n\n" if context and context.strip() else ""
     return (
         PROMPT_TEMPLATE
+        .replace("{{CONTEXT_BLOCK}}", context_block)
         .replace("{{CLAIM}}", claim)
         .replace("{{CITATION_EVIDENCE}}", citation_evidence)
     )
@@ -213,10 +223,10 @@ def parse_judgement(raw: str) -> dict:
     return _validate(result, raw)
 
 
-def judge(claim: str, citation_evidence: str, model: str | None = None) -> dict:
+def judge(claim: str, citation_evidence: str, model: str | None = None, context: str | None = None) -> dict:
     """Verdict on whether *citation_evidence* supports *claim*."""
     result = chat(
-        [{"role": "user", "content": build_prompt(claim, citation_evidence)}],
+        [{"role": "user", "content": build_prompt(claim, citation_evidence, context=context)}],
         model=model or JUDGEMENT_MODEL,
         temperature=JUDGEMENT_TEMPERATURE,
         options=JUDGEMENT_OLLAMA_OPTIONS,
