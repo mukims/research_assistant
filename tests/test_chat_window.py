@@ -11,8 +11,11 @@ from research_assistant.agents import agent7_research_chat as a7
 
 _PROBE = """
 import json
-import dotenv
-dotenv.load_dotenv = lambda *a, **kw: None
+try:
+    import dotenv
+    dotenv.load_dotenv = lambda *a, **kw: None   # the probe's env is the whole truth
+except ImportError:                              # config.py tolerates a missing dotenv too
+    pass
 from research_assistant import config as c
 print(json.dumps({
     "window": c.CHAT_WINDOW_TOKENS,

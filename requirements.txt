@@ -43,3 +43,6 @@ pysbd==0.3.4                   # v2 chunker sentence splitter
 
 # ─── Agent 6 / watch.py — directory watching ────────────────────────────────
 watchdog==6.0.0
+# config.py reads .env (and DATA_DIR/.env) through it; without it the app
+# silently ignores the backend settings on the data disk.
+python-dotenv>=1.0
