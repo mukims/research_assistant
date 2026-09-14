@@ -484,14 +484,14 @@ def cross_check_seed_audit(
     seed_path: str,
     cached_report: dict,
     search_resources=None,
-    max_new_claims: int = 10,
+    max_new_claims: int = 0,
 ) -> tuple[dict, dict]:
     """Cross-check an existing audit report against the current knowledge base.
 
     Verifies whether previously unretrieved / deferred citations are now available,
-    evaluates any newly available references, refreshes the Source Assessor and
-    Reliability Policy across all items in memory, recomputes totals, and persists
-    the updated report.
+    evaluates any newly available references if max_new_claims > 0, refreshes the
+    Source Assessor and Reliability Policy across all items in memory, recomputes
+    totals, and persists the updated report.
     """
     t0 = time.perf_counter()
     report = dict(cached_report)
@@ -537,10 +537,11 @@ def cross_check_seed_audit(
             )
             claims_to_rejudge.append(item)
 
-    if claims_to_rejudge:
+    if claims_to_rejudge and max_new_claims > 0:
         logger.info(
-            "Found %d previously unresolved citation(s) now available in corpus. Judging...",
+            "Found %d previously unresolved citation(s) now available in corpus. Judging up to %d...",
             len(claims_to_rejudge),
+            max_new_claims,
         )
         if search_resources is None:
             from research_assistant.shared.db import load_search_resources
@@ -622,6 +623,7 @@ def cross_check_seed_audit(
         "duration_seconds": round(elapsed, 2),
         "total_claims": len(results),
         "already_judged_count": initial_judged_count,
+        "newly_available_count": len(claims_to_rejudge),
         "newly_judged_count": newly_judged_count,
         "from_cache": True,
     }

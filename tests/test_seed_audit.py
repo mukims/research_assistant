@@ -1262,7 +1262,10 @@ class TestSeedAuditCaching(unittest.TestCase):
                 mock_judge.side_effect = fake_judge
 
                 report, summary = cross_check_seed_audit(
-                    "seed.pdf", cached, search_resources=(MagicMock(), MagicMock(), [], [])
+                    "seed.pdf",
+                    cached,
+                    search_resources=(MagicMock(), MagicMock(), [], []),
+                    max_new_claims=1,
                 )
                 self.assertEqual(summary["newly_judged_count"], 1)
                 self.assertEqual(report["totals"]["Supports"], 1)

@@ -222,7 +222,7 @@ JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS",
 # would otherwise use the model default (commonly 4096, sometimes 2048) and
 # Ollama would truncate — silently, from the tail, which is exactly where the
 # worked examples live. Ignored by the openai backend.
-JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": 8192}
+JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": 4096}
 
 # ─── Search Tunables ──────────────────────────────────────────────────────────
 RRF_K            = 60               # Reciprocal Rank Fusion constant
@@ -247,7 +247,7 @@ SYNTHESIS_MODE                = os.environ.get("CITATION_SYNTHESIS_MODE", "map_r
 SYNTHESIS_PER_PAPER_CHUNKS    = _env_int("CITATION_SYNTHESIS_PER_PAPER_CHUNKS", 4)
 SYNTHESIS_PER_PAPER_MAX_CHARS = _env_int("CITATION_SYNTHESIS_PER_PAPER_MAX_CHARS", 5000)
 SYNTHESIS_TEMPERATURE         = float(os.environ.get("CITATION_SYNTHESIS_TEMPERATURE", "0.2"))
-SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": 8192}
+SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": 4096}
 
 
 
