@@ -1607,6 +1607,67 @@ class TestBudgetAndBreaker(unittest.TestCase):
             os.unlink(tei_file)
 
 
+class TestHonestMarkdown(unittest.TestCase):
+    def _report(self, results, aborted=None):
+        for r in results:
+            r.setdefault("ref", {"xml_id": "b0", "index": 1, "title": "T", "authors": ["A B"], "year": 2020, "doi": None})
+            r.setdefault("sentence", "S."); r.setdefault("claim", "S.")
+            r.setdefault("paragraph_id", "p_0"); r.setdefault("paragraph_refs", [])
+        return {"seed_name": "seed.pdf", "generated": "now", "model": "m", "results": results,
+                "totals": compute_totals(results), "aborted": aborted}
+
+    def test_not_assessed_items_show_no_confidence(self):
+        md = generate_seed_audit_markdown(self._report([
+            {"outcome": "cap_exceeded", "judgement": None, "downloaded": True, "reason": "Maximum claims evaluation budget reached.",
+             "reliability": "UNRESOLVED", "reliability_badge": "⏳ Not Assessed",
+             "reliability_explanation": "Not assessed — the per-paper claim budget was reached before this citation."},
+        ]))
+        self.assertNotIn("Confidence:", md)
+        self.assertNotIn("Evidence Sufficiency", md)
+        self.assertIn("Not assessed", md)
+        self.assertNotIn("fragmentary", md)
+
+    def test_coverage_table_and_abort_banner(self):
+        md = generate_seed_audit_markdown(self._report(
+            [{"outcome": "retrieval_failed", "judgement": None, "downloaded": True, "reason": "Retrieval failed: Failed to connect to Ollama"},
+             {"outcome": "not_attempted", "judgement": None, "downloaded": True, "reason": "stopped"}],
+            aborted={"reason": "Retrieval failed: Failed to connect to Ollama", "after_attempted": 1}))
+        self.assertIn("Assessment coverage", md)
+        self.assertIn("| Judged by the model | **0**", md)
+        self.assertIn("audit stopped", md.lower())
+        self.assertIn("Ollama", md)
+
+    def test_judged_item_shows_provenance_role_and_warnings(self):
+        md = generate_seed_audit_markdown(self._report([
+            {"outcome": "judged", "judgement": "Supports", "downloaded": True, "confidence": "Medium",
+             "evidence_sufficiency": "sufficient", "supporting_span": "quoted", "reason": "why",
+             "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"},
+                       "strength": {"assertion": "t", "verdict": "Not applicable"}},
+             "role": "evidential", "section": "results", "evidence_sections": ["introduction"], "evidence_pages": [2],
+             "span_verified": False, "rubric_mismatch": True, "model_judgement": "Partially supports", "escalated": True,
+             "evidence_hits": 3, "reliability": "MODERATE", "reliability_badge": "🟡 Moderate", "reliability_explanation": "e"},
+        ]))
+        self.assertIn("Confidence:** `Medium`", md)
+        self.assertIn("Evidence from:** introduction (p. 2)", md)
+        self.assertIn("Cited in:** results", md)
+        self.assertIn("not found verbatim", md)
+        self.assertIn("model said Partially supports", md)
+        self.assertIn("Escalated", md)
+
+    def test_deferred_items_are_grouped_per_paragraph(self):
+        missing = [{"xml_id": "b9", "index": 9, "title": "Missing paper", "authors": [], "year": 2019, "doi": None}]
+        results = [
+            {"outcome": "deferred_paywalled", "judgement": None, "downloaded": False, "paragraph_id": "p_3", "section": "results",
+             "sentence": "First deferred sentence [9].", "paragraph_missing_refs": missing, "paywall_ratio": 1.0, "reason": "deferred"},
+            {"outcome": "deferred_paywalled", "judgement": None, "downloaded": False, "paragraph_id": "p_3", "section": "results",
+             "sentence": "Second deferred sentence [9].", "paragraph_missing_refs": missing, "paywall_ratio": 1.0, "reason": "deferred"},
+        ]
+        md = generate_seed_audit_markdown(self._report(results))
+        self.assertEqual(md.count("### Paragraph p_3"), 1)
+        self.assertIn("First deferred sentence", md); self.assertIn("Second deferred sentence", md)
+        self.assertIn("Missing paper", md)
+
+
 if __name__ == "__main__":
     unittest.main()
 

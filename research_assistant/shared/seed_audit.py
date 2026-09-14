@@ -1305,6 +1305,40 @@ def explain_rubric_verdict(item: dict) -> str:
     return item.get("reason") or "Evaluation complete."
 
 
+_VERDICT_BADGES = {
+    "Supports": "🟢 Supports",
+    "Partially supports": "🟡 Partially Supports",
+    "Contradicts": "🔴 Contradicts",
+    "Does not support": "🟠 Does Not Support",
+    "Unclear / insufficient evidence": "⚪ Unclear / Insufficient Evidence",
+}
+
+_NOT_ASSESSED_BADGES = {
+    "deferred_paywalled": "⏳ Deferred (Pending Evidence)",
+    "not_downloaded": "🔒 Paywalled / Not In Corpus",
+    "cap_exceeded": "⏸ Not Assessed (budget)",
+    "cluster_skipped": "⏸ Not Assessed (cluster)",
+    "not_attempted": "⏸ Not Assessed (backend down)",
+    "retrieval_failed": "⏸ Not Assessed (retrieval failed)",
+    "call_failed": "⏸ Not Assessed (model call failed)",
+    "parse_failed": "⏸ Not Assessed (unparseable reply)",
+    "no_evidence": "⏸ Not Assessed (no passages found)",
+    "malformed_claim": "⏸ Not Assessed (sentence fragment)",
+    "unresolved_ref": "⏸ Not Assessed (unmatched reference)",
+}
+
+
+def _audit_item_badge(item: dict) -> str:
+    """The label a citation row wears. Outcome first: a verdict label is only
+    ever shown for an item the judge produced a verdict for."""
+    outcome = item.get("outcome")
+    if outcome == "judged":
+        return _VERDICT_BADGES.get(item.get("judgement") or "", "⚪ Unclear / Insufficient Evidence")
+    if outcome == "not_a_claim":
+        return f"🔧 Not a Claim ({item.get('role') or 'non-evidential'})"
+    return _NOT_ASSESSED_BADGES.get(outcome or "", f"⏸ Not Assessed ({outcome or 'unknown'})")
+
+
 def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) -> str:
     """Generates a complete, comprehensive Markdown audit report for the given report dict."""
     title = (
@@ -1339,7 +1373,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| 🟡 **Partially Supports** | **{totals.get('Partially supports', 0)}** | {pct(totals.get('Partially supports', 0))} | Core finding matches; scope or strength hedged |",
         f"| 🔴 **Contradicts** | **{totals.get('Contradicts', 0)}** | {pct(totals.get('Contradicts', 0))} | Evidence directly opposes claim |",
         f"| 🟠 **Does Not Support** | **{totals.get('Does not support', 0)}** | {pct(totals.get('Does not support', 0))} | Scope or finding mismatch |",
-        f"| ⚪ **Unclear / Insufficient** | **{totals.get('Unclear / insufficient evidence', 0)}** | {pct(totals.get('Unclear / insufficient evidence', 0))} | Fragile or fragmentary evidence |",
+        f"| ⚪ **Unclear / Insufficient** | **{totals.get('Unclear / insufficient evidence', 0)}** | {pct(totals.get('Unclear / insufficient evidence', 0))} | Fragile or inconclusive evidence |",
         f"| ⏳ **Deferred (Pending Evidence)** | **{totals.get('deferred_paywalled', 0)}** | {pct(totals.get('deferred_paywalled', 0))} | Paragraph >50% paywalled; evaluation deferred |",
         f"| 🔒 **Paywalled / Unchecked** | **{totals.get('not_downloaded', 0)}** | {pct(totals.get('not_downloaded', 0))} | Non-OA reference; unavailable |",
         "",
@@ -1351,8 +1385,35 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| 🟡 **Moderate Reliability** | **{totals.get('reliability', {}).get('moderate', 0)}** | {pct(totals.get('reliability', {}).get('moderate', 0))} | Supported by unreviewed preprints, secondary surveys, or hedged findings |",
         f"| 🟠 **Low / Flagged** | **{totals.get('reliability', {}).get('low', 0)}** | {pct(totals.get('reliability', {}).get('low', 0))} | Unverified spans, retracted/flawed sources, or rubric violations |",
         f"| 🔴 **Contradicted** | **{totals.get('reliability', {}).get('contradicted', 0)}** | {pct(totals.get('reliability', {}).get('contradicted', 0))} | Cited peer-reviewed literature directly refutes the claim |",
-        f"| ⏳ **Unresolved / Pending** | **{totals.get('reliability', {}).get('unresolved', 0)}** | {pct(totals.get('reliability', {}).get('unresolved', 0))} | Unretrieved, paywalled, or insufficient evidence |",
+        f"| 🟠 **Unsupported** | **{totals.get('reliability', {}).get('unsupported', 0)}** | {pct(totals.get('reliability', {}).get('unsupported', 0))} | The cited paper was read and does not report this |",
+        f"| ⏳ **Unresolved / Pending** | **{totals.get('reliability', {}).get('unresolved', 0)}** | {pct(totals.get('reliability', {}).get('unresolved', 0))} | Judged but undecidable, or not assessed (see coverage) |",
         "",
+    ]
+
+    coverage = totals.get("coverage", {})
+    not_assessed = totals.get("not_assessed", {})
+    coverage_lines = [
+        "### Assessment coverage",
+        "",
+        "| | Count |",
+        "| :--- | :--- |",
+        f"| Citations whose reference is in the corpus | **{coverage.get('downloaded', 0)}** |",
+        f"| Attempted (retrieval + model call) | **{coverage.get('attempted', 0)}** |",
+        f"| Judged by the model | **{coverage.get('judged', 0)}** |",
+    ]
+    for outcome, n in sorted(not_assessed.items(), key=lambda kv: -kv[1]):
+        coverage_lines.append(f"| Not assessed — {outcome.replace('_', ' ')} | {n} |")
+    coverage_lines.append("")
+    if report.get("aborted"):
+        ab = report["aborted"]
+        coverage_lines += [
+            f"> ⚠️ **Audit stopped early** after {ab.get('after_attempted')} attempt(s): {ab.get('reason')}  ",
+            "> Every citation after that point is *not attempted*. Re-run once the backend is reachable.",
+            "",
+        ]
+    lines.extend(coverage_lines)
+
+    lines.extend([
         "---",
         "",
         "## 2. Verification Rubric & Methodology",
@@ -1371,7 +1432,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         "",
         "---",
         "",
-    ]
+    ])
 
     deferred_missing = get_deferred_missing_references(report)
     lines.append(f"## 3. Missing References Required for Deferred Paragraphs ({len(deferred_missing)})\n")
@@ -1401,14 +1462,20 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
 
     needs_review = [
         r for r in results
-        if r.get("judgement") in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
+        if r.get("outcome") == "judged"
+        and r.get("judgement") in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
     ]
     supported = [
         r for r in results
-        if r.get("judgement") in ("Supports", "Partially supports")
+        if r.get("outcome") == "judged"
+        and r.get("judgement") in ("Supports", "Partially supports")
     ]
-    paywalled = [r for r in results if r.get("outcome") in ("not_downloaded", "deferred_paywalled")]
-    other = [r for r in results if r not in needs_review and r not in supported and r not in paywalled]
+    not_assessed = [
+        r for r in results
+        if r.get("outcome") not in ("judged", "not_downloaded", "deferred_paywalled")
+    ]
+    deferred = [r for r in results if r.get("outcome") == "deferred_paywalled"]
+    not_downloaded = [r for r in results if r.get("outcome") == "not_downloaded"]
 
     def _format_entry(item, index):
         ref_info = item.get("ref") or {}
@@ -1424,24 +1491,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         doi = ref_info.get("doi")
         doi_str = f"https://doi.org/{doi}" if doi else "N/A"
 
-        judgement = item.get("judgement", "Unclear")
-        confidence = item.get("confidence", "Medium")
-        sufficiency = item.get("evidence_sufficiency", "partial")
-
-        badge_map = {
-            "Supports": "🟢 Supports",
-            "Partially supports": "🟡 Partially Supports",
-            "Contradicts": "🔴 Contradicts",
-            "Does not support": "🟠 Does Not Support",
-            "Unclear / insufficient evidence": "⚪ Unclear / Insufficient Evidence",
-            "Deferred (pending paywalled evidence)": "⏳ Deferred (Pending Evidence)",
-        }
-        if item.get("outcome") == "deferred_paywalled":
-            badge = "⏳ Deferred (Pending Evidence)"
-        elif item.get("outcome") == "not_downloaded":
-            badge = "🔒 Paywalled / Not In Corpus"
-        else:
-            badge = badge_map.get(judgement, "⚪ Unclear / Insufficient Evidence")
+        badge = _audit_item_badge(item)
 
         rel_line = (
             f"- **Scientific Reliability:** `{item.get('reliability_badge', '⚪ Unresolved')}` — *{item.get('reliability_explanation', '')}*"
@@ -1455,15 +1505,22 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             else None
         )
 
-        out_lines = [
-            f"### Citation {index}: {ref_num} {ref_title}{ref_year}",
-            "",
-            f"- **Verdict:** `{badge}` · **Confidence:** `{confidence}` · **Evidence Sufficiency:** `{sufficiency}`",
-        ]
-        if rel_line:
+        judged = item.get("outcome") == "judged"
+        out_lines = [f"### Citation {index}: {ref_num} {ref_title}{ref_year}", ""]
+        if judged:
+            out_lines.append(
+                f"- **Verdict:** `{badge}` · **Confidence:** `{item.get('confidence')}` · "
+                f"**Evidence Sufficiency:** `{item.get('evidence_sufficiency')}`"
+            )
+        else:
+            out_lines.append(f"- **Status:** `{badge}` — *{item.get('reliability_explanation') or explain_rubric_verdict(item)}*")
+        if judged and rel_line:
             out_lines.append(rel_line)
         if src_line:
             out_lines.append(src_line)
+        role = item.get("role"); section = item.get("section")
+        if role or section:
+            out_lines.append(f"- **Cited in:** {section or '—'} · **Citation role:** {role or '—'}")
         out_lines.extend([
             f"- **Statement in Paper:**  \n  > \"{item.get('sentence') or item.get('claim', '')}\"",
             (
@@ -1472,6 +1529,19 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
                 else f"- **Cited Reference:** {ref_authors}{ref_year}. *{ref_title}*"
             ),
         ])
+        if judged:
+            secs = ", ".join(item.get("evidence_sections") or []) or "—"
+            pages = ", ".join(str(p) for p in (item.get("evidence_pages") or []))
+            out_lines.append(f"- **Evidence from:** {secs}" + (f" (p. {pages})" if pages else "") +
+                             f" · {item.get('evidence_hits', 0)} passage(s)")
+            if item.get("escalated"):
+                out_lines.append(f"- ↻ **Escalated:** first verdict {item.get('first_judgement')}; re-judged on more evidence.")
+            if item.get("span_verified") is False:
+                out_lines.append("- ⚠ **Supporting span not found verbatim in the evidence** — treat it as a paraphrase.")
+            if item.get("rubric_mismatch"):
+                out_lines.append(f"- ⚠ **Rubric:** model said {item.get('model_judgement')}; the rules derive {item.get('judgement')}.")
+            if "too_long" in (item.get("claim_quality") or []):
+                out_lines.append("- ⚠ **Long sentence:** the claim is over 80 words; the verdict is about the whole sentence.")
 
         slots = item.get("slots")
         if slots and isinstance(slots, dict):
@@ -1498,7 +1568,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             out_lines.append(f"- **Evidence Passages Considered:**  \n  > \"{item['evidence'][:350].strip()}...\"")
 
         out_lines.append("")
-        if item.get("reason"):
+        if judged and item.get("reason"):
             out_lines.append(f"- **Assessment:** {item['reason']}")
         out_lines.append(f"- **Why this verdict?** {explain_rubric_verdict(item)}")
         out_lines.append("")
@@ -1519,15 +1589,33 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             lines.append(_format_entry(item, i))
         current_sec += 1
 
-    if paywalled:
-        lines.append(f"## {current_sec}. Paywalled or Unavailable Citations ({len(paywalled)})\n")
-        for i, item in enumerate(paywalled, 1):
+    if not_assessed:
+        lines.append(f"## {current_sec}. Not Assessed ({len(not_assessed)})\n")
+        for i, item in enumerate(sorted(not_assessed, key=lambda r: str(r.get("outcome") or "")), 1):
             lines.append(_format_entry(item, i))
         current_sec += 1
 
-    if other:
-        lines.append(f"## {current_sec}. Other Citations ({len(other)})\n")
-        for i, item in enumerate(other, 1):
+    if deferred:
+        lines.append(f"## {current_sec}. Deferred Paragraphs ({len({r.get('paragraph_id') for r in deferred})})\n")
+        by_para: dict = {}
+        for r in deferred:
+            by_para.setdefault(r.get("paragraph_id", "p_?"), []).append(r)
+        for p_id, items in by_para.items():
+            first = items[0]
+            missing = first.get("paragraph_missing_refs") or []
+            lines.append(f"### Paragraph {p_id} ({first.get('section', '—')}) — {len(missing)} missing reference(s)\n")
+            for r in items:
+                lines.append(f"> {r.get('sentence')}\n")
+            for m in missing:
+                doi_val = m.get("doi")
+                doi_s = f" · [`{doi_val}`](https://doi.org/{doi_val})" if doi_val else ""
+                lines.append(f"- [{m.get('index') or '?'}] {m.get('title') or 'Unknown title'} ({m.get('year') or 'n.d.'}){doi_s}")
+            lines.append("\n---\n")
+        current_sec += 1
+
+    if not_downloaded:
+        lines.append(f"## {current_sec}. Paywalled or Unavailable Citations ({len(not_downloaded)})\n")
+        for i, item in enumerate(not_downloaded, 1):
             lines.append(_format_entry(item, i))
         current_sec += 1
 
