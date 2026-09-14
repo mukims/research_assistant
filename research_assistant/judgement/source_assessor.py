@@ -156,8 +156,21 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
             "rationale": "Secondary survey, review, or meta-analysis synthesizing existing primary studies.",
         }
 
+    # 3b. Books and chapters are not primary literature and are not graded.
+    if meta.get("is_monograph"):
+        return {
+            "grade": SourceGrade.UNKNOWN.value,
+            "grade_label": "Book / Chapter",
+            "badge": "📖 Book / Chapter",
+            "is_preprint": False,
+            "is_retracted": False,
+            "venue": venue,
+            "citation_count": citation_count,
+            "rationale": "Book or book chapter — not graded as primary literature.",
+        }
+
     # 4. Primary Peer-Reviewed Literature
-    if venue or doi:
+    if venue:
         is_high_impact = bool(_HIGH_IMPACT_VENUES.search(venue))
         is_well_cited = citation_count is not None and citation_count >= 50
         if is_high_impact or is_well_cited:
@@ -169,7 +182,7 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
                 "is_retracted": False,
                 "venue": venue,
                 "citation_count": citation_count,
-                "rationale": "Peer-reviewed primary research published in a leading venue or with substantial citation replication.",
+                "rationale": "Peer-reviewed primary research published in a leading venue or with substantial citation replication (heuristic from venue and title; not verified against Crossref).",
             }
         return {
             "grade": SourceGrade.STANDARD_PRIMARY.value,
@@ -179,7 +192,7 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
             "is_retracted": False,
             "venue": venue,
             "citation_count": citation_count,
-            "rationale": "Peer-reviewed primary experimental or theoretical publication.",
+            "rationale": "Peer-reviewed primary experimental or theoretical publication (heuristic from venue and title; not verified against Crossref).",
         }
 
     # 5. Sparse / Unknown Metadata
@@ -191,5 +204,9 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
         "is_retracted": False,
         "venue": "",
         "citation_count": None,
-        "rationale": "Insufficient metadata to assess peer review status or venue rigor.",
+        "rationale": (
+            "DOI present but venue unknown — peer-review status not graded."
+            if doi else
+            "Insufficient metadata to assess peer review status or venue rigor."
+        ),
     }

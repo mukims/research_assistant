@@ -72,6 +72,23 @@ class TestSourceAssessor(unittest.TestCase):
         res = assess_source({})
         self.assertEqual(res["grade"], SourceGrade.UNKNOWN.value)
 
+    def test_doi_without_venue_is_unknown(self):
+        res = assess_source({"title": "Nanoscale direct mapping of noise source activities", "doi": "10.1021/acsnano"})
+        self.assertEqual(res["grade"], SourceGrade.UNKNOWN.value)
+        self.assertIn("venue", res["rationale"].lower())
+
+    def test_monograph_is_unknown_not_primary(self):
+        res = assess_source(ref_info={"title": "Semiconductor Nanostructures", "venue": "Semiconductor Nanostructures",
+                                      "is_monograph": True, "doi": "10.1093/acprof:oso/9780199534425.001.0001"})
+        self.assertEqual(res["grade"], SourceGrade.UNKNOWN.value)
+        self.assertIn("book", res["rationale"].lower())
+
+    def test_primary_rationale_says_heuristic(self):
+        res = assess_source({"title": "Synthesis of MnFe2O4 nanoparticles", "venue": "Journal of Alloys and Compounds",
+                             "doi": "10.1016/j.jallcom.2021.123456"})
+        self.assertEqual(res["grade"], SourceGrade.STANDARD_PRIMARY.value)
+        self.assertIn("not verified", res["rationale"])
+
 
 if __name__ == "__main__":
     unittest.main()
