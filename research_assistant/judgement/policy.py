@@ -17,42 +17,76 @@ class ReliabilityRating(str, Enum):
     MODERATE = "MODERATE"
     LOW = "LOW"
     CONTRADICTED = "CONTRADICTED"
+    UNSUPPORTED = "UNSUPPORTED"
     UNRESOLVED = "UNRESOLVED"
 
 
+# One sentence per way a citation can end up not judged. The rating for all of
+# them is UNRESOLVED; the explanation is what distinguishes "the paper was
+# silent" from "we never looked".
+NOT_ASSESSED_EXPLANATIONS = {
+    "cap_exceeded": "Not assessed — the per-paper claim budget was reached before this citation.",
+    "not_attempted": "Not assessed — the audit stopped early because the model backend was unreachable.",
+    "retrieval_failed": "Not assessed — retrieval from the cited paper failed.",
+    "call_failed": "Not assessed — the model backend returned an error.",
+    "parse_failed": "Not assessed — the model reply could not be parsed.",
+    "no_evidence": "Not assessed — search found no passages in the cited paper for this sentence.",
+    "cluster_skipped": "Not assessed — the sentence cites many papers; only the first few were judged.",
+    "not_a_claim": "Not assessed — this citation is not a verifiable claim about the cited paper (software, pointer, or method reference).",
+    "malformed_claim": "Not assessed — the extracted sentence is a fragment and could not be judged.",
+    "unresolved_ref": "Not assessed — the citation could not be matched to a bibliography entry.",
+    "not_downloaded": "Not assessed — the cited paper is not in the corpus.",
+    "deferred_paywalled": "Not assessed — deferred because most references in this paragraph are missing.",
+}
+
+
 def evaluate_reliability(
-    relation: str,
+    relation: str | None,
     source_grade: str | None = None,
-    confidence: str = "High",
+    confidence: str | None = None,
     span_verified: bool | None = None,
     rubric_violations: list[str] | None = None,
     rubric_mismatch: bool = False,
+    outcome: str = "judged",
 ) -> dict[str, Any]:
-    """Derive scientific reliability from relation verdict and source grade.
+    """Derive scientific reliability from the relation verdict and source grade.
 
-    Args:
-        relation: Verdict from the judgement engine (Supports, Partially supports, etc.).
-        source_grade: Evaluated SourceGrade of the cited paper.
-        confidence: Model confidence (High, Medium, Low).
-        span_verified: Whether the cited quote was verified verbatim in the PDF text.
-        rubric_violations: Out-of-vocabulary slot violations.
-        rubric_mismatch: Whether model's top-level verdict differed from derived slots.
-
-    Returns:
-        Dict with keys: rating, badge, rating_label, explanation.
+    A rating is a statement about a verdict. When there is no verdict
+    (*outcome* != "judged") the rating is UNRESOLVED and the explanation says
+    why nothing was judged — never that the evidence was insufficient.
     """
     source_grade = source_grade or SourceGrade.UNKNOWN.value
-    rel = relation.strip()
-    conf = confidence.capitalize() if confidence else "High"
+    conf = (confidence or "High").capitalize()
     has_violations = bool(rubric_violations) or rubric_mismatch
 
-    # 1. Unresolved / Deferred / Missing Evidence
-    if rel in ("Does not support", "Unclear / insufficient evidence") or rel.startswith("Deferred"):
+    # 0. Nothing was judged.
+    if outcome != "judged" or not relation:
         return {
             "rating": ReliabilityRating.UNRESOLVED.value,
-            "badge": "⏳ Pending / Unresolved",
+            "badge": "⏳ Not Assessed",
+            "rating_label": "Not Assessed",
+            "explanation": NOT_ASSESSED_EXPLANATIONS.get(
+                outcome, f"Not assessed — {outcome}."
+            ),
+        }
+    rel = relation.strip()
+
+    # 1. The judge could not decide from what it saw.
+    if rel == "Unclear / insufficient evidence":
+        return {
+            "rating": ReliabilityRating.UNRESOLVED.value,
+            "badge": "⚪ Unresolved",
             "rating_label": "Unresolved Evidence",
-            "explanation": "Citation does not provide sufficient, retrievable evidence to verify the claim.",
+            "explanation": "The judge could not decide from the retrieved passages whether the cited paper supports this sentence.",
+        }
+
+    # 1b. The paper was read and does not say this.
+    if rel == "Does not support":
+        return {
+            "rating": ReliabilityRating.UNSUPPORTED.value,
+            "badge": "🟠 Unsupported",
+            "rating_label": "Unsupported Citation",
+            "explanation": "The cited paper does not report the finding or the conditions this sentence attributes to it.",
         }
 
     # 2. Contradicted Claims (Refutations)
