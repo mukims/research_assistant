@@ -427,13 +427,13 @@ def _judge_claim_entry(
     except Exception as exc:
         logger.warning("Retrieval failed for %s: %s", item.get("document"), exc)
         item["outcome"] = "retrieval_failed"
-        item["judgement"] = "Unclear / insufficient evidence"
+        item["judgement"] = None
         item["reason"] = f"Retrieval failed: {exc}"
         return item
 
     if not hits:
         item["outcome"] = "no_evidence"
-        item["judgement"] = "Unclear / insufficient evidence"
+        item["judgement"] = None
         item["reason"] = "No relevant passages found in the cited document."
         return item
 
@@ -464,12 +464,12 @@ def _judge_claim_entry(
     except JudgementParseError as exc:
         logger.warning("Judgement parse failed: %s", exc)
         item["outcome"] = "parse_failed"
-        item["judgement"] = "Unclear / insufficient evidence"
+        item["judgement"] = None
         item["reason"] = "Model returned unparseable response."
     except Exception as exc:
         logger.warning("Judgement call failed: %s", exc)
         item["outcome"] = "call_failed"
-        item["judgement"] = "Unclear / insufficient evidence"
+        item["judgement"] = None
         item["reason"] = f"Model evaluation error: {exc}"
 
     return item
@@ -527,6 +527,56 @@ def get_cached_seed_audit(seed_path: str) -> dict | None:
     return None
 
 
+VERDICTS = (
+    "Supports", "Partially supports", "Contradicts", "Does not support",
+    "Unclear / insufficient evidence",
+)
+
+# Every way a (sentence, citation) pair ends without a verdict. Spec §3.
+NOT_ASSESSED_OUTCOMES = (
+    "not_downloaded", "deferred_paywalled", "cap_exceeded", "cluster_skipped",
+    "not_attempted", "no_evidence", "retrieval_failed", "parse_failed",
+    "call_failed", "not_a_claim", "malformed_claim", "unresolved_ref",
+)
+_ATTEMPTED_OUTCOMES = ("judged", "no_evidence", "retrieval_failed", "parse_failed", "call_failed")
+_RELIABILITY_KEYS = (
+    ("high", "HIGH"), ("moderate", "MODERATE"), ("low", "LOW"),
+    ("contradicted", "CONTRADICTED"), ("unsupported", "UNSUPPORTED"), ("unresolved", "UNRESOLVED"),
+)
+
+
+def compute_totals(results: list[dict]) -> dict:
+    """The one place counts come from. Verdict counts are over judged items
+    only; everything else is in not_assessed, keyed by outcome, so
+    judged + sum(not_assessed) == total always holds."""
+    judged = [r for r in results if r.get("outcome") == "judged"]
+    totals = {
+        "total": len(results),
+        "downloaded": sum(1 for r in results if r.get("downloaded")),
+        "judged": len(judged),
+    }
+    for verdict in VERDICTS:
+        totals[verdict] = sum(1 for r in judged if r.get("judgement") == verdict)
+    totals["not_downloaded"] = sum(1 for r in results if r.get("outcome") == "not_downloaded")
+    totals["deferred_paywalled"] = sum(1 for r in results if r.get("outcome") == "deferred_paywalled")
+    not_assessed = {}
+    for outcome in NOT_ASSESSED_OUTCOMES:
+        n = sum(1 for r in results if r.get("outcome") == outcome)
+        if n:
+            not_assessed[outcome] = n
+    totals["not_assessed"] = not_assessed
+    totals["coverage"] = {
+        "downloaded": totals["downloaded"],
+        "attempted": sum(1 for r in results if r.get("outcome") in _ATTEMPTED_OUTCOMES),
+        "judged": len(judged),
+    }
+    totals["reliability"] = {
+        key: sum(1 for r in results if r.get("reliability") == rating)
+        for key, rating in _RELIABILITY_KEYS
+    }
+    return totals
+
+
 def cross_check_seed_audit(
     seed_path: str,
     cached_report: dict,
@@ -561,6 +611,8 @@ def cross_check_seed_audit(
             "cap_exceeded",
             "no_evidence",
             "retrieval_failed",
+            "call_failed",
+            "not_attempted",
         )
     ]
 
@@ -606,12 +658,13 @@ def cross_check_seed_audit(
         r["source_grade"] = source_eval["grade"]
         r["source_assessment"] = source_eval
         rel_eval = evaluate_reliability(
-            relation=r.get("judgement", "Unclear / insufficient evidence"),
+            relation=r.get("judgement"),
             source_grade=source_eval["grade"],
-            confidence=r.get("confidence", "Medium"),
+            confidence=r.get("confidence"),
             span_verified=r.get("span_verified"),
             rubric_violations=r.get("rubric_violations"),
             rubric_mismatch=r.get("rubric_mismatch", False),
+            outcome=r.get("outcome") or "judged",
         )
         r["reliability"] = rel_eval["rating"]
         r["reliability_badge"] = rel_eval["badge"]
@@ -619,35 +672,7 @@ def cross_check_seed_audit(
         r["reliability_explanation"] = rel_eval["explanation"]
 
     # 3. Recalculate totals
-    totals = {
-        "total": len(results),
-        "downloaded": sum(1 for r in results if r.get("downloaded")),
-        "judged": sum(1 for r in results if r.get("outcome") == "judged"),
-        "Supports": sum(1 for r in results if r.get("judgement") == "Supports"),
-        "Partially supports": sum(
-            1 for r in results if r.get("judgement") == "Partially supports"
-        ),
-        "Contradicts": sum(1 for r in results if r.get("judgement") == "Contradicts"),
-        "Does not support": sum(
-            1 for r in results if r.get("judgement") == "Does not support"
-        ),
-        "Unclear / insufficient evidence": sum(
-            1 for r in results if r.get("judgement") == "Unclear / insufficient evidence"
-        ),
-        "not_downloaded": sum(1 for r in results if r.get("outcome") == "not_downloaded"),
-        "deferred_paywalled": sum(
-            1 for r in results if r.get("outcome") == "deferred_paywalled"
-        ),
-        "reliability": {
-            "high": sum(1 for r in results if r.get("reliability") == "HIGH"),
-            "moderate": sum(1 for r in results if r.get("reliability") == "MODERATE"),
-            "low": sum(1 for r in results if r.get("reliability") == "LOW"),
-            "contradicted": sum(
-                1 for r in results if r.get("reliability") == "CONTRADICTED"
-            ),
-            "unresolved": sum(1 for r in results if r.get("reliability") == "UNRESOLVED"),
-        },
-    }
+    totals = compute_totals(results)
 
     report["totals"] = totals
     report["results"] = results
@@ -755,6 +780,28 @@ def audit_seed_citations(
             },
             "results": [],
         }
+
+    # Pairs that are not claims about a paper's findings never reach the
+    # judge, the budget, or the missing-references table.
+    skipped_claims = []
+    judgeable = []
+    for c in claims:
+        c["judgement"] = None
+        if not c.get("resolved", True):
+            c["outcome"] = "unresolved_ref"
+            c["reason"] = "Citation marker could not be matched to a bibliography entry."
+        elif c.get("role") in SKIP_ROLES:
+            c["outcome"] = "not_a_claim"
+            c["reason"] = f"{c['role']} citation — not a verifiable claim about the cited paper."
+        elif {"placeholder_residue", "fragment"} & set(c.get("claim_quality") or []):
+            c["outcome"] = "malformed_claim"
+            c["reason"] = f"Extracted sentence is not judgeable: {', '.join(c['claim_quality'])}."
+        else:
+            judgeable.append(c)
+            continue
+        c["downloaded"] = False
+        skipped_claims.append(c)
+    claims = judgeable
 
     downloaded_manifest = _load_downloaded_manifest()
 
@@ -895,53 +942,30 @@ def audit_seed_citations(
     for c in downloaded_claims[max_claims:]:
         if not c.get("outcome"):
             c["outcome"] = "cap_exceeded"
-            c["judgement"] = "Unclear / insufficient evidence"
+            c["judgement"] = None
             c["reason"] = "Maximum claims evaluation budget reached."
 
-    all_results = claims_to_judge + downloaded_claims[max_claims:] + undownloaded_claims + deferred_claims
+    all_results = claims_to_judge + downloaded_claims[max_claims:] + undownloaded_claims + deferred_claims + skipped_claims
 
     for r in all_results:
         source_eval = assess_source(metadata=r.get("metadata") or {}, ref_info=r.get("ref"))
         r["source_grade"] = source_eval["grade"]
         r["source_assessment"] = source_eval
         rel_eval = evaluate_reliability(
-            relation=r.get("judgement", "Unclear / insufficient evidence"),
+            relation=r.get("judgement"),
             source_grade=source_eval["grade"],
-            confidence=r.get("confidence", "Medium"),
+            confidence=r.get("confidence"),
             span_verified=r.get("span_verified"),
             rubric_violations=r.get("rubric_violations"),
             rubric_mismatch=r.get("rubric_mismatch", False),
+            outcome=r.get("outcome") or "judged",
         )
         r["reliability"] = rel_eval["rating"]
         r["reliability_badge"] = rel_eval["badge"]
         r["reliability_label"] = rel_eval["rating_label"]
         r["reliability_explanation"] = rel_eval["explanation"]
 
-    totals = {
-        "total": len(all_results),
-        "downloaded": len(downloaded_claims),
-        "judged": sum(1 for r in all_results if r.get("outcome") == "judged"),
-        "Supports": sum(1 for r in all_results if r.get("judgement") == "Supports"),
-        "Partially supports": sum(
-            1 for r in all_results if r.get("judgement") == "Partially supports"
-        ),
-        "Contradicts": sum(1 for r in all_results if r.get("judgement") == "Contradicts"),
-        "Does not support": sum(
-            1 for r in all_results if r.get("judgement") == "Does not support"
-        ),
-        "Unclear / insufficient evidence": sum(
-            1 for r in all_results if r.get("judgement") == "Unclear / insufficient evidence"
-        ),
-        "not_downloaded": sum(1 for r in all_results if r.get("outcome") == "not_downloaded"),
-        "deferred_paywalled": sum(1 for r in all_results if r.get("outcome") == "deferred_paywalled"),
-        "reliability": {
-            "high": sum(1 for r in all_results if r.get("reliability") == "HIGH"),
-            "moderate": sum(1 for r in all_results if r.get("reliability") == "MODERATE"),
-            "low": sum(1 for r in all_results if r.get("reliability") == "LOW"),
-            "contradicted": sum(1 for r in all_results if r.get("reliability") == "CONTRADICTED"),
-            "unresolved": sum(1 for r in all_results if r.get("reliability") == "UNRESOLVED"),
-        },
-    }
+    totals = compute_totals(all_results)
 
     report = {
         "seed_path": seed_path,
@@ -1134,7 +1158,7 @@ def save_and_register_reference_pdf(
 
 def explain_rubric_verdict(item: dict) -> str:
     """Explains why a citation received its verdict based on the 3-slot rubric."""
-    judgement = item.get("judgement", "")
+    judgement = item.get("judgement") or ""
     outcome = item.get("outcome", "")
     slots = item.get("slots") or {}
 
@@ -1146,20 +1170,30 @@ def explain_rubric_verdict(item: dict) -> str:
             "Evaluation deferred: More than 50% of the references cited in this paragraph are missing from the corpus. "
             "Upload the missing reference PDF(s) to enable empirical verification."
         )
-
     if outcome == "not_downloaded":
         return (
             "This reference paper was paywalled, a book, or otherwise unavailable for open-access download. "
             "Its full text is not in the corpus, so claims citing it could not be empirically verified."
         )
-
     if outcome == "no_evidence":
-        return (
-            "The cited reference is in the corpus, but semantic and keyword search found no passages discussing this specific assertion."
-        )
-
+        return "The cited reference is in the corpus, but semantic and keyword search found no passages discussing this specific assertion."
     if outcome in ("retrieval_failed", "call_failed", "parse_failed"):
         return f"Evaluation could not complete due to a processing issue: {item.get('reason', outcome)}."
+    if outcome == "cap_exceeded":
+        return "Not assessed: the per-paper claim budget was reached before this citation. Re-run with a higher budget to judge it."
+    if outcome == "not_attempted":
+        return "Not assessed: the audit stopped early because the model backend was unreachable. Re-run once the backend is up."
+    if outcome == "cluster_skipped":
+        return "Not assessed: this sentence cites many papers; only the first few were judged."
+    if outcome == "not_a_claim":
+        role = item.get("role", "non-evidential")
+        return f"Not assessed: this is a {role} citation, not a verifiable claim about the cited paper's findings."
+    if outcome == "malformed_claim":
+        return f"Not assessed: the extracted sentence is a fragment ({', '.join(item.get('claim_quality') or [])}) and could not be judged."
+    if outcome == "unresolved_ref":
+        return "Not assessed: the citation marker could not be matched to a bibliography entry."
+    if outcome != "judged":
+        return item.get("reason") or f"Not assessed ({outcome})."
 
     def _val(name):
         s = slots.get(name)

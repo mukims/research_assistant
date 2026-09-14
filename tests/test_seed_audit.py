@@ -2,6 +2,7 @@
 Unit tests for research_assistant.shared.seed_audit
 """
 
+import contextlib
 import json
 import os
 import tempfile
@@ -14,6 +15,7 @@ from research_assistant.shared.seed_audit import (
     _clean_claim_punctuation,
     _match_downloaded_paper,
     audit_seed_citations,
+    compute_totals,
     cross_check_seed_audit,
     explain_rubric_verdict,
     extract_seed_citation_claims,
@@ -663,7 +665,7 @@ class TestSeedAudit(unittest.TestCase):
             self.assertNotIn("error", report)
             t = report["totals"]
             self.assertEqual(t["total"], 4)
-            self.assertEqual(t["downloaded"], 1)
+            self.assertEqual(t["downloaded"], 2)
             self.assertEqual(t["judged"], 1)
             self.assertEqual(t["Supports"], 1)
             self.assertEqual(t["deferred_paywalled"], 3)
@@ -814,6 +816,7 @@ class TestSeedAudit(unittest.TestCase):
                 + t["deferred_paywalled"]
             )
             self.assertEqual(expected_sum, t["total"])
+            self.assertEqual(t["judged"] + sum(t["not_assessed"].values()), t["total"])
 
             # Strict judged count invariant
             self.assertEqual(t["judged"], sum(1 for r in report["results"] if r.get("outcome") == "judged"))
@@ -1199,7 +1202,11 @@ class TestSeedAuditCaching(unittest.TestCase):
                             "judgement": "Supports",
                             "outcome": "judged",
                             "confidence": "High",
-                            "ref": {"title": "Physical Review B Paper", "doi": "10.1103/PhysRevB.99.123456"},
+                            "ref": {
+                                "title": "Physical Review B Paper",
+                                "venue": "Physical Review B",
+                                "doi": "10.1103/PhysRevB.99.123456",
+                            },
                         },
                         {
                             "claim": "Unchecked statement.",
@@ -1228,6 +1235,7 @@ class TestSeedAuditCaching(unittest.TestCase):
                 "arxiv_2201.00001": {
                     "key": "arxiv:2201.00001",
                     "title": "Quantum Transport Measurement",
+                    "venue": "Physical Review Letters",
                     "doi": "10.1103/PhysRevLett.120.00001",
                     "path": "/data/pulled/arxiv_2201.00001.pdf",
                 }
@@ -1242,6 +1250,7 @@ class TestSeedAuditCaching(unittest.TestCase):
                         "outcome": "not_downloaded",
                         "ref": {
                             "title": "Quantum Transport Measurement",
+                            "venue": "Physical Review Letters",
                             "doi": "10.1103/PhysRevLett.120.00001",
                         },
                     }
@@ -1400,6 +1409,102 @@ class TestExtractionOnClaimText(unittest.TestCase):
         claims = extract_seed_citation_claims(BeautifulSoup(SAMPLE_TEI_XML, "xml"))
         self.assertEqual(claims[1]["resolution"], "position")
         self.assertTrue(claims[1]["resolved"])
+
+
+@contextlib.contextmanager
+def _audit_dirs():
+    """Run an audit with its output redirected to a temporary directory."""
+    import research_assistant.shared.seed_audit as sa
+    with tempfile.TemporaryDirectory() as tmp, patch.object(sa, "AUDIT_DIR", tmp):
+        yield tmp
+
+
+class TestHonestOutcomes(unittest.TestCase):
+    def test_failure_outcomes_carry_no_judgement(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+        item = {"claim": "Graphene is a semimetal with linear dispersion.", "document": "x.pdf", "context": ""}
+        with patch("research_assistant.shared.seed_audit.hybrid_search", side_effect=ConnectionError("Failed to connect to Ollama")):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+        self.assertEqual(item["outcome"], "retrieval_failed")
+        self.assertIsNone(item["judgement"])
+        self.assertIn("Ollama", item["reason"])
+
+        item = {"claim": "Graphene is a semimetal with linear dispersion.", "document": "x.pdf", "context": ""}
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=[]):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+        self.assertEqual(item["outcome"], "no_evidence")
+        self.assertIsNone(item["judgement"])
+
+    def test_compute_totals_counts_verdicts_over_judged_only(self):
+        results = [
+            {"outcome": "judged", "judgement": "Supports", "downloaded": True, "reliability": "HIGH"},
+            {"outcome": "judged", "judgement": "Does not support", "downloaded": True, "reliability": "UNSUPPORTED"},
+            {"outcome": "judged", "judgement": "Unclear / insufficient evidence", "downloaded": True, "reliability": "UNRESOLVED"},
+            {"outcome": "retrieval_failed", "judgement": None, "downloaded": True, "reliability": "UNRESOLVED"},
+            {"outcome": "cap_exceeded", "judgement": None, "downloaded": True, "reliability": "UNRESOLVED"},
+            {"outcome": "not_a_claim", "judgement": None, "downloaded": True, "reliability": "UNRESOLVED"},
+            {"outcome": "not_downloaded", "judgement": None, "downloaded": False, "reliability": "UNRESOLVED"},
+            {"outcome": "deferred_paywalled", "judgement": None, "downloaded": False, "reliability": "UNRESOLVED"},
+        ]
+        t = compute_totals(results)
+        self.assertEqual(t["total"], 8)
+        self.assertEqual(t["judged"], 3)
+        self.assertEqual(t["Supports"], 1)
+        self.assertEqual(t["Does not support"], 1)
+        self.assertEqual(t["Unclear / insufficient evidence"], 1)   # the judged one only
+        self.assertEqual(t["not_assessed"], {"retrieval_failed": 1, "cap_exceeded": 1, "not_a_claim": 1,
+                                             "not_downloaded": 1, "deferred_paywalled": 1})
+        self.assertEqual(t["coverage"], {"downloaded": 6, "attempted": 4, "judged": 3})
+        self.assertEqual(t["reliability"]["unsupported"], 1)
+        self.assertEqual(t["judged"] + sum(t["not_assessed"].values()), t["total"])
+
+    def test_explain_is_outcome_first(self):
+        self.assertIn("budget", explain_rubric_verdict({"outcome": "cap_exceeded", "judgement": None}))
+        self.assertIn("backend", explain_rubric_verdict({"outcome": "not_attempted", "judgement": None}))
+        self.assertIn("software", explain_rubric_verdict({"outcome": "not_a_claim", "role": "software", "judgement": None}))
+        self.assertIn("fragment", explain_rubric_verdict({"outcome": "malformed_claim", "judgement": None}))
+        self.assertIn("bibliography", explain_rubric_verdict({"outcome": "unresolved_ref", "judgement": None}))
+        self.assertIn("cites", explain_rubric_verdict({"outcome": "cluster_skipped", "judgement": None}))
+        # The "insufficient evidence" sentence is only reachable from a judged item.
+        self.assertNotIn("fragmentary", explain_rubric_verdict({"outcome": "cap_exceeded", "judgement": None}))
+        self.assertIn("fragmentary", explain_rubric_verdict({"outcome": "judged", "judgement": "Unclear / insufficient evidence"}))
+
+    @patch("research_assistant.shared.seed_audit._judge_once")
+    @patch("research_assistant.shared.seed_audit.hybrid_search")
+    @patch("research_assistant.shared.seed_audit.find_tei_for_seed")
+    @patch("research_assistant.shared.seed_audit._load_downloaded_manifest")
+    def test_non_claims_are_partitioned_before_judging(self, mock_manifest, mock_find_tei, mock_search, mock_judge):
+        with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
+            tf.write(AUTHOR_YEAR_TEI_XML); tei_file = tf.name
+        with tempfile.NamedTemporaryFile("w", suffix=".pdf", delete=False) as dummy_pdf:
+            pdf = dummy_pdf.name
+        mock_find_tei.return_value = tei_file
+        mock_manifest.return_value = {
+            k: {"key": k, "path": pdf, "xml_id": xid, "cited_by": "seed.pdf", "title": t}
+            for k, xid, t in (
+                ("a", "b9", "Algorithm 832"), ("b", "b16", "Path-integral seismic imaging"),
+                ("c", "b25", "Target-oriented inversion using the patched green's function method"),
+                ("d", "b27", "Subsurface-domain objective functions"), ("e", "b6", "Target-level waveform inversion"),
+            )
+        }
+        mock_search.return_value = [{"text": "Evidence.", "metadata": {"document": os.path.basename(pdf), "section": "results", "page": 3}}]
+        mock_judge.return_value = {
+            "judgement": "Supports", "confidence": "High", "supporting_span": "Evidence.", "reason": "r",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"},
+                      "strength": {"assertion": "t", "verdict": "Not applicable"}},
+            "evidence_sufficiency": "sufficient",
+        }
+        with _audit_dirs():
+            report = audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []),
+                                          max_claims=10, skip_if_cached=False)
+        by_xid = {r["ref"]["xml_id"]: r for r in report["results"]}
+        self.assertEqual(by_xid["b9"]["outcome"], "not_a_claim")     # software
+        self.assertEqual(by_xid["b25"]["outcome"], "not_a_claim")    # method
+        self.assertEqual(by_xid["b16"]["outcome"], "judged")
+        self.assertEqual(mock_judge.call_count, 3)                    # b16, b27, b6
+        self.assertEqual(report["totals"]["not_assessed"]["not_a_claim"], 2)
+        self.assertEqual(by_xid["b9"]["reliability_explanation"][:12], "Not assessed")
+        os.unlink(tei_file); os.unlink(pdf)
 
 
 if __name__ == "__main__":
