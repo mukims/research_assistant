@@ -178,6 +178,34 @@ def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> 
     return "evidential"
 
 
+_LEADING_TOKENS_RE = re.compile(r"^\s*((?:⟦C\d+⟧\s*)+)")
+
+
+def reattach_leading_markers(sentences: list[str], cites: dict[int, dict]) -> list[str]:
+    """GROBID sometimes closes a sentence before its trailing citation and
+    opens the next with it: "…of the system.</s><s>[35] This small set…".
+    A numeric marker before any word belongs to the sentence before it; a
+    narrative author–year citation that opens a sentence ("Smith et al.
+    (2020) showed…") is the sentence's subject and stays."""
+    out: list[str] = []
+    for sent in sentences:
+        match = _LEADING_TOKENS_RE.match(sent)
+        if match and out:
+            tokens = CITE_TOKEN_RE.findall(match.group(1))
+            movable = [n for n in tokens if is_numeric_cite((cites.get(int(n)) or {}).get("txt", ""))]
+            if movable and len(movable) == len(tokens):
+                moved = " ".join(cite_token(int(n)) for n in movable)
+                prev = out[-1].rstrip()
+                # Put the markers before the closing punctuation, as the author did.
+                if prev and prev[-1] in ".!?":
+                    out[-1] = f"{prev[:-1].rstrip()} {moved}{prev[-1]}"
+                else:
+                    out[-1] = f"{prev} {moved}"
+                sent = sent[match.end():].lstrip()
+        out.append(sent)
+    return [x for x in out if x]
+
+
 def sentence_context(sentences: list[str], idx: int) -> str:
     """Previous + «claim» + next, for the judge's context block."""
     parts = []

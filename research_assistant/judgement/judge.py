@@ -100,12 +100,20 @@ def _normalise(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+_SPAN_PIECE_MIN_CHARS = 12
+
+
 def span_is_verbatim(span, evidence: str):
     """Is the supporting span a substring of the evidence, up to whitespace,
-    case, ligatures, quote style and ellipses? None when there is no span."""
+    case, ligatures and quote style? A span the model joined with an
+    ellipsis counts when every piece of it is verbatim — grounded is what
+    the check is for, contiguity is not. None when there is no span."""
     if span is None or not str(span).strip() or str(span).strip().lower() == "null":
         return None
-    return _normalise(str(span)) in _normalise(evidence)
+    haystack = _normalise(evidence)
+    pieces = [piece.strip() for piece in _ELLIPSIS_RE.split(str(span)) if piece and piece.strip()]
+    pieces = [piece for piece in pieces if len(piece) >= _SPAN_PIECE_MIN_CHARS] or pieces
+    return all(_normalise(piece) in haystack for piece in pieces)
 
 
 # A supporting sentence that itself carries a citation — "[12]", "Ref. 7",

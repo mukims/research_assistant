@@ -1779,6 +1779,36 @@ class TestResolutionConflicts(unittest.TestCase):
         os.unlink(tei_file)
 
 
+class TestLeadingMarkerBelongsToPreviousSentence(unittest.TestCase):
+    """GROBID sometimes closes a sentence before its trailing citation and
+    opens the next one with it: "<s>... of the system.</s><s>[35] This small
+    set of conditions ...</s>". Judged as written, [35] is asked to support a
+    sentence it never cited. A numeric marker before any word belongs to
+    the sentence before; a narrative author-year citation that opens a
+    sentence ("Smith et al. (2020) showed ...") stays where it is."""
+
+    TEI = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><div><head>Results</head>
+<p><s>The average conductance depends smoothly on the variables of interest and on a standard ergodic hypothesis <ref type="bibr" target="#b0">[1]</ref> .</s><s><ref type="bibr" target="#b1">[2]</ref> This small set of conditions renders a very robust and versatile methodology for quantum devices.</s><s><ref type="bibr" target="#b2">Smith et al. (2020)</ref> showed that the fluctuations carry little information about the sample.</s></p>
+</div></body><back><listBibl>
+<biblStruct xml:id="b0"><analytic><title level="a" type="main">Paper one</title><author><persName><surname>Alpha</surname></persName></author></analytic><monogr><imprint><date when="2001">2001</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b1"><analytic><title level="a" type="main">Paper two</title><author><persName><surname>Beta</surname></persName></author></analytic><monogr><imprint><date when="2002">2002</date></imprint></monogr></biblStruct>
+<biblStruct xml:id="b2"><analytic><title level="a" type="main">Paper three</title><author><persName><surname>Smith</surname></persName></author></analytic><monogr><imprint><date when="2020">2020</date></imprint></monogr></biblStruct>
+</listBibl></back></text></TEI>
+"""
+
+    def test_numeric_marker_moves_back_and_narrative_stays(self):
+        claims = extract_seed_citation_claims(BeautifulSoup(self.TEI, "xml"))
+        by_ref = {c["ref"]["xml_id"]: c for c in claims}
+        self.assertTrue(by_ref["b1"]["claim"].startswith("The average conductance depends smoothly"))
+        self.assertTrue(by_ref["b1"]["sentence"].endswith("[1] [2]."), by_ref["b1"]["sentence"])
+        self.assertEqual(by_ref["b0"]["sentence"], by_ref["b1"]["sentence"])
+        self.assertEqual(by_ref["b0"]["cite_count"], 2)
+        # The sentence that lost its leading marker no longer cites anything.
+        self.assertFalse(any("This small set of conditions" in c["claim"] for c in claims))
+        self.assertTrue(by_ref["b2"]["claim"].startswith("Smith et al. (2020) showed"))
+
+
 class TestManifestPathPortability(unittest.TestCase):
     """downloaded.json records absolute paths. When the data directory moves
     (another mount, another machine), the PDFs are still there under

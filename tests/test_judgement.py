@@ -239,6 +239,13 @@ class TestSpanIsVerbatim(unittest.TestCase):
     def test_paraphrase_is_not_verbatim(self):
         self.assertFalse(judge_mod.span_is_verbatim("Films increased by ten percent.", self.EVIDENCE))
 
+    def test_ellipsis_joined_span_is_verbatim_when_every_piece_is(self):
+        """The rubric asks for one sentence; models sometimes join two with
+        "..." — each piece grounded, the join not. Grounded is what matters."""
+        self.assertTrue(judge_mod.span_is_verbatim("The ﬁlms showed a 10% increase ... Next sentence.", self.EVIDENCE))
+        self.assertTrue(judge_mod.span_is_verbatim("The films showed […] Next sentence.", self.EVIDENCE))
+        self.assertFalse(judge_mod.span_is_verbatim("The films showed ... something invented here.", self.EVIDENCE))
+
     def test_no_span_is_none(self):
         self.assertIsNone(judge_mod.span_is_verbatim(None, self.EVIDENCE))
         self.assertIsNone(judge_mod.span_is_verbatim("", self.EVIDENCE))

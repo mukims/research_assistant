@@ -24,6 +24,7 @@ from research_assistant.shared.claim_text import (
     clean_text,
     is_numeric_cite,
     paragraph_sentences,
+    reattach_leading_markers,
     render_claim,
     render_sentence,
     sentence_context,
@@ -323,7 +324,7 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             cites[n] = {"target": target, "txt": txt, "ref": ref_info, "resolution": resolution, "note": note}
             ref.replace_with(f" {cite_token(n)} ")
 
-        sentences = paragraph_sentences(p)
+        sentences = reattach_leading_markers(paragraph_sentences(p), cites)
         display = [render_sentence(s, cites) for s in sentences]
 
         # The deferral ratio counts the references a paragraph leans on for
