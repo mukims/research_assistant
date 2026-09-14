@@ -463,6 +463,39 @@ def _render_synthesis(answer, heading):
         st.caption(f"{answer.get('mode', '')}: gate {t['gate']}s · notes {t['map']}s · synthesis {t['reduce']}s · total {t['total']}s")
 
 
+_VERDICT_BADGES = {
+    "Supports": "🟢 Supports",
+    "Partially supports": "🟡 Partially Supports",
+    "Contradicts": "🔴 Contradicts",
+    "Does not support": "🟠 Does Not Support",
+    "Unclear / insufficient evidence": "⚪ Unclear / Insufficient Evidence",
+}
+_NOT_ASSESSED_BADGES = {
+    "deferred_paywalled": "⏳ Deferred (Pending Evidence)",
+    "not_downloaded": "🔒 Paywalled / Not In Corpus",
+    "cap_exceeded": "⏸ Not Assessed (budget)",
+    "cluster_skipped": "⏸ Not Assessed (cluster)",
+    "not_attempted": "⏸ Not Assessed (backend down)",
+    "retrieval_failed": "⏸ Not Assessed (retrieval failed)",
+    "call_failed": "⏸ Not Assessed (model call failed)",
+    "parse_failed": "⏸ Not Assessed (unparseable reply)",
+    "no_evidence": "⏸ Not Assessed (no passages found)",
+    "malformed_claim": "⏸ Not Assessed (sentence fragment)",
+    "unresolved_ref": "⏸ Not Assessed (unmatched reference)",
+}
+
+
+def _audit_item_badge(item: dict) -> str:
+    """The label a citation row wears. Outcome first: a verdict label is only
+    ever shown for an item the judge produced a verdict for."""
+    outcome = item.get("outcome")
+    if outcome == "judged":
+        return _VERDICT_BADGES.get(item.get("judgement") or "", "⚪ Unclear / Insufficient Evidence")
+    if outcome == "not_a_claim":
+        return f"🔧 Not a Claim ({item.get('role') or 'non-evidential'})"
+    return _NOT_ASSESSED_BADGES.get(outcome or "", f"⏸ Not Assessed ({outcome or 'unknown'})")
+
+
 def _render_seed_citation_audit(final):
 
     audit = final.get("citation_audit")
@@ -563,6 +596,19 @@ def _render_seed_citation_audit(final):
                 help="Download raw structured JSON audit data.",
             )
 
+        coverage = totals.get("coverage", {})
+        if audit.get("aborted"):
+            st.error(
+                f"⚠️ Audit stopped early after {audit['aborted'].get('after_attempted')} attempt(s): "
+                f"{audit['aborted'].get('reason')} — citations after that point were not attempted. "
+                "Re-run once the backend is reachable."
+            )
+        if coverage:
+            st.caption(
+                f"Assessed by the model: **{coverage.get('judged', 0)}** of {coverage.get('downloaded', 0)} citations "
+                f"whose reference is in the corpus ({coverage.get('attempted', 0)} attempted)."
+            )
+
         # Top metric row
         cols = st.columns(6)
         cols[0].metric("Citations Found", totals.get("total", len(results)))
@@ -576,12 +622,13 @@ def _render_seed_citation_audit(final):
         rel_totals = totals.get("reliability") or {}
         if rel_totals:
             st.caption("🛡️ **Scientific Evidence Reliability Assessment:**")
-            rcols = st.columns(5)
+            rcols = st.columns(6)
             rcols[0].metric("High Reliability 🟢", rel_totals.get("high", 0), help="Peer-reviewed primary literature with verified verbatim evidence span")
             rcols[1].metric("Moderate 🟡", rel_totals.get("moderate", 0), help="Preprints, secondary reviews, or qualified claims")
             rcols[2].metric("Low / Flagged 🟠", rel_totals.get("low", 0), help="Unverified spans, retracted sources, or rubric violations")
             rcols[3].metric("Contradicted 🔴", rel_totals.get("contradicted", 0), help="Direct conflict with primary experimental/theoretical findings")
-            rcols[4].metric("Unresolved ⏳", rel_totals.get("unresolved", 0), help="Insufficient evidence or paywalled sources")
+            rcols[4].metric("Unsupported 🟠", rel_totals.get("unsupported", 0), help="The cited paper was read and does not report this")
+            rcols[5].metric("Unresolved ⏳", rel_totals.get("unresolved", 0), help="Judged but undecidable, or not assessed — see the caption above")
 
         # Filter tabs
         supp_count = totals.get("Supports", 0) + totals.get("Partially supports", 0)
@@ -589,9 +636,11 @@ def _render_seed_citation_audit(final):
         deferred_count = totals.get("deferred_paywalled", 0)
         all_count = totals.get("total", len(results))
 
-        tab_supported, tab_review, tab_deferred, tab_all = st.tabs([
+        not_assessed_items = [r for r in results if r.get("outcome") not in ("judged", "not_downloaded", "deferred_paywalled")]
+        tab_supported, tab_review, tab_not_assessed, tab_deferred, tab_all = st.tabs([
             f"Supported ({supp_count})",
             f"Need Review ({rev_count})",
+            f"⏸ Not Assessed ({len(not_assessed_items)})",
             f"⏳ Pending Evidence (Deferred) ({deferred_count})",
             f"All Citations ({all_count})",
         ])
@@ -609,20 +658,7 @@ def _render_seed_citation_audit(final):
 
             outcome = item.get("outcome")
             judgement = item.get("judgement", "Unclear")
-            if outcome == "deferred_paywalled":
-                badge = "⏳ Deferred (Pending Evidence)"
-            elif judgement == "Supports":
-                badge = "🟢 Supports"
-            elif judgement == "Partially supports":
-                badge = "🟡 Partially Supports"
-            elif judgement == "Contradicts":
-                badge = "🔴 Contradicts"
-            elif judgement == "Does not support":
-                badge = "🟠 Does Not Support"
-            elif outcome == "not_downloaded":
-                badge = "⚪ Paywalled / Not In Corpus"
-            else:
-                badge = "⚪ Unclear / Insufficient Evidence"
+            badge = _audit_item_badge(item)
 
             header = f"{badge}  ·  {ref_num} {ref_auth} {ref_yr} · *{ref_title[:55]}*"
             with st.expander(header):
@@ -655,8 +691,8 @@ def _render_seed_citation_audit(final):
                             )
                 elif item.get("outcome") == "judged":
                     st.markdown(
-                        f"**Verdict:** `{judgement}` · **Confidence:** `{item.get('confidence', 'Medium')}` · "
-                        f"**Evidence Sufficiency:** `{item.get('evidence_sufficiency', 'sufficient')}`"
+                        f"**Verdict:** `{judgement}` · **Confidence:** `{item.get('confidence')}` · "
+                        f"**Evidence Sufficiency:** `{item.get('evidence_sufficiency')}`"
                     )
                     if item.get("reliability_badge"):
                         st.markdown(
@@ -725,11 +761,11 @@ def _render_seed_citation_audit(final):
                         icon="🔒",
                     )
                 else:
-                    st.caption(f"Status: {item.get('reason') or outcome or 'Unclear'}")
+                    st.caption(f"Status: {item.get('reliability_explanation') or item.get('reason') or explain_rubric_verdict(item)}")
 
         with tab_supported:
             supp_items = [
-                r for r in results if r.get("judgement") in ("Supports", "Partially supports")
+                r for r in results if r.get("outcome") == "judged" and r.get("judgement") in ("Supports", "Partially supports")
             ]
             if supp_items:
                 for it in supp_items:
@@ -741,7 +777,8 @@ def _render_seed_citation_audit(final):
             rev_items = [
                 r
                 for r in results
-                if r.get("judgement")
+                if r.get("outcome") == "judged"
+                and r.get("judgement")
                 in ("Contradicts", "Does not support", "Unclear / insufficient evidence")
             ]
             if rev_items:
@@ -749,6 +786,15 @@ def _render_seed_citation_audit(final):
                     _render_claim_item(it)
             else:
                 st.caption("No citations flagged for review.")
+
+        with tab_not_assessed:
+            if not_assessed_items:
+                st.info("These citations were found in the paper but the judge produced no verdict for them. "
+                        "The badge on each says why.")
+                for it in sorted(not_assessed_items, key=lambda r: r.get("outcome") or ""):
+                    _render_claim_item(it)
+            else:
+                st.success("Every citation with an available reference was assessed.")
 
         with tab_deferred:
             if deferred_count == 0:

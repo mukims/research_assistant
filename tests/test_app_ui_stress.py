@@ -252,6 +252,7 @@ class TestStreamlitUIStress(unittest.TestCase):
         expected_tabs = [
             "Supported (2)",
             "Need Review (0)",
+            "⏸ Not Assessed (0)",
             "⏳ Pending Evidence (Deferred) (0)",
             "All Citations (3)",
         ]
@@ -363,7 +364,7 @@ class TestStreamlitUIStress(unittest.TestCase):
         tab_names = self.mock_st.tabs_calls[0]["names"]
         self.assertEqual(
             tab_names,
-            ["Supported (0)", "Need Review (0)", "⏳ Pending Evidence (Deferred) (4)", "All Citations (4)"],
+            ["Supported (0)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (4)", "All Citations (4)"],
         )
 
         # 3. tab_deferred warning banner
@@ -403,18 +404,18 @@ class TestStreamlitUIStress(unittest.TestCase):
         """Stress-test metric columns and tabs under edge cases (empty dicts, missing keys, boundary counts)."""
         edge_cases = [
             # 1. Empty totals dict
-            ({}, 2, ["Supported (0)", "Need Review (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (2)"]),
+            ({}, 2, ["Supported (0)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (2)"]),
             # 2. Missing some keys in totals
             (
                 {"total": 5, "Supports": 2},
                 5,
-                ["Supported (2)", "Need Review (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (5)"],
+                ["Supported (2)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (5)"],
             ),
             # 3. All deferred
             (
                 {"total": 10, "deferred_paywalled": 10},
                 10,
-                ["Supported (0)", "Need Review (0)", "⏳ Pending Evidence (Deferred) (10)", "All Citations (10)"],
+                ["Supported (0)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (10)", "All Citations (10)"],
             ),
             # 4. Large values
             (
@@ -431,6 +432,7 @@ class TestStreamlitUIStress(unittest.TestCase):
                 [
                     "Supported (600)",
                     "Need Review (200)",
+                    "⏸ Not Assessed (0)",
                     "⏳ Pending Evidence (Deferred) (100)",
                     "All Citations (1000)",
                 ],
@@ -584,7 +586,7 @@ class TestStreamlitUIStress(unittest.TestCase):
                     "outcome": "not_downloaded",
                     "judgement": "Not downloaded",
                 },
-                "expected_badge": "⚪ Paywalled / Not In Corpus",
+                "expected_badge": "🔒 Paywalled / Not In Corpus",
                 "check": lambda: any("Reference Not Downloaded" in w["text"] for w in self.mock_st.warning_calls),
             },
             # 7. Unclear / Fallback (e.g. retrieval_failed, parse_failed, or generic)
@@ -599,7 +601,7 @@ class TestStreamlitUIStress(unittest.TestCase):
                     "judgement": "Unclear / insufficient evidence",
                     "reason": "ChromaDB connection timeout.",
                 },
-                "expected_badge": "⚪ Unclear / Insufficient Evidence",
+                "expected_badge": "⏸ Not Assessed (retrieval failed)",
                 "check": lambda: any("ChromaDB connection timeout" in c for c in self.mock_st.caption_calls),
             },
         ]

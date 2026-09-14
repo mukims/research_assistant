@@ -1607,6 +1607,8 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             for r in items:
                 lines.append(f"> {r.get('sentence')}\n")
             for m in missing:
+                if not isinstance(m, dict):
+                    continue
                 doi_val = m.get("doi")
                 doi_s = f" · [`{doi_val}`](https://doi.org/{doi_val})" if doi_val else ""
                 lines.append(f"- [{m.get('index') or '?'}] {m.get('title') or 'Unknown title'} ({m.get('year') or 'n.d.'}){doi_s}")
