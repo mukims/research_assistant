@@ -355,10 +355,33 @@ def _load_downloaded_manifest() -> dict:
         return {}
     try:
         with open(DOWNLOADED_JSON_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            manifest = json.load(f)
     except Exception as e:
         logger.warning("Could not read %s: %s", DOWNLOADED_JSON_PATH, e)
         return {}
+    return _relocate_manifest_paths(manifest)
+
+
+def _relocate_manifest_paths(manifest: dict) -> dict:
+    """downloaded.json records absolute paths. When the data directory moves
+    to another mount or machine the PDFs are still there under
+    PULLED_PDFS_DIR by basename, and the index still holds their chunks —
+    but every existence check on the recorded path fails and the audit
+    defers every paragraph as "missing". Resolve by basename before that
+    happens; keep the recorded path alongside so the relocation is visible."""
+    relocated = 0
+    for entry in manifest.values():
+        recorded = entry.get("path") if isinstance(entry, dict) else None
+        if not recorded or os.path.exists(recorded):
+            continue
+        local = os.path.join(PULLED_PDFS_DIR, os.path.basename(recorded))
+        if os.path.exists(local):
+            entry["recorded_path"] = recorded
+            entry["path"] = local
+            relocated += 1
+    if relocated:
+        logger.info("Resolved %d manifest path(s) under %s by basename.", relocated, PULLED_PDFS_DIR)
+    return manifest
 
 
 def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_manifest: dict) -> Optional[dict]:

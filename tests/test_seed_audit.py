@@ -1671,3 +1671,31 @@ class TestHonestMarkdown(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestManifestPathPortability(unittest.TestCase):
+    """downloaded.json records absolute paths. When the data directory moves
+    (another mount, another machine), the PDFs are still there under
+    PULLED_PDFS_DIR by basename — the audit must find them rather than defer
+    every paragraph as "missing"."""
+
+    def test_stale_absolute_path_is_resolved_by_basename(self):
+        import research_assistant.shared.seed_audit as sa
+        with tempfile.TemporaryDirectory() as tmp:
+            pulled = os.path.join(tmp, "pulled_pdfs"); os.makedirs(pulled)
+            open(os.path.join(pulled, "doi_10.1_x.pdf"), "w").close()
+            manifest_path = os.path.join(tmp, "downloaded.json")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "doi:10.1/x": {"key": "doi:10.1/x", "path": "/old/mount/data/pulled_pdfs/doi_10.1_x.pdf", "title": "X"},
+                    "doi:10.1/y": {"key": "doi:10.1/y", "path": "/old/mount/data/pulled_pdfs/doi_10.1_y.pdf", "title": "Y"},
+                    "doi:10.1/z": {"key": "doi:10.1/z", "path": None, "title": "Z"},
+                }, fh)
+            with patch.object(sa, "DOWNLOADED_JSON_PATH", manifest_path), patch.object(sa, "PULLED_PDFS_DIR", pulled):
+                manifest = sa._load_downloaded_manifest()
+        self.assertEqual(manifest["doi:10.1/x"]["path"], os.path.join(pulled, "doi_10.1_x.pdf"))
+        self.assertEqual(manifest["doi:10.1/x"]["recorded_path"], "/old/mount/data/pulled_pdfs/doi_10.1_x.pdf")
+        # A file that exists nowhere keeps its recorded path, so the miss is visible.
+        self.assertEqual(manifest["doi:10.1/y"]["path"], "/old/mount/data/pulled_pdfs/doi_10.1_y.pdf")
+        self.assertNotIn("recorded_path", manifest["doi:10.1/y"])
+        self.assertIsNone(manifest["doi:10.1/z"]["path"])
