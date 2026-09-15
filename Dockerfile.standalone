@@ -37,7 +37,10 @@ ENV JAVA_HOME=/usr/local/openjdk-17 \
     GROBID_SERVER=http://127.0.0.1:8070 \
     GROBID_SERVICE_OPTS="-Djava.library.path=grobid-home/lib/lin-64:grobid-home/lib/lin-64/jep --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED"
 
-# Copy pre-baked models (manifests + blobs)
+# Copy pre-baked models (manifests + blobs). `models/` is NOT in the repo:
+# it is an Ollama models directory (~7 GB) prepared on the build host with
+#   OLLAMA_MODELS=$PWD/models ollama pull gemma4:e2b && OLLAMA_MODELS=$PWD/models ollama pull nomic-embed-text
+# so the image never downloads at start-up. See deploy/README.md.
 COPY models /opt/ollama/models
 
 # Optimization: tune GROBID config for faster boot (preload off so it starts in seconds)
@@ -72,8 +75,8 @@ ENV CITATION_DATA_DIR=/home/user/data \
 
 RUN mkdir -p /home/user/data
 
-# Copy entrypoint
-COPY entrypoint.sh /entrypoint.sh
+# Copy entrypoint (starts Ollama, GROBID, then Streamlit; waits for each)
+COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Expose Streamlit web UI

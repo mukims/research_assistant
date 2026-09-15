@@ -2,6 +2,8 @@
 .gitignore
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
 .venv/
 venv/
 
@@ -9,9 +11,27 @@ venv/
 model_final.pth
 data/
 
-# Superpowers scratch and worktrees
+# Secrets — .env is read from the data disk at run time, never from the image
+.env
+.env.*
+!.env.example
+
+# Agent / editor scratch, worktrees, agent instructions, CI config
 .superpowers/
 .worktrees/
+.agents/
+.claude/
+.github/
+GEMINI.md
+ORIGINAL_REQUEST.md
+
+# Not needed at run time: tests, design notes, guides that are not rendered in-app
+tests/
+notimportant/
+*.pdf
+ARCHITECTURE.md
+PIPELINE.md
+Research_Assistant_GROBID_Guide.md
 
 # Layout extras are not installed in the deployed image
 requirements-layout.txt

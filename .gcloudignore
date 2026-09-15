@@ -14,5 +14,12 @@ model_final.pth
 .worktrees/
 .pytest_cache/
 
-# Local secrets
+# Local secrets and private notes
 .env
+.env.*
+!.env.example
+ORIGINAL_REQUEST.md
+
+# Agent / editor scratch
+.agents/
+.claude/

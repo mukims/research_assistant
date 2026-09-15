@@ -49,6 +49,63 @@ Then navigate to `http://localhost:8080` in your browser.
 
 ---
 
+## The standalone image (what the VM actually runs)
+
+`deploy.sh` builds `Dockerfile` (app only, OpenAI backend) and pushes it to
+Artifact Registry. The container that serves
+`https://marvin-the-citebot.duckdns.org/` is **not** that image: it is
+`Dockerfile.standalone` — Ollama with pre-baked `gemma4:e2b` +
+`nomic-embed-text`, GROBID, and the app in one container, started by
+`deploy/entrypoint.sh` (Ollama → GROBID → Streamlit, each waited for). It is
+built on the VM itself; its build context needs two things a fresh clone does
+not have:
+
+| input | what it is | how to make it |
+|---|---|---|
+| `models/` | an Ollama models directory (~7 GB), copied to `/opt/ollama/models` so the image never downloads at start-up | `OLLAMA_MODELS=$PWD/models ollama pull gemma4:e2b` and the same for `nomic-embed-text` |
+| `/mnt/disks/data/.env` | run-time env on the data disk; overrides the image's `ENV` — this is where `LLM_BACKEND=openai` + `GEMINI_API_KEY` switch the judge to Gemini while embeddings stay on in-container Ollama | written once by hand; never in the image |
+
+The container is not compose-managed (the tracked `docker-compose.yml` is the
+registry path's; the `research-assistant-grobid-1` sidecar is the only thing
+it runs on the VM). It was started by hand, and this is the exact shape of
+that container today — `docker inspect research-assistant` is the authority:
+
+```bash
+# on the VM, from a synced checkout that also contains models/
+docker build -f Dockerfile.standalone \
+  -t europe-west1-docker.pkg.dev/researchassistant-508111/research-assistant/standalone:latest .
+docker run -d --name research-assistant --restart always \
+  -p 8080:8080 -v /mnt/disks/data:/home/user/data \
+  europe-west1-docker.pkg.dev/researchassistant-508111/research-assistant/standalone:latest
+```
+
+`--restart always` survives a VM reboot but **not** a manual `docker stop` —
+after one, only `docker start research-assistant` brings the site back.
+
+**Hot-patching code without a rebuild** (what a routine code deploy looks like
+today — a rebuild re-copies 7 GB of models):
+
+```bash
+tar czf /tmp/patch.tgz app.py research_assistant scripts
+gcloud compute scp /tmp/patch.tgz research-assistant:/tmp/patch.tgz --zone europe-west1-b
+gcloud compute ssh research-assistant --zone europe-west1-b --command 'bash -s' <<'EOF'
+  mkdir -p /tmp/patch && tar xzf /tmp/patch.tgz -C /tmp/patch
+  for f in /tmp/patch/*; do docker cp "$f" research-assistant:/home/user/app/; done
+  docker exec research-assistant chown -R 1000:1000 /home/user/app
+  docker restart research-assistant
+EOF
+```
+
+The patched files live in the container's writable layer: `docker restart`
+keeps them; `docker rm` + `docker run`, or a new image, does not.
+Verify after a restart with
+`curl -s localhost:8080/_stcore/health` and
+`docker exec research-assistant curl -s localhost:11434/api/tags` — an audit
+started before Ollama answers is aborted by the breaker (and, since
+`0870338`, not cached).
+
+---
+
 ## Controlling Costs
 
 * **Running**: ~$95/mo (VM compute ~$89 + 50 GB disk ~$6).

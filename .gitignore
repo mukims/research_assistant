@@ -20,8 +20,10 @@ model_final.pth
 # Git worktrees
 .worktrees/
 
-# Local secrets — never commit
+# Local secrets — never commit (.env.example is the tracked template)
 .env
+.env.*
+!.env.example
 .claude/
 .agents/
 ORIGINAL_REQUEST.md
