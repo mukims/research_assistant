@@ -1,8 +1,8 @@
 """Evaluate Agent 8's judge on the held-out set.
 
-    PYTHONPATH=. CITATION_LOG_FILE=0 python evaluate_judge.py --mode judge --runs 1
-    PYTHONPATH=. CITATION_INDEX_VERSION=2 CITATION_LOG_FILE=0 python evaluate_judge.py --mode verifier
-    PYTHONPATH=. python evaluate_judge.py --compare data/eval/judge/results/A.json data/eval/judge/results/B.json
+    PYTHONPATH=. CITATION_LOG_FILE=0 python scripts/evaluate_judge.py --mode judge --runs 1
+    PYTHONPATH=. CITATION_INDEX_VERSION=2 CITATION_LOG_FILE=0 python scripts/evaluate_judge.py --mode verifier
+    PYTHONPATH=. python scripts/evaluate_judge.py --compare data/eval/judge/results/A.json data/eval/judge/results/B.json
 
 judge mode: judge(claim, evidence) on each case's stored evidence.
 verifier mode: a one-sentence draft per case through verify_draft() against

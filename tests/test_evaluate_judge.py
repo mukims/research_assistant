@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import evaluate_judge as ej
+from scripts import evaluate_judge as ej
 from research_assistant.judgement.evalset import CASES_DIR, validate_case
 
 

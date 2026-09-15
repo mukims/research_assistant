@@ -713,7 +713,7 @@ This policy is deterministic, fully inspectable, and eliminates opaque heuristic
 
 ### 9.10 Held-Out Evaluation Harness & Systematic Perturbation Transforms
 
-`evaluate_judge.py`, `evalset.py`, and `transforms.py` establish a rigorous regression and benchmarking discipline:
+`scripts/evaluate_judge.py`, `evalset.py`, and `transforms.py` establish a rigorous regression and benchmarking discipline:
 - **Evaluation Sets**: Partitioned into `human.jsonl` (hand-crafted test cases and negations) and `transforms.jsonl` (programmatic counterfactual perturbations).
 - **Perturbation Generators**: Five deterministic transforms stress-test specific error surfaces:
   1. `cross_pair`: Mismatches claim with an unrelated chunk from the same paper.
