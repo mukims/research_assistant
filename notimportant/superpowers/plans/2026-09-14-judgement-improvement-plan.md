@@ -55,14 +55,14 @@ flowchart TD
 **Goal**: Establish a baseline so every prompt, rubric, or model tweak is backed by measurable accuracy metrics rather than intuition.
 
 * **Files to create**:
-  * [`research_assistant/judgement/evalset.py`](file:///run/media/shardul/storage1/research_assistant/research_assistant/judgement/evalset.py): Schema and loader with a mandatory **Held-Out Guard** (refuses to score cases appearing in `prompt.md`).
-  * [`research_assistant/judgement/transforms.py`](file:///run/media/shardul/storage1/research_assistant/research_assistant/judgement/transforms.py): Model-free, deterministic test generators:
+  * [`research_assistant/judgement/evalset.py`](../../../research_assistant/judgement/evalset.py): Schema and loader with a mandatory **Held-Out Guard** (refuses to score cases appearing in `prompt.md`).
+  * [`research_assistant/judgement/transforms.py`](../../../research_assistant/judgement/transforms.py): Model-free, deterministic test generators:
     * `number_swap`: Inverts numbers present in claim and evidence ($\times 2$ or $\times 0.5$) $\to$ tests if the judge detects *Contradicts*.
     * `scope_swap`: Replaces material/condition tokens ($\text{MoS}_2 \to \text{WSe}_2$; room temp $\to$ cryogenic) $\to$ tests if it detects *Does not support / Scope mismatch*.
     * `hedge_evidence`: Replaces assertive verbs with hedged phrases (*proves* $\to$ *may suggest*) $\to$ tests if it detects *Partially supports*.
     * `cross_pair`: Mismatches claims and evidence from different papers $\to$ tests *Does not support*.
-  * [`research_assistant/judgement/metrics.py`](file:///run/media/shardul/storage1/research_assistant/research_assistant/judgement/metrics.py): Accuracy, confusion matrix (specifically isolating *Contradicts* vs. *Does not support*), rubric violation rates, and latency.
-  * [`evaluate_judge.py`](file:///run/media/shardul/storage1/research_assistant/evaluate_judge.py): Command-line benchmark runner with side-by-side run comparisons.
+  * [`research_assistant/judgement/metrics.py`](../../../research_assistant/judgement/metrics.py): Accuracy, confusion matrix (specifically isolating *Contradicts* vs. *Does not support*), rubric violation rates, and latency.
+  * [`evaluate_judge.py`](../../../scripts/evaluate_judge.py): Command-line benchmark runner with side-by-side run comparisons.
 
 ---
 
@@ -71,7 +71,7 @@ flowchart TD
 **Goal**: Extract objective metadata and structural indicators to evaluate how much scientific trust the cited paper warrants.
 
 * **Files to create**:
-  * [`research_assistant/judgement/source_assessor.py`](file:///run/media/shardul/storage1/research_assistant/research_assistant/judgement/source_assessor.py)
+  * [`research_assistant/judgement/source_assessor.py`](../../../research_assistant/judgement/source_assessor.py)
 * **Signals Evaluated**:
   1. **Retraction Status**: Crossref / OpenAlex API flag. If retracted, immediately flagged.
   2. **Publication Tier**: Peer-reviewed journal article vs. unreviewed preprint (arXiv/bioRxiv) vs. book chapter vs. conference abstract.
@@ -91,7 +91,7 @@ flowchart TD
 **Goal**: Combine the **Text Verdict** (Step 2) with the **Source Grade** (Step 3) into a deterministic reliability classification.
 
 * **Files to create**:
-  * [`research_assistant/judgement/policy.py`](file:///run/media/shardul/storage1/research_assistant/research_assistant/judgement/policy.py)
+  * [`research_assistant/judgement/policy.py`](../../../research_assistant/judgement/policy.py)
 
 #### Decision Matrix:
 
@@ -124,7 +124,7 @@ flowchart TD
 
 **Goal**: Make reliability instantly actionable for the researcher.
 
-* **Streamlit UI Updates** ([`app.py`](file:///run/media/shardul/storage1/research_assistant/app.py)):
+* **Streamlit UI Updates** ([`app.py`](../../../app.py)):
   * **Summary KPI Cards**: Add a top-level reliability breakdown tile (*e.g., 14 High · 4 Moderate · 1 Low · 2 Contradicted · 3 Unresolved*).
   * **Table Column**: Add color-coded badges directly in the audit table (`HIGH`, `MODERATE`, `LOW`, `CONTRADICTED`).
   * **Source Badges**: Show whether the source is a Peer-Reviewed Journal, arXiv Preprint, or Review.
@@ -143,7 +143,7 @@ In adherence to the **Mandatory Two-Cycle Verification Protocol**:
      ```
    * Run the newly created evaluation suite:
      ```bash
-     python evaluate_judge.py --mode judge
+     PYTHONPATH=. python scripts/evaluate_judge.py --mode judge
      ```
    * Deploy new modules to cloud VM and verify no broken imports.
 2. **Cycle 2 (End-to-End Live Retest on Warm State)**:
