@@ -101,13 +101,19 @@ research_assistant/                the checkout root
 ├── requirements.txt               core (UI, orchestration, text-only ingestion)
 ├── requirements-layout.txt        optional: detectron2 + torch layout stack
 ├── requirements-test.txt          the light packages CI installs
-├── Dockerfile  .dockerignore  .gitignore
+├── Dockerfile                     registry image (deploy/deploy.sh → Artifact Registry; OpenAI backend)
+├── Dockerfile.standalone          all-in-one image the GCE VM runs: Ollama + GROBID + app (see deploy/README.md)
+├── docker-compose.yml  .dockerignore  .gcloudignore  .gitignore  .env.example
 ├── publaynet_config.yaml
-├── model_final.pth                Detectron2 / PubLayNet checkpoint (optional)
+├── model_final.pth                Detectron2 / PubLayNet checkpoint (optional, gitignored)
 │
 ├── app.py                         Streamlit UI (also the container entry point)
 ├── orchestrate.py                 LangGraph — one research idea, end to end
 ├── watch.py                       watchdog daemon — directory-driven
+│
+├── README.md  HOW_TO_USE.md  PIPELINE.md  ARCHITECTURE.md  Research_Assistant_GROBID_Guide.md
+│                                  (HOW_TO_USE.md is also rendered in-app, tab 5)
+├── GEMINI.md                      project invariants for the Gemini CLI agent
 │
 ├── research_assistant/            the installable package
 │   ├── config.py                  every model name, path and tunable
@@ -125,39 +131,59 @@ research_assistant/                the checkout root
 │   │   ├── agent8_verifier.py         cited draft → claim–evidence audit
 │   │   └── grobid_controller.py       agent-level re-export of shared/grobid_manager
 │   ├── judgement/
-│   │   ├── judge.py        claim–evidence rubric used by Agent 8
-│   │   ├── prompt.md       the rubric prompt
-│   │   └── cases/          labelled examples the rubric is checked against
+│   │   ├── judge.py            claim–evidence rubric used by Agent 8 and the seed audit
+│   │   ├── prompt.md           the rubric prompt (frozen; only {{CONTEXT_BLOCK}} is filled)
+│   │   ├── policy.py           deterministic reliability rating from verdict + source grade
+│   │   ├── source_assessor.py  peer-reviewed / preprint / review heuristics for a cited source
+│   │   ├── evalset.py  metrics.py  harvest.py  labeling.py  transforms.py
+│   │   │                       the judge evaluation harness (pure; scripts/ do the I/O)
+│   │   └── cases/              labelled examples: cases.jsonl (in-prompt), human.jsonl, transforms.jsonl
 │   └── shared/
-│       ├── llm.py          backend-agnostic chat / chat_stream / embeddings
-│       ├── ingestion.py    process → upsert → mark → index
-│       ├── tokenize.py     NFKC normalisation, English Snowball stemming, stopword removal
-│       ├── extract.py      PDF → Document: GROBID full-text TEI with PyMuPDF fallback
-│       ├── chunking.py     sentence windows packed within sections
-│       ├── figures.py      figure cropping, context formatting and VLM description
-│       ├── ingest_v2.py    PDF → corpus entries: extract, chunk, caption, crop, describe
-│       ├── batch_uploader.py  multi-PDF / ZIP upload → direct ingestion (UI tab 1)
-│       ├── grobid_manager.py  GROBID lifecycle: start / stop / health (Docker, JAR or remote)
-│       ├── manifest.py     what has been ingested (data/ingested.json)
-│       ├── search.py       hybrid BM25 + dense with Reciprocal Rank Fusion
-│       ├── retrieve.py     two-stage retrieval (summary shortlist → deep chunk search)
-│       ├── fetch.py        stream-a-PDF-to-disk-with-validation
-│       ├── source_key.py   deterministic identity for a reference / document
-│       ├── atomic.py       write-temp-then-replace, for every manifest on disk
+│       ├── llm.py              backend-agnostic chat / chat_stream / embeddings
+│       ├── ingestion.py        process → upsert → mark → index
+│       ├── tokenize.py         NFKC normalisation, English Snowball stemming, stopword removal
+│       ├── extract.py          PDF → Document: GROBID full-text TEI with PyMuPDF fallback
+│       ├── chunking.py         sentence windows packed within sections
+│       ├── figures.py          figure cropping, context formatting and VLM description
+│       ├── ingest_v2.py        PDF → corpus entries: extract, chunk, caption, crop, describe
+│       ├── batch_uploader.py   multi-PDF / ZIP upload → direct ingestion (UI tab 1)
+│       ├── seed_audit.py       seed paper's own citations → claims → judged against the corpus (UI tab 1)
+│       ├── claim_text.py       GROBID paragraph → judgeable sentences, citation roles, context
+│       ├── run_jobs.py         pipeline runs as server-side jobs that outlive the browser session
+│       ├── pipeline_status.py  file-based progress, events and cancel flag every session polls
+│       ├── chat_context.py     the mechanics of a research-chat turn (pure)
+│       ├── grobid_manager.py   GROBID lifecycle: start / stop / health (Docker, JAR or remote)
+│       ├── manifest.py         what has been ingested (data/ingested.json)
+│       ├── search.py           hybrid BM25 + dense with Reciprocal Rank Fusion
+│       ├── retrieve.py         two-stage retrieval (summary shortlist → deep chunk search)
+│       ├── fetch.py            stream-a-PDF-to-disk-with-validation
+│       ├── source_key.py       deterministic identity for a reference / document
+│       ├── atomic.py           write-temp-then-replace, for every manifest on disk
 │       └── db.py  log.py  retry.py
 │
+├── scripts/                        operator CLIs (run as PYTHONPATH=. python scripts/<name>.py)
+│   ├── evaluate_judge.py           judge / verifier evaluation on the held-out set; --compare two runs
+│   ├── judge_harvest.py  judge_label.py  judge_bench.py
+│   ├── index_stats.py              chunk-length distribution of the active index
+│   └── synth_compare.py            research_answer in both synthesis modes, side by side
+├── deploy/                         GCE deployment: VM + disk + firewall scripts, deploy.sh, entrypoint.sh
 ├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
 ├── .github/workflows/tests.yml
+├── notimportant/superpowers/       design specs, implementation plans and findings, by date
 └── data/                           all runtime state (gitignored; CITATION_DATA_DIR overrides)
     ├── raw/                        PDFs to process; raw/grobid_output/ caches GROBID's TEI
+    │   └── seed_audits/            cached seed audits, history/ of every run, runs/ (job results)
     ├── pulled_pdfs/                PDFs from Agent 2, or dropped by hand for Agent 6
     ├── drafts/                     drop a .txt here and watch.py runs Agent 5 on it
     ├── images/                     figure/table crops from ingestion (debug artefact)
+    ├── eval/judge/                 evaluation harness results
     ├── logs/
     ├── physics_vectordb/           persistent ChromaDB store
-    ├── seed_papers.json  extracted_citations.json  downloaded.json
-    ├── failed_downloads.json  ingested.json  bm25_index.pkl
-    └── ingest.lock                 held while a batch is ingesting
+    ├── seed_papers.json  extracted_citations.json  downloaded.json  failed_downloads.json
+    ├── ingested.json  bm25_index.pkl          the v1 index (CITATION_INDEX_VERSION=1)
+    ├── ingested_v2.json  bm25_index_v2.pkl    the v2 index (CITATION_INDEX_VERSION=2)
+    ├── pipeline_status.json(.lock) live progress for the sidebar
+    └── ingest.lock                 flock held while a batch is ingesting
 ```
 
 Three runnable entry points sit at the root because they are the things a user
