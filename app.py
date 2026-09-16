@@ -544,6 +544,7 @@ def _render_seed_citation_audit(final):
         from research_assistant.shared.seed_audit import (
             explain_rubric_verdict,
             explain_verdict_steps,
+            unassessed_bucket,
             generate_seed_audit_markdown,
             get_deferred_missing_references,
             save_and_register_reference_pdf,
@@ -637,11 +638,20 @@ def _render_seed_citation_audit(final):
         deferred_count = totals.get("deferred_paywalled", 0)
         all_count = totals.get("total", len(results))
 
-        not_assessed_items = [r for r in results if r.get("outcome") not in ("judged", "not_downloaded", "deferred_paywalled")]
-        tab_supported, tab_review, tab_not_assessed, tab_deferred, tab_all = st.tabs([
+        # An unjudged citation whose PDF is already here asks for a re-run; one
+        # with no claim to judge asks for nothing. Same grey badge, opposite
+        # actions — so they get their own tabs.
+        in_corpus_unjudged = [r for r in results if unassessed_bucket(r) == "in_corpus_unjudged"]
+        nothing_to_judge = [
+            r for r in results
+            if r.get("outcome") not in ("judged", "not_downloaded", "deferred_paywalled")
+            and unassessed_bucket(r) != "in_corpus_unjudged"
+        ]
+        tab_supported, tab_review, tab_not_assessed, tab_not_a_claim, tab_deferred, tab_all = st.tabs([
             f"Supported ({supp_count})",
             f"Need Review ({rev_count})",
-            f"⏸ Not Assessed ({len(not_assessed_items)})",
+            f"⏸ In Corpus, Not Judged ({len(in_corpus_unjudged)})",
+            f"🔧 Not a Claim ({len(nothing_to_judge)})",
             f"⏳ Pending Evidence (Deferred) ({deferred_count})",
             f"All Citations ({all_count})",
         ])
@@ -814,13 +824,31 @@ def _render_seed_citation_audit(final):
                 st.caption("No citations flagged for review.")
 
         with tab_not_assessed:
-            if not_assessed_items:
-                st.info("These citations were found in the paper but the judge produced no verdict for them. "
-                        "The badge on each says why.")
-                for it in sorted(not_assessed_items, key=lambda r: r.get("outcome") or ""):
+            if in_corpus_unjudged:
+                st.info(
+                    "The reference PDF for each of these is **already in the library** — the judge did not "
+                    "reach them. Nothing needs to be fetched: raise the per-paper budget "
+                    "(`CITATION_AUDIT_MAX_CLAIMS`, default 50) or re-run the audit. The badge says which "
+                    "of the budget, the per-sentence cap or a backend failure stopped each one.",
+                    icon="⏸",
+                )
+                for it in sorted(in_corpus_unjudged, key=lambda r: r.get("outcome") or ""):
                     _render_claim_item(it)
             else:
                 st.success("Every citation with an available reference was assessed.")
+
+        with tab_not_a_claim:
+            if nothing_to_judge:
+                st.info(
+                    "These carry no assertion about the cited paper's findings — a software or dataset "
+                    "citation, a pointer to a review, a sentence fragment, or a marker that could not be "
+                    "matched to a bibliography entry. Re-running does not change them.",
+                    icon="🔧",
+                )
+                for it in sorted(nothing_to_judge, key=lambda r: r.get("outcome") or ""):
+                    _render_claim_item(it)
+            else:
+                st.success("Every citation in the paper carried a claim that could be judged.")
 
         with tab_deferred:
             if deferred_count == 0:

@@ -3,7 +3,7 @@ Empirical stress-testing suite for Streamlit UI components in app.py.
 Specifically verifies:
 1. Rendering _render_seed_citation_audit with 0 deferred citations.
 2. Rendering _render_seed_citation_audit with multiple deferred citations across multiple missing papers.
-3. Verification of all 6 metric columns and 4 tabs construction without KeyError or TypeError across normal and edge-case totals.
+3. Verification of all 6 metric columns and 6 tabs construction without KeyError or TypeError across normal and edge-case totals.
 4. Verification of _render_claim_item across all 7 outcomes/judgements.
 5. Simulated file upload, deduplication, and session state caching.
 6. Robustness against adversarial malformed payloads.
@@ -252,7 +252,8 @@ class TestStreamlitUIStress(unittest.TestCase):
         expected_tabs = [
             "Supported (2)",
             "Need Review (0)",
-            "⏸ Not Assessed (0)",
+            "⏸ In Corpus, Not Judged (0)",
+            "🔧 Not a Claim (0)",
             "⏳ Pending Evidence (Deferred) (0)",
             "All Citations (3)",
         ]
@@ -364,7 +365,7 @@ class TestStreamlitUIStress(unittest.TestCase):
         tab_names = self.mock_st.tabs_calls[0]["names"]
         self.assertEqual(
             tab_names,
-            ["Supported (0)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (4)", "All Citations (4)"],
+            ["Supported (0)", "Need Review (0)", "⏸ In Corpus, Not Judged (0)", "🔧 Not a Claim (0)", "⏳ Pending Evidence (Deferred) (4)", "All Citations (4)"],
         )
 
         # 3. tab_deferred warning banner
@@ -404,18 +405,18 @@ class TestStreamlitUIStress(unittest.TestCase):
         """Stress-test metric columns and tabs under edge cases (empty dicts, missing keys, boundary counts)."""
         edge_cases = [
             # 1. Empty totals dict
-            ({}, 2, ["Supported (0)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (2)"]),
+            ({}, 2, ["Supported (0)", "Need Review (0)", "⏸ In Corpus, Not Judged (0)", "🔧 Not a Claim (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (2)"]),
             # 2. Missing some keys in totals
             (
                 {"total": 5, "Supports": 2},
                 5,
-                ["Supported (2)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (5)"],
+                ["Supported (2)", "Need Review (0)", "⏸ In Corpus, Not Judged (0)", "🔧 Not a Claim (0)", "⏳ Pending Evidence (Deferred) (0)", "All Citations (5)"],
             ),
             # 3. All deferred
             (
                 {"total": 10, "deferred_paywalled": 10},
                 10,
-                ["Supported (0)", "Need Review (0)", "⏸ Not Assessed (0)", "⏳ Pending Evidence (Deferred) (10)", "All Citations (10)"],
+                ["Supported (0)", "Need Review (0)", "⏸ In Corpus, Not Judged (0)", "🔧 Not a Claim (0)", "⏳ Pending Evidence (Deferred) (10)", "All Citations (10)"],
             ),
             # 4. Large values
             (
@@ -432,7 +433,8 @@ class TestStreamlitUIStress(unittest.TestCase):
                 [
                     "Supported (600)",
                     "Need Review (200)",
-                    "⏸ Not Assessed (0)",
+                    "⏸ In Corpus, Not Judged (0)",
+            "🔧 Not a Claim (0)",
                     "⏳ Pending Evidence (Deferred) (100)",
                     "All Citations (1000)",
                 ],

@@ -1545,6 +1545,55 @@ BREAKER_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+class TestUnassessedIsSplitByWhatTheReaderCanDo(unittest.TestCase):
+    """"Not Assessed" ran nine outcomes together, so a citation whose PDF is
+    already in the corpus and merely ran past the budget looked exactly like
+    one with no PDF at all. Those ask the reader for opposite things — raise
+    the budget versus find the paper — and a reader reported the first as
+    "available on arXiv but not fetched" because of it.
+    """
+
+    def test_budget_and_backend_outcomes_are_recoverable(self):
+        from research_assistant.shared.seed_audit import unassessed_bucket
+        for outcome in ("cap_exceeded", "cluster_skipped", "not_attempted",
+                        "retrieval_failed", "call_failed", "parse_failed", "no_evidence"):
+            self.assertEqual(unassessed_bucket({"outcome": outcome}), "in_corpus_unjudged", outcome)
+
+    def test_outcomes_no_re_run_can_fix_are_kept_apart(self):
+        from research_assistant.shared.seed_audit import unassessed_bucket
+        for outcome in ("not_a_claim", "malformed_claim", "unresolved_ref"):
+            self.assertEqual(unassessed_bucket({"outcome": outcome}), "nothing_to_judge", outcome)
+
+    def test_judged_and_missing_papers_are_neither(self):
+        from research_assistant.shared.seed_audit import unassessed_bucket
+        for outcome in ("judged", "not_downloaded", "deferred_paywalled"):
+            self.assertIsNone(unassessed_bucket({"outcome": outcome}), outcome)
+
+    def test_the_report_splits_the_two_and_says_what_to_do(self):
+        report = {
+            "seed_name": "s.pdf", "generated": "now", "model": "m", "aborted": None,
+            "results": [
+                {"outcome": "cap_exceeded", "judgement": None, "downloaded": True,
+                 "reason": "Maximum claims evaluation budget reached.",
+                 "ref": {"index": 63, "title": "Random-matrix theory of quantum transport"},
+                 "sentence": "S.", "claim": "S.", "paragraph_id": "p_0", "paragraph_refs": []},
+                {"outcome": "not_a_claim", "judgement": None, "downloaded": True, "role": "software",
+                 "reason": "software citation — not a verifiable claim about the cited paper.",
+                 "ref": {"index": 9, "title": "The pythtb package"},
+                 "sentence": "T.", "claim": "T.", "paragraph_id": "p_1", "paragraph_refs": []},
+            ],
+        }
+        report["totals"] = compute_totals(report["results"])
+        md = generate_seed_audit_markdown(report)
+        self.assertIn("In the Corpus but Not Judged (1)", md)
+        self.assertIn("Not a Verifiable Claim (1)", md)
+        # The recoverable section tells the reader the lever, and names it.
+        self.assertIn("CITATION_AUDIT_MAX_CLAIMS", md)
+        self.assertIn("Random-matrix theory of quantum transport", md)
+        # and it must not be confused with the missing-paper section
+        self.assertNotIn("Paywalled or Unavailable", md)
+
+
 class TestClaimBudget(unittest.TestCase):
     """The budget exists to bound cost, not to decide which citations matter.
 

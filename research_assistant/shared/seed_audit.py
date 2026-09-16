@@ -1679,6 +1679,33 @@ _VERDICT_BADGES = {
     "Unclear / insufficient evidence": "⚪ Unclear / Insufficient Evidence",
 }
 
+# An unjudged citation is one of two very different things, and the report
+# used to show them the same way. Either its reference PDF is already in the
+# corpus and something stopped the judge — the budget, the sentence cap, a
+# backend that was down — which another run fixes; or there was never a claim
+# to judge, which no re-run changes. A reader who cannot tell them apart reads
+# the first as a missing paper.
+_IN_CORPUS_UNJUDGED = frozenset({
+    "cap_exceeded", "cluster_skipped", "not_attempted",
+    "retrieval_failed", "call_failed", "parse_failed", "no_evidence",
+})
+_NOTHING_TO_JUDGE = frozenset({"not_a_claim", "malformed_claim", "unresolved_ref"})
+
+
+def unassessed_bucket(item: dict) -> str | None:
+    """"in_corpus_unjudged" | "nothing_to_judge" | None.
+
+    None for the outcomes that are not unassessed at all: a judged citation,
+    a paper that was never downloaded, a deferred paragraph.
+    """
+    outcome = item.get("outcome") or ""
+    if outcome in _IN_CORPUS_UNJUDGED:
+        return "in_corpus_unjudged"
+    if outcome in _NOTHING_TO_JUDGE:
+        return "nothing_to_judge"
+    return None
+
+
 _NOT_ASSESSED_BADGES = {
     "deferred_paywalled": "⏳ Deferred (Pending Evidence)",
     "not_downloaded": "🔒 Paywalled / Not In Corpus",
@@ -1838,9 +1865,13 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         if r.get("outcome") == "judged"
         and r.get("judgement") in ("Supports", "Partially supports")
     ]
-    not_assessed = [
+    in_corpus_unjudged = [r for r in results if unassessed_bucket(r) == "in_corpus_unjudged"]
+    nothing_to_judge = [r for r in results if unassessed_bucket(r) == "nothing_to_judge"]
+    # Anything unassessed for a reason neither bucket names still has to appear.
+    nothing_to_judge += [
         r for r in results
         if r.get("outcome") not in ("judged", "not_downloaded", "deferred_paywalled")
+        and unassessed_bucket(r) is None
     ]
     deferred = [r for r in results if r.get("outcome") == "deferred_paywalled"]
     not_downloaded = [r for r in results if r.get("outcome") == "not_downloaded"]
@@ -1962,9 +1993,25 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             lines.append(_format_entry(item, i))
         current_sec += 1
 
-    if not_assessed:
-        lines.append(f"## {current_sec}. Not Assessed ({len(not_assessed)})\n")
-        for i, item in enumerate(sorted(not_assessed, key=lambda r: str(r.get("outcome") or "")), 1):
+    if in_corpus_unjudged:
+        lines.append(f"## {current_sec}. In the Corpus but Not Judged ({len(in_corpus_unjudged)})\n")
+        lines.append(
+            "The reference PDF for each of these is already in the library — the judge did not reach "
+            "them. Raise the per-paper budget (`CITATION_AUDIT_MAX_CLAIMS`, default 50) or re-run the "
+            "audit to have them evaluated; nothing needs to be fetched.\n"
+        )
+        for i, item in enumerate(sorted(in_corpus_unjudged, key=lambda r: str(r.get("outcome") or "")), 1):
+            lines.append(_format_entry(item, i))
+        current_sec += 1
+
+    if nothing_to_judge:
+        lines.append(f"## {current_sec}. Not a Verifiable Claim ({len(nothing_to_judge)})\n")
+        lines.append(
+            "These citations carry no assertion about the cited paper's findings — a software or "
+            "dataset citation, a pointer to a review, a sentence fragment, or a marker that could "
+            "not be matched to a bibliography entry. Re-running does not change them.\n"
+        )
+        for i, item in enumerate(sorted(nothing_to_judge, key=lambda r: str(r.get("outcome") or "")), 1):
             lines.append(_format_entry(item, i))
         current_sec += 1
 
