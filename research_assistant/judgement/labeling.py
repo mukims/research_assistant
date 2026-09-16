@@ -51,7 +51,9 @@ def apply_label(candidate: dict, key: str, existing_ids: set, note: str = "", ne
             "citation_evidence": candidate["citation_evidence"],
             "expected_judgement": "Contradicts",
             "origin": hid,
-            **carried,
+            # The context marks the sentence that was negated, not the
+            # negation; shown with the negated claim it contradicts itself.
+            **{**carried, "context": None, "section_heading": None, "artifacts": None},
             "notes": "operator-written negation of " + hid,
         })
     return out

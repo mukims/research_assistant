@@ -60,17 +60,27 @@ class TestApplyLabel(unittest.TestCase):
         for c in lb.apply_label(_cand(), "s", set(), negation="No."):
             validate_case(c)
 
-    def test_context_and_tags_ride_along_on_every_case(self):
+    def test_context_and_tags_ride_along_on_the_human_case(self):
         cand = _cand(context="B. «claim» A.", section_heading="2. Results",
                      artifacts=[{"label": "Fig. 1", "caption": "cap"}])
         human, negation = lb.apply_label(cand, "s", set(), negation="MoS2 networks do not conduct by hopping.",
                                          tags=["figure_ref", "method_transfer"])
+        self.assertEqual(human["context"], "B. «claim» A.")
+        self.assertEqual(human["section_heading"], "2. Results")
+        self.assertEqual(human["artifacts"][0]["label"], "Fig. 1")
         for case in (human, negation):
-            self.assertEqual(case["context"], "B. «claim» A.")
-            self.assertEqual(case["section_heading"], "2. Results")
-            self.assertEqual(case["artifacts"][0]["label"], "Fig. 1")
             self.assertEqual(case["tags"], ["figure_ref", "method_transfer"])
         self.assertEqual(lb.apply_label(_cand(), "d", set())[0]["tags"], [])
+
+    def test_a_negation_carries_no_context(self):
+        """The context marks the sentence the operator negated; handing it to
+        the judge with the negated claim says 'judge only the sentence between
+        « and »' about a sentence that is not the claim. A negation is judged
+        from claim and evidence alone, in every context mode."""
+        cand = _cand(context="B. «claim» A.", section_heading="2. Results",
+                     artifacts=[{"label": "Fig. 1", "caption": "cap"}])
+        _, negation = lb.apply_label(cand, "s", set(), negation="MoS2 networks do not conduct by hopping.")
+        self.assertEqual((negation["context"], negation["section_heading"], negation["artifacts"]), (None, None, None))
 
 
 class TestUnlabelled(unittest.TestCase):
