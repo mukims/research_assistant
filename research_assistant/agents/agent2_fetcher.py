@@ -14,10 +14,11 @@ records carry a `reason` and no `path`, and have no downstream consumer
 needing a contract.
 """
 
+import html
 import json
 import os
-import requests
 import re
+import requests
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -235,9 +236,30 @@ def try_europepmc(doi, ref, dest_path):
 
 
 
+# Inline formatting is part of the word — "WS<sub>2</sub>" is WS2 on arXiv, not
+# "WS 2" — so those tags close up. Everything else stands between two words.
+_INLINE_TAG_RE = re.compile(r"</?(?:sub|sup|i|b|em|strong|italic|bold|sc|span)\b[^>]*>", re.I)
+_MARKUP_RE = re.compile(r"<[^>]+>")
+
+
+def arxiv_query_title(title) -> str:
+    """A title arXiv's phrase index can match.
+
+    arXiv matches ti:"..." as an exact phrase, so anything the reference
+    metadata carries that the arXiv title does not makes the paper
+    unfindable. Crossref hands back raw MathML for titles with an equation —
+    15 of the 369 recorded fetch failures have <mml:math> in the title — and
+    an embedded double quote would terminate the phrase early.
+    """
+    text = _INLINE_TAG_RE.sub("", str(title or ""))
+    text = _MARKUP_RE.sub(" ", text)
+    text = html.unescape(text).replace('"', " ")
+    return " ".join(text.split())
+
+
 def try_arxiv(ref, dest_path):
     """Fall back to arXiv, searching on title where we have one."""
-    title = ref.get("title")
+    title = arxiv_query_title(ref.get("title"))
     raw = ref.get("raw_reference")
     if not (title or raw):
         return False, "nothing to search arXiv with"
@@ -264,7 +286,7 @@ def try_arxiv(ref, dest_path):
     # we asked for before downloading it.
     if title:
         found = " ".join((entries[0].findtext("atom:title", "", ns)).split()).lower()
-        wanted = " ".join(title.split()).lower()
+        wanted = title.lower()
         overlap = set(re.findall(r"[a-z0-9]+", found)) & set(re.findall(r"[a-z0-9]+", wanted))
         if len(overlap) < 0.6 * len(set(re.findall(r"[a-z0-9]+", wanted))):
             return False, "arXiv match was a different paper"

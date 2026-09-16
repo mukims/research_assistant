@@ -31,6 +31,74 @@ from research_assistant.shared.fetch import filename_for
 from research_assistant.shared.source_key import source_key
 
 
+class TestArxivQueryTitle(unittest.TestCase):
+    """arXiv's title index is matched as an exact phrase, so anything the
+    metadata carries that the arXiv title does not — MathML from Crossref,
+    HTML entities, a trailing period — makes the paper unfindable. 15 of the
+    369 recorded fetch failures have raw <mml:math> in the title."""
+
+    def test_mathml_and_entities_are_stripped(self):
+        title = ('The <mml:math xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+                 '<mml:msub><mml:mi>T</mml:mi></mml:msub></mml:math> matrix &amp; its use')
+        self.assertEqual(agent2_fetcher.arxiv_query_title(title), "The T matrix & its use")
+
+    def test_inline_formatting_closes_up_but_block_markup_separates(self):
+        """A subscript is part of the word — "WS<sub>2</sub>" is WS2 on arXiv,
+        not "WS 2" — while a MathML block stands between two words."""
+        self.assertEqual(
+            agent2_fetcher.arxiv_query_title("Electrical properties of tungstenite (WS<sub>2</sub>) crystals"),
+            "Electrical properties of tungstenite (WS2) crystals")
+        self.assertEqual(agent2_fetcher.arxiv_query_title("MoS<sub>2</sub>/Gold <i>ab</i>-initio"),
+                         "MoS2/Gold ab-initio")
+        self.assertEqual(agent2_fetcher.arxiv_query_title("The <mml:math><mml:mi>S</mml:mi></mml:math> matrix"),
+                         "The S matrix")
+
+    def test_a_clean_title_is_unchanged_apart_from_spacing(self):
+        self.assertEqual(
+            agent2_fetcher.arxiv_query_title("  Disorder and electronic  transport in graphene  "),
+            "Disorder and electronic transport in graphene")
+
+    def test_double_quotes_are_dropped_so_they_cannot_break_the_phrase(self):
+        # The query is ti:"<title>"; an embedded quote would terminate it early.
+        self.assertEqual(agent2_fetcher.arxiv_query_title('A "quoted" phrase'), "A quoted phrase")
+
+    def test_a_title_that_is_only_markup_yields_nothing(self):
+        self.assertEqual(agent2_fetcher.arxiv_query_title("<mml:math><mml:mi>x</mml:mi></mml:math>"), "x")
+        self.assertEqual(agent2_fetcher.arxiv_query_title("<br/>"), "")
+        self.assertEqual(agent2_fetcher.arxiv_query_title(None), "")
+
+    def test_try_arxiv_searches_the_cleaned_title(self):
+        seen = {}
+
+        class _Res:
+            status_code = 200
+            content = b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+            def raise_for_status(self): pass
+
+        def fake_get(url, **kw):
+            seen["url"] = url
+            return _Res()
+
+        with patch.object(agent2_fetcher.requests, "get", side_effect=fake_get):
+            ok, reason = agent2_fetcher.try_arxiv({"title": "The <mml:mi>T</mml:mi> matrix"}, "/tmp/x.pdf")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "not found on arXiv")
+        self.assertIn("The%20T%20matrix", seen["url"])
+        self.assertNotIn("mml", seen["url"])
+
+    def test_a_title_of_pure_markup_falls_back_to_the_raw_reference(self):
+        seen = {}
+
+        class _Res:
+            status_code = 200
+            content = b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+            def raise_for_status(self): pass
+
+        with patch.object(agent2_fetcher.requests, "get", side_effect=lambda url, **kw: (seen.__setitem__("url", url), _Res())[1]):
+            agent2_fetcher.try_arxiv({"title": "<br/>", "raw_reference": "Smith, A useful paper, Phys Rev 2019"}, "/tmp/x.pdf")
+        self.assertIn("Smith", seen["url"])
+
+
 class TestPaperFilename(unittest.TestCase):
     """filename_for(source_key(ref)) is what fetch_papers() actually calls to
     build a paper's destination path — these tests exercise that real path,
