@@ -683,6 +683,12 @@ def _render_seed_citation_audit(final):
 
                 if item.get("search_query") and item.get("outcome") == "judged":
                     st.caption(f"🔎 **Retrieval Query:** *{item['search_query']}*")
+                if item.get("artifacts"):
+                    st.caption("🖼️ **Refers to:** " + " · ".join(
+                        f"{a['label']} — {a['caption'][:120]}" for a in item["artifacts"] if a.get("caption")
+                    ))
+                if item.get("cited_summary"):
+                    st.caption(f"📄 **Cited paper, in brief:** {item['cited_summary']}")
 
                 if outcome == "deferred_paywalled":
                     st.warning(

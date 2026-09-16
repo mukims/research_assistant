@@ -1760,7 +1760,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             out_lines.append(rel_line)
         if src_line:
             out_lines.append(src_line)
-        role = item.get("role"); section = item.get("section")
+        role = item.get("role"); section = item.get("section_heading") or item.get("section")
         if role or section:
             out_lines.append(f"- **Cited in:** {section or '—'} · **Citation role:** {role or '—'}")
         out_lines.extend([

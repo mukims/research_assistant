@@ -1702,6 +1702,22 @@ class TestHonestMarkdown(unittest.TestCase):
         self.assertIn("First deferred sentence", md); self.assertIn("Second deferred sentence", md)
         self.assertIn("Missing paper", md)
 
+    def test_cited_in_shows_the_breadcrumb_when_known(self):
+        md = generate_seed_audit_markdown(self._report([
+            {"outcome": "cap_exceeded", "judgement": None, "downloaded": True, "role": "evidential",
+             "section": "results", "section_heading": "2. Results and Discussion > 2.1. Terahertz Spectral Analysis",
+             "reason": "Maximum claims evaluation budget reached.",
+             "reliability": "UNRESOLVED", "reliability_badge": "⏳ Not Assessed",
+             "reliability_explanation": "Not assessed — the per-paper claim budget was reached before this citation."},
+            {"outcome": "cap_exceeded", "judgement": None, "downloaded": True, "role": "evidential",
+             "section": "results", "section_heading": "",
+             "reason": "Maximum claims evaluation budget reached.",
+             "reliability": "UNRESOLVED", "reliability_badge": "⏳ Not Assessed",
+             "reliability_explanation": "Not assessed — the per-paper claim budget was reached before this citation."},
+        ]))
+        self.assertIn("**Cited in:** 2. Results and Discussion > 2.1. Terahertz Spectral Analysis", md)
+        self.assertIn("**Cited in:** results", md)   # the kind when no heading is known
+
 
 if __name__ == "__main__":
     unittest.main()
