@@ -2239,6 +2239,29 @@ class TestVerdictReasoning(unittest.TestCase):
         self.assertNotIn("Why the verdict is not stronger", steps)
         self.assertNotIn("What would settle it", steps)
 
+    def test_the_invented_span_route_names_the_quote_and_distrusts_the_account(self):
+        """When the span guard fires, the model's own account of the passages
+        is the thing that failed — printing it as 'what the passages said'
+        would repeat a discredited claim as fact."""
+        steps = self._labels(self._item(
+            judgement="Unclear / insufficient evidence", model_judgement="Supports",
+            evidence_sufficiency="sufficient", span_verified=False,
+            supporting_span="A sentence the cited paper never contains.",
+            reason="The evidence directly states the inversion works with other input signals.",
+            rubric_violations=["support asserted from a span that is not in the evidence: the quoted "
+                               "sentence does not occur in the retrieved passages, so nothing shows they report this"],
+            slots={"finding": {"assertion": "the inversion works with other signals", "verdict": "Supports"},
+                   "scope": {"assertion": "the inversion", "verdict": "Supports"},
+                   "strength": {"assertion": "has been shown", "verdict": "Not applicable"}}))
+        # The account is labelled as the model's and unverified, not as fact.
+        self.assertNotIn("What the passages said", steps)
+        self.assertIn("could not be verified", steps["What the model said, unverified"])
+        self.assertNotIn("Verbatim in the cited paper", steps)
+        gap = steps["Why the verdict is not stronger"]
+        self.assertIn("quoted a sentence that does not occur", gap)
+        self.assertIn("A sentence the cited paper never contains.", gap)
+        self.assertIn("re-judging this claim", steps["What would settle it"].lower())
+
     def test_an_unjudged_item_has_no_steps(self):
         from research_assistant.shared.seed_audit import explain_verdict_steps
         self.assertEqual(explain_verdict_steps({"outcome": "not_downloaded", "judgement": "Not downloaded"}), [])

@@ -1458,6 +1458,7 @@ def save_and_register_reference_pdf(
 
 
 _GUARD_VIOLATION = "absence asserted from insufficient evidence"
+_SPAN_VIOLATION = "span that is not in the evidence"
 
 
 def _slot(item: dict, name: str) -> tuple[str, str]:
@@ -1507,8 +1508,16 @@ def explain_verdict_steps(item: dict) -> list[tuple[str, str]]:
         read += f" (p. {pages})"
     steps.append(("Read from the cited paper", read))
 
+    invented = any(_SPAN_VIOLATION in v for v in (item.get("rubric_violations") or []))
     if item.get("reason"):
-        steps.append(("What the passages said", item["reason"]))
+        # When the span guard fired, the model's account of the passages is
+        # the thing that failed. Printing it under "what the passages said"
+        # would repeat a discredited claim as fact.
+        label = "What the model said, unverified" if invented else "What the passages said"
+        text = item["reason"]
+        if invented:
+            text += " (This account could not be verified against the passages — see below.)"
+        steps.append((label, text))
 
     span = item.get("supporting_span")
     if span and item.get("span_verified") is not False:
@@ -1519,7 +1528,13 @@ def explain_verdict_steps(item: dict) -> list[tuple[str, str]]:
 
     guard = any(_GUARD_VIOLATION in v for v in (item.get("rubric_violations") or []))
     hits_n = hits or 0
-    if guard:
+    if invented:
+        gap = (
+            f"The model quoted a sentence that does not occur in the retrieved passages — "
+            f"\u201c{span}\u201d — so nothing shows those passages report this, and the verdict it "
+            f"reached ({item.get('model_judgement') or 'support'}) is recorded as unclear instead."
+        )
+    elif guard:
         gap = (
             f"The model judged that the paper does not report this, but rated the same passages "
             f"insufficient to tell — silence in {hits_n} passages is not silence in the paper, so the "
@@ -1548,7 +1563,12 @@ def explain_verdict_steps(item: dict) -> list[tuple[str, str]]:
         )
     steps.append(("Why the verdict is not stronger", gap))
 
-    if guard or item.get("evidence_sufficiency") == "insufficient":
+    if invented:
+        settle = (
+            "Re-judging this claim — the quote offered is not in the passages, so the account of "
+            "them cannot be relied on. Read the passages below, or re-run on a stronger model."
+        )
+    elif guard or item.get("evidence_sufficiency") == "insufficient":
         settle = (
             "Reading more of the cited paper — raise the passages judged, or check the sections this "
             "claim would live in. The paper may well say it; these passages do not."
