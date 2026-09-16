@@ -30,11 +30,12 @@ Keeping only the verdicts whose span is verbatim leaves 4 Supports and 1 Unclear
 
 1. **`span_is_verbatim` caught every one of them.** The guard works, and it is the only thing
    standing between a weak model and a page of green ticks.
-2. **A fabricated span still reports as `Supports`.** `enforce_rubric` caps confidence at Medium and
-   records `span_verified: false`; the verdict is untouched, the badge stays green, and the report
-   prints one line about it well below the verdict. A reader skimming badges is misled. The rubric
-   already refuses absence asserted from insufficient evidence — the symmetric rule, *support
-   asserted from a span that is not in the evidence*, is not enforced. **Recommended next change.**
+2. **A fabricated span used to still report as `Supports`.** `enforce_rubric` capped confidence at
+   Medium and recorded `span_verified: false`, but left the verdict and its green badge alone.
+   Fixed in `1c0af02`: Supports, Partially supports and Contradicts are recorded as Unclear when
+   the span is not in the evidence — the symmetric half of the absence guard. Replaying these two
+   audits through it: hosted Supports 5 → 3, local Supports 15 → 4. The report names the invented
+   quote (`a2aa44d`, extended in the follow-up commit).
 3. **Model choice changes the audit's answer completely**, in the permissive direction. The audit's
    headline numbers are not comparable across models, and the report names the model but does not
    warn that a local model was used.
