@@ -368,16 +368,29 @@ class TestSpanIsVerbatim(unittest.TestCase):
         self.assertTrue(judge_mod.span_is_verbatim('the films showed a 10% increase in Δσ_ph - "as expected".', self.EVIDENCE))
 
     def test_hyphenation_broken_across_a_line_is_tolerated(self):
-        """PDF text carries "energy- dependent" where a word was hyphenated
-        across a line break, and a model quoting the sentence repairs it.
-        Seen on arxiv_2108.10114v3 citation 17: a real quotation from the
-        cited paper failed the check on that one space, and since the span
-        guard the cost is a flipped verdict, not just capped confidence."""
-        evidence = "We analyse the energy- dependent conductance ﬁngerprints of the device."
-        self.assertTrue(judge_mod.span_is_verbatim("the energy-dependent conductance fingerprints", evidence))
+        """PDF text keeps the hyphen of a word split at a line break, with the
+        break either left as a space ("energy- dependent") or closed up
+        ("informa-tion"), and a model quoting the sentence writes the word
+        whole. Both forms were seen on arxiv_2108.10114v3, each demoting a
+        real quotation of the cited paper — since the span guard the cost of
+        that is a flipped verdict, not just capped confidence."""
+        self.assertTrue(judge_mod.span_is_verbatim(
+            "the energy-dependent conductance fingerprints",
+            "We analyse the energy- dependent conductance ﬁngerprints of the device."))
+        self.assertTrue(judge_mod.span_is_verbatim(
+            "compositional information of disordered devices",
+            "extract structural and compositional informa-tion of disordered devices from measurements"))
         # and the other direction, for evidence that is already clean
         self.assertTrue(judge_mod.span_is_verbatim(
             "the energy- dependent conductance", "We analyse the energy-dependent conductance here."))
+
+    def test_a_span_whose_opening_was_invented_is_still_caught(self):
+        """The tail being real does not make the quotation real. Seen on
+        arxiv_2108.10114v3 citation 12: the model wrote a plausible opening
+        for a sentence and carried on with the evidence's own words."""
+        self.assertFalse(judge_mod.span_is_verbatim(
+            "The multiterminal Landauer-Büttiker formula for the electronic current at the terminal reads",
+            "Summing over channels gives the electronic current at the terminal reads [48, 50]"))
 
     def test_paraphrase_is_not_verbatim(self):
         self.assertFalse(judge_mod.span_is_verbatim("Films increased by ten percent.", self.EVIDENCE))
