@@ -218,17 +218,17 @@ JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 1)
 # verdict reports it did not see enough (sufficiency != sufficient, or
 # Unclear / Does not support), the top JUDGEMENT_ESCALATE_TOP_K hits are
 # judged once more. 0 disables the second look. The assembled evidence is
-# capped so prompt (~4.4k tokens) + evidence stays inside num_ctx below.
+# capped so prompt (~5.4k tokens) + evidence stays inside num_ctx below.
 JUDGEMENT_ESCALATE_TOP_K     = _env_int("CITATION_JUDGEMENT_ESCALATE_TOP_K", 3)
 JUDGEMENT_NEIGHBOUR_WINDOW   = _env_int("CITATION_JUDGEMENT_NEIGHBOUR_WINDOW", 1)
 JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS", 6000)
-# The V1.5 rubric is ~4,400 tokens and the evidence adds up to ~1,500 more, so
-# 4096 no longer holds even the prompt: Ollama truncates it — silently, from
-# the tail, where the worked examples and the output schema live — and the
-# model answers with a bare code fence that fails to parse. 8192 fits the
-# rubric, a full evidence block and a context block with room to spare; a test
+# The V1.6 rubric is ~5,400 tokens and a full evidence block adds ~1,500 more,
+# so the old 4096 no longer held even the prompt: Ollama truncates it —
+# silently, from the tail, where the worked examples and the output schema
+# live — and the model answers with a bare code fence that fails to parse.
+# 12288 leaves room for the rubric, full evidence and a context block; a test
 # pins the invariant. Ignored by the openai backend.
-JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_JUDGEMENT_NUM_CTX", 8192)}
+JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_JUDGEMENT_NUM_CTX", 12288)}
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
 
 

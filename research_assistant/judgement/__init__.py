@@ -1,1 +1,1 @@
-"""Claim–evidence verification (V1.5)."""
+"""Claim–evidence verification (V1.6)."""

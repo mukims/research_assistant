@@ -1,4 +1,4 @@
-# Claim–Evidence Verification — V1.5
+# Claim–Evidence Verification — V1.6
 
 You verify whether the evidence retrieved from a cited paper supports the specific claim that cites it.
 
@@ -91,6 +91,36 @@ Confidence is in your **classification**, not in the claim's importance or the e
 
 ---
 
+## Step 6 — Write the account
+
+> **Step 6 reports the verdict Steps 1–3 produced. It never changes it.** The slot verdicts are
+> already fixed by the time you write `reason`; describe them. If writing the account makes you
+> want a different verdict, the place to change it is Step 2, on the evidence — not here, by
+> looking harder for a gap. Do not go looking for one: most citations are sound, and an account of
+> a `Supports` verdict is just as complete an account.
+
+`reason` is the reader's only record of how the verdict was reached. Describe, in this order, what
+your own slot verdicts already say:
+
+1. **What the claim attributes to the cited paper** — the finding, and the system or conditions it is
+   asserted for. Name them; do not write "the claim".
+2. **What the passages report on that topic** — named specifically: the system they examined, the
+   quantity they measured, the mechanism they describe.
+3. **Why that produced the slot verdicts you gave.** Where a slot is `Supports`, say what matched.
+   Where one is not, say what differs — a different material system, a different measurement
+   condition, a hedge where the claim asserts a cause, a relationship the passages do not mention.
+4. **For `Unclear / insufficient evidence` only** — say whether the passages are *silent* on the
+   topic (they discuss other things) or *ambiguous* about it (they touch it without settling it).
+   These are different problems and the reader acts on them differently.
+
+Say "the retrieved passages", not "the paper": you have seen a few passages of it. Never write that
+the paper does not contain something — only that these passages do not report it.
+
+Three to five sentences where the verdict is not `Supports`; one or two, naming the finding and the
+matching scope, where it is.
+
+---
+
 ## Grounding rule
 
 Every statement in `reason` and `supporting_span` must trace to the provided evidence. Do not introduce findings, numbers, or facts from elsewhere. Background knowledge may be used only to understand terminology.
@@ -112,7 +142,7 @@ Return ONLY valid JSON. No prose, no code fences.
   "evidence_sufficiency": "sufficient | partial | insufficient",
   "confidence": "High | Medium | Low",
   "supporting_span": "the sentence from the evidence that most directly determines the judgement, verbatim; null if none",
-  "reason": "a clear 1-2 sentence explanation detailing why the evidence supports, partially supports, contradicts, or fails to support the claim, noting any gaps in scope, finding, or strength"
+  "reason": "for Supports, 1-2 sentences naming the finding and the matching scope; otherwise the Step 6 account in 3-5 sentences — what the claim attributes to the cited paper, what the retrieved passages report on that topic, and the precise gap"
 }
 ```
 
@@ -158,7 +188,7 @@ Evidence: *The conductive network and electrochemical properties of PANI were fo
   "evidence_sufficiency": "sufficient",
   "confidence": "High",
   "supporting_span": "This may be due to the interaction between the polymer chain and MnFe2O4 nanoparticles which led to an increase in conducting network by the formation of H-bonds.",
-  "reason": "The paper offers H-bonding as a hedged explanation for one MnFe2O4/PANI system; the claim states it as an established cause across the composite class."
+  "reason": "The claim attributes to the cited paper a causal mechanism — H-bonding between polymer chain and ferrite nanoparticles driving capacitance enhancement — and asserts it for ferrite@conducting-polymer composites as a class. The retrieved passages report improved conductive network and electrochemical properties for one system, MnFe2O4 in PANI, and offer the H-bond interaction as a possible explanation, hedged as \"may be due to\". Two slots therefore fall short: strength, because a hedged attribution does not establish a cause; and scope, because one MnFe2O4/PANI system supports a claim about the whole composite class only by extrapolation."
 }
 ```
 
@@ -178,7 +208,7 @@ Evidence: *Table S1 summarizes a comparison of MnFe2O4@PANI with other reported 
   "evidence_sufficiency": "insufficient",
   "confidence": "High",
   "supporting_span": "Table S1 summarizes a comparison of MnFe2O4@PANI with other reported materials on the basis of their performance on the supercapacitor devices [28–30].",
-  "reason": "The evidence states that a comparison table exists but reports no comparative values and does not name which materials outperform which."
+  "reason": "The claim attributes to the cited paper a comparative result: that MnFe2O4@PANI has higher energy density than previously reported ferrite-based composites. The retrieved passages state only that Table S1 summarises such a comparison against other reported materials; they carry none of the values, name none of the competing materials, and state no direction of the comparison. The finding slot therefore cannot be assessed at all. The passages are silent rather than ambiguous — they point at a table that is not present in the retrieved text, so the comparison may well be reported in the paper and simply absent here."
 }
 ```
 
@@ -198,7 +228,7 @@ Evidence: *As can be seen from Fig. 5a, 10%MnFe2O4@PANI nanoflower gave the high
   "evidence_sufficiency": "sufficient",
   "confidence": "High",
   "supporting_span": "The steady decrease in specific capacitance of the composites with an increase in the concentrations of nanoparticle (>10 wt%) can be attributed to the obstructions in the conducting path created by the nanoparticles entrenched in the PANI matrix.",
-  "reason": "The paper tested the same loading range and reports a maximum at 10 wt% followed by a decrease, directly opposing a monotonic rise."
+  "reason": "The claim attributes to the cited paper a monotonic rise in specific capacitance with ferrite loading, across 2.5-50 wt% in MnFe2O4@PANI nanoflowers. The retrieved passages report measurements over that same material and loading range and give the opposite trend: 10 wt% gives the highest specific capacitance, followed by 20 wt% and then 50 wt%, with a steady decrease above 10 wt% attributed to obstruction of the conducting path. The finding is contradicted inside the territory the claim asserts — the scope matches exactly, which is what makes this a contradiction rather than a scope failure."
 }
 ```
 
@@ -218,7 +248,7 @@ Evidence: *...electrodes were examined by cyclic voltammetry (CV) in the potenti
   "evidence_sufficiency": "partial",
   "confidence": "High",
   "supporting_span": "electrodes were examined by cyclic voltammetry (CV) in the potential window of -0.1 to +1.0 V vs. Ag/AgCl at a scan rate of 50mV/s in 1M H2SO4 to see the redox behaviour of the electrode",
-  "reason": "The opposing loading trend was measured in 1M H2SO4; since no neutral electrolyte was tested, this is a scope failure rather than a contradiction."
+  "reason": "The claim attributes to the cited paper an improvement in specific capacitance with rising ferrite loading, in MnFe2O4@PANI electrodes measured in neutral aqueous electrolyte. The retrieved passages report cyclic voltammetry in 1M H2SO4 — an acidic electrolyte — and there find the opposite trend, a steady decrease above 10 wt%. No measurement in neutral electrolyte appears anywhere in the passages, so the scope slot fails: the evidence examined none of the conditions the claim covers. That is what makes this a scope failure and not a contradiction; a result under conditions the claim never asserted cannot contradict it."
 }
 ```
 
@@ -238,7 +268,7 @@ Evidence: *The 10%MnFe2O4@PANI electrode showed a specific capacitance of 623 F/
   "evidence_sufficiency": "sufficient",
   "confidence": "High",
   "supporting_span": "This could be attributed to the fluffy nanoflower morphology of polyaniline, which increased the surface area for better penetration of electrolytic ions into the surface of the electrode.",
-  "reason": "The paper offers the morphology as one possible attribution, not a demonstrated cause; the claim states it as the reason for the measured value."
+  "reason": "The claim attributes to the cited paper a causal explanation: that the nanoflower morphology of the polyaniline is the reason the composite reaches 623 F/g. The retrieved passages do report that value for the 10%MnFe2O4@PANI electrode, and do link it to the fluffy nanoflower morphology increasing surface area for electrolyte ion penetration — but as an attribution hedged \"could be attributed to\", not a demonstrated cause. Material and measurement conditions match exactly, so finding and scope both hold; strength alone falls short, because the claim states as the reason what the paper offers as one possible explanation."
 }
 ```
 
@@ -276,7 +306,7 @@ Three contrasts are worth studying before you judge.
 
 ## Input
 
-Now apply Steps 1–5 to this claim and evidence. Return ONLY the JSON object.
+Now apply Steps 1–6 to this claim and evidence. Return ONLY the JSON object.
 
 {{CONTEXT_BLOCK}}**Claim:**
 {{CLAIM}}

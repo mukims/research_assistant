@@ -75,7 +75,7 @@ Tab 1 is the dedicated engine for auditing citations in published research paper
 
 | Toggle | Default | What It Does | When to Change |
 |---|---|---|---|
-| **Audit citations** | `ON` | Evaluates every in-text citation in the uploaded seed paper against the full text of the downloaded references using Rubric V1.5. | Turn `OFF` if you only want literature ingestion and synthesis, skipping citation checking. |
+| **Audit citations** | `ON` | Evaluates every in-text citation in the uploaded seed paper against the full text of the downloaded references using Rubric V1.6. | Turn `OFF` if you only want literature ingestion and synthesis, skipping citation checking. |
 | **Synthesize answer** | `ON` | Generates a structured Map-Reduce synthesis of the shortlisted papers at the end of the run. | Turn `OFF` if you only want to download and index literature without generating a summary. |
 | **Force re-run** | `OFF` | Bypasses cached seed papers and re-fetches all references from scratch. | Turn `ON` if you modified pipeline parameters or want to refresh cached web downloads. |
 | **Analyse figures** | `OFF` | Passes every figure and table crop through the Vision-Language Model (`gemma4:e2b` or Gemini) to generate descriptive text chunks. | Turn `ON` when visual diagrams or charts are vital for synthesis and chat. *(Note: Adds ~30–60s per figure on CPU).* |
@@ -161,7 +161,7 @@ Use Tab 3 to take an un-cited or draft manuscript and execute a two-stage attrib
 │  Upload manuscript (.txt) or paste text ──▶ [ Cite the draft ] ──▶ Fully cited text    │
 │                                                                                        │
 │                              Stage 2: Rigorous Audit (Agent 8)                         │
-│  [ Verify citations ] ──▶ 5 Metric Tiles ──▶ Rubric V1.5 Slot Report ──▶ Download .md │
+│  [ Verify citations ] ──▶ 5 Metric Tiles ──▶ Rubric V1.6 Slot Report ──▶ Download .md │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -184,7 +184,7 @@ Once a draft is cited, verify that every cited source actually backs up its assi
 1. **Click "Verify citations"**:
    - Agent 8 extracts every `(claim, \cite{key})` pair.
    - Retrieves the cited paper's chunks (strictly excluding AI-generated figure descriptions).
-   - Evaluates the claim against evidence using **Judgement Rubric V1.5**:
+   - Evaluates the claim against evidence using **Judgement Rubric V1.6**:
      * **Finding Slot**: Does the source report the asserted physical effect or outcome?
      * **Scope Slot**: Does the system, temperature, material, or condition match?
      * **Strength Slot**: Is the claim's certainty warranted (e.g. *proves* vs *suggests*)?
