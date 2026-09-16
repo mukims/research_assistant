@@ -47,6 +47,7 @@ from research_assistant.config import (
     JUDGEMENT_TOP_K,
     PULLED_PDFS_DIR,
     RAW_DIR,
+    CITATION_AUDIT_CONTEXTUALIZE_QUERIES,
 )
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
@@ -342,6 +343,12 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             quality = claim_quality(claim_text)
             context = sentence_context(display, s_idx)
 
+            sent_refs = []
+            for m in tokens:
+                m_cite = cites[m]
+                m_ref = m_cite["ref"] or _unknown_ref(m_cite["target"], m_cite["txt"])
+                sent_refs.append(m_ref)
+
             for n in tokens:
                 cite = cites[n]
                 resolved = cite["ref"] is not None
@@ -374,6 +381,7 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                     "sentence_index": s_idx,
                     "paragraph_id": p_id,
                     "paragraph_index": p_idx,
+                    "sentence_refs": sent_refs,
                 })
 
         p_unique_refs = list(p_refs_dict.values())
@@ -452,6 +460,93 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
     return None
 
 
+def contextualize_citation_queries(claims: list[dict], model: str | None = None) -> None:
+    """Batch-contextualize search queries for claims using paragraph context.
+
+    Groups claims by paragraph and invokes LLM to formulate self-contained, keyword-rich
+    queries that resolve pronouns ('this approach', 'they', 'such methods') into explicit
+    technical concepts. Updates each claim in-place with 'search_query'.
+    """
+    if not claims:
+        return
+
+    def _fallback_query(c: dict) -> str:
+        ref = c.get("ref") or {}
+        ref_title = ref.get("title") or ""
+        authors = ref.get("authors") or []
+        first_author = authors[0] if authors else ""
+        year = str(ref.get("year") or "")
+        claim = c.get("claim") or ""
+        keywords = [t for t in (first_author, year, ref_title) if t]
+        if keywords:
+            return f"{' '.join(keywords)}: {claim}"
+        return claim
+
+    if not CITATION_AUDIT_CONTEXTUALIZE_QUERIES:
+        for c in claims:
+            if not c.get("search_query"):
+                c["search_query"] = _fallback_query(c)
+        return
+
+    by_paragraph = {}
+    for c in claims:
+        p_id = c.get("paragraph_id") or "p_0"
+        by_paragraph.setdefault(p_id, []).append(c)
+
+    from research_assistant.shared.llm import chat
+
+    for p_id, p_claims in by_paragraph.items():
+        unqueried = [c for c in p_claims if not c.get("search_query")]
+        if not unqueried:
+            continue
+
+        context_text = unqueried[0].get("context") or unqueried[0].get("sentence") or ""
+        claim_entries = []
+        for idx, c in enumerate(unqueried):
+            ref = c.get("ref") or {}
+            ref_str = f"{', '.join((ref.get('authors') or [])[:2])} ({ref.get('year') or 'n.d.'}) - '{ref.get('title') or ''}'"
+            claim_entries.append(
+                f"[{idx}] Cited Reference: {ref_str}\n    Claim Sentence: \"{c.get('claim', '')}\""
+            )
+
+        prompt = (
+            "You are a scientific retrieval assistant. For each citation claim extracted from the "
+            "paragraph below, generate a focused, standalone search query to find the supporting "
+            "passage in the cited paper.\n\n"
+            "Rules:\n"
+            "1. Resolve pronouns ('this method', 'they', 'the authors', 'this result') to the specific "
+            "technique, theory, or findings described in the paragraph.\n"
+            "2. Include the cited author's name, publication year, and essential domain keywords.\n"
+            "3. Keep each query concise (10-25 words), focused on concrete technical search terms.\n"
+            "4. Return ONLY a valid JSON array of strings in the exact same order as the inputs, e.g.:\n"
+            '["query for 0", "query for 1"]\n\n'
+            f"Paragraph Context:\n\"\"\"\n{context_text}\n\"\"\"\n\n"
+            f"Citations to Contextualize:\n" + "\n".join(claim_entries) + "\n\n"
+            "JSON array of queries:"
+        )
+
+        try:
+            res = chat([{"role": "user", "content": prompt}], model=model, temperature=0.0)
+            raw = res.content.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and len(parsed) == len(unqueried):
+                for c, q in zip(unqueried, parsed):
+                    if isinstance(q, str) and len(q.strip()) > 5:
+                        c["search_query"] = q.strip()
+                    else:
+                        c["search_query"] = _fallback_query(c)
+                continue
+        except Exception as exc:
+            logger.debug("LLM query contextualization failed for paragraph %s: %s", p_id, exc)
+
+        for c in unqueried:
+            if not c.get("search_query"):
+                c["search_query"] = _fallback_query(c)
+
+
 def _judge_claim_entry(
     item: dict,
     collection,
@@ -469,10 +564,12 @@ def _judge_claim_entry(
     )
 
     retrieve_k = max(top_k, escalate_k if escalate_k > top_k else 0)
+    search_query = item.get("search_query") or item["claim"]
+    item["search_query"] = search_query
 
     try:
         hits = hybrid_search(
-            item["claim"],
+            search_query,
             collection,
             bm25,
             texts,
@@ -506,8 +603,13 @@ def _judge_claim_entry(
     _provenance(top_k)
     item["escalated"] = False
 
+    claim_context = item.get("context")
+    if item.get("section") and claim_context and not str(claim_context).startswith("[Section:"):
+        sec_header = f"[Section: {str(item['section']).replace('_', ' ').title()}]\n"
+        claim_context = f"{sec_header}{claim_context}"
+
     try:
-        verdict = _judge_once(item["claim"], item["evidence"], context=item.get("context"))
+        verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
         if escalate_k and len(hits) > top_k and needs_escalation(verdict):
             item["first_judgement"] = verdict.get("judgement")
             item["evidence"] = assemble_evidence(
@@ -515,7 +617,7 @@ def _judge_claim_entry(
             )
             _provenance(escalate_k)
             item["escalated"] = True
-            verdict = _judge_once(item["claim"], item["evidence"], context=item.get("context"))
+            verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
 
         item["outcome"] = "judged"
         for k in REQUIRED_FIELDS:
@@ -982,67 +1084,46 @@ def audit_seed_citations(
 
         missing_count = len(missing_p_refs)
         paywall_ratio = (missing_count / total_p_refs) if total_p_refs > 0 else 0.0
+        for c in p_claims:
+            ref = c.get("ref")
+            dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
+            is_dl = bool(dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]))
+            c["paragraph_missing_refs"] = missing_p_refs
+            c["paywall_ratio"] = paywall_ratio
 
-        if paywall_ratio > 0.50:
-            # Mark entire paragraph and all claims as deferred
-            for c in p_claims:
-                ref = c.get("ref")
-                dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
-                is_dl = bool(dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]))
-                if is_dl:
-                    c["document"] = os.path.basename(dl_entry["path"])
-                    c["citation_source"] = (
-                        dl_entry.get("title")
-                        or dl_entry.get("raw_reference")
-                        or dl_entry.get("key")
-                    )
-                c["downloaded"] = is_dl
-                c["outcome"] = "deferred_paywalled"
-                c["judgement"] = "Deferred (pending paywalled evidence)"
-                if is_dl:
-                    c["reason"] = (
-                        f"Evaluation deferred: Although this reference is in the corpus, "
-                        f"{missing_count}/{total_p_refs} references cited in this paragraph are missing (>50% paywalled)."
-                    )
-                else:
-                    c["reason"] = (
-                        f"Evaluation deferred: {missing_count}/{total_p_refs} references cited in this "
-                        f"paragraph are missing from the corpus (>50% paywalled)."
-                    )
-                c["paragraph_missing_refs"] = missing_p_refs
-                c["paywall_ratio"] = paywall_ratio
-                deferred_claims.append(c)
-        else:
-            # Paragraph is under threshold: evaluate individual claims
-            for c in p_claims:
-                ref = c.get("ref")
-                dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
-                if dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]):
-                    c["downloaded"] = True
-                    c["document"] = os.path.basename(dl_entry["path"])
-                    c["citation_source"] = (
-                        dl_entry.get("title")
-                        or dl_entry.get("raw_reference")
-                        or dl_entry.get("key")
-                    )
-                    c["paragraph_missing_refs"] = missing_p_refs
-                    c["paywall_ratio"] = paywall_ratio
-                    downloaded_claims.append(c)
-                else:
-                    c["downloaded"] = False
-                    c["outcome"] = "not_downloaded"
-                    c["judgement"] = "Not downloaded"
-                    c["reason"] = "Reference PDF was not available or could not be downloaded."
-                    c["paragraph_missing_refs"] = missing_p_refs
-                    c["paywall_ratio"] = paywall_ratio
-                    undownloaded_claims.append(c)
+            # Identify if other references cited in this exact same sentence are missing from the corpus
+            curr_key = (ref.get("xml_id") or normalise_doi(ref.get("doi")) or ref.get("title")) if ref else None
+            compound_missing = []
+            for s_ref in c.get("sentence_refs", []):
+                s_key = s_ref.get("xml_id") or normalise_doi(s_ref.get("doi")) or s_ref.get("title")
+                if s_key and s_key != curr_key:
+                    s_dl = _match_downloaded_paper(s_ref, seed_pdf_name, downloaded_manifest)
+                    if not (s_dl and s_dl.get("path") and os.path.exists(s_dl["path"])):
+                        compound_missing.append(s_ref)
+            if compound_missing:
+                c["compound_missing_refs"] = compound_missing
+
+            if is_dl:
+                c["downloaded"] = True
+                c["document"] = os.path.basename(dl_entry["path"])
+                c["citation_source"] = (
+                    dl_entry.get("title")
+                    or dl_entry.get("raw_reference")
+                    or dl_entry.get("key")
+                )
+                downloaded_claims.append(c)
+            else:
+                c["downloaded"] = False
+                c["outcome"] = "not_downloaded"
+                c["judgement"] = "Not downloaded"
+                c["reason"] = "Reference PDF was not available or could not be downloaded."
+                undownloaded_claims.append(c)
 
     logger.info(
-        "Found %d in-text citation claims (%d cite downloaded references, %d not in corpus, %d deferred paywalled).",
+        "Found %d in-text citation claims (%d cite downloaded references, %d not in corpus).",
         len(claims),
         len(downloaded_claims),
         len(undownloaded_claims),
-        len(deferred_claims),
     )
 
     ordered, cluster_skipped = prioritise_claims(downloaded_claims)
@@ -1051,6 +1132,9 @@ def audit_seed_citations(
     aborted = None
 
     if claims_to_judge:
+        pipeline_status.update_progress(detail="Contextualizing search queries from paragraph context")
+        contextualize_citation_queries(claims_to_judge)
+
         if search_resources is None:
             from research_assistant.shared.db import load_search_resources
 
@@ -1169,11 +1253,14 @@ def get_deferred_missing_references(audit_report: dict) -> list[dict]:
         return []
 
     results = audit_report.get("results", [])
-    deferred_results = [r for r in results if r.get("outcome") == "deferred_paywalled"]
+    missing_results = [
+        r for r in results
+        if r.get("outcome") in ("deferred_paywalled", "not_downloaded") or not r.get("downloaded")
+    ]
 
     missing_map = {}
 
-    for item in deferred_results:
+    for item in missing_results:
         sent = item.get("sentence") or item.get("claim") or ""
         missing_refs = item.get("paragraph_missing_refs") or []
         if not missing_refs and item.get("ref"):
@@ -1206,6 +1293,9 @@ def get_deferred_missing_references(audit_report: dict) -> list[dict]:
                 missing_map[key]["affected_claims"].append(sent)
 
     return list(missing_map.values())
+ 
+ 
+get_missing_references = get_deferred_missing_references
 
 
 def save_and_register_reference_pdf(
@@ -1522,22 +1612,24 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         "- **Scope Slot**: Did the cited paper test the same system, material, conditions, or environment?",
         "- **Strength Slot**: Does the evidence establish causation or generality, or only an isolated observation or hypothesis?",
         "",
-        "### Paragraph-Level Evidence Threshold & Deferral Policy",
+        "### Paragraph Context & Compound Citation Policy",
         "",
-        "To prevent spurious contradictions or premature negative verdicts when key literature is missing, citation verification operates on paragraph context:",
-        "- If **more than 50% (>50%)** of the unique references cited in a paragraph are unavailable (missing/paywalled), evaluation of all claims in that paragraph is **deferred** (`Deferred (pending paywalled evidence)`).",
-        "- When **50% or more** of a paragraph's cited references are present in the corpus, claims citing available references are evaluated against the 3-slot rubric, while claims citing missing references are marked as `Not downloaded`.",
+        "Every in-text citation whose reference PDF is available in the local library is audited directly against the 3-slot rubric. When a sentence cites multiple references and some are missing from the corpus, the audit notes that the available reference may only support part of the compound assertion. Citations for unavailable references are cataloged in Section 3 so they can be uploaded directly.",
         "",
         "---",
         "",
     ])
 
-    deferred_missing = get_deferred_missing_references(report)
-    lines.append(f"## 3. Missing References Required for Deferred Paragraphs ({len(deferred_missing)})\n")
-    if deferred_missing:
-        lines.append("| Reference / Title | Authors | Year | DOI | Required By Deferred Claim(s) |")
+    missing_refs = get_deferred_missing_references(report)
+    if totals.get("deferred_paywalled", 0) > 0:
+        lines.append(f"## 3. Missing References Required for Deferred Paragraphs ({len(missing_refs)})\n")
+    else:
+        lines.append(f"## 3. Missing References Needed for Full Verification ({len(missing_refs)})\n")
+    if missing_refs:
+        req_col = "Required By Deferred Claim(s)" if totals.get("deferred_paywalled", 0) > 0 else "Required By Claim(s)"
+        lines.append(f"| Reference / Title | Authors | Year | DOI | {req_col} |")
         lines.append("| :--- | :--- | :--- | :--- | :--- |")
-        for ref in deferred_missing:
+        for ref in missing_refs:
             ref_num = f"[{ref.get('index') or '?'}]"
             title_s = f"{ref_num} {ref.get('title') or 'Unknown Title'}"
             authors_list = ref.get("authors", [])
@@ -1556,7 +1648,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
             lines.append(f"| {title_s} | {auth_s} | {yr_s} | {doi_s} | {claims_s} |")
         lines.append("")
     else:
-        lines.append("*No paragraphs were deferred; all citations were either available or under the 50% paywall threshold.*\n")
+        lines.append("*All references cited in the paper are available in the local corpus.*\n")
 
     needs_review = [
         r for r in results

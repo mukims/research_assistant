@@ -277,8 +277,8 @@ class TestSeedAudit(unittest.TestCase):
         self.assertEqual(report["totals"]["downloaded"], 1)
         self.assertEqual(report["totals"]["judged"], 1)
         self.assertEqual(report["totals"]["Supports"], 1)
-        self.assertEqual(report["totals"]["deferred_paywalled"], 1)
-        self.assertEqual(report["totals"]["not_downloaded"], 0)
+        self.assertEqual(report["totals"]["deferred_paywalled"], 0)
+        self.assertEqual(report["totals"]["not_downloaded"], 1)
         self.assertIn("reliability", report["totals"])
         self.assertEqual(report["totals"]["reliability"]["high"], 1)
         self.assertEqual(report["totals"]["reliability"]["unresolved"], 1)
@@ -431,7 +431,7 @@ class TestSeedAudit(unittest.TestCase):
     def test_audit_seed_citations_deferral_ratio_greater_than_half(
         self, mock_manifest, mock_find_tei, mock_search, mock_judge
     ):
-        """Paragraph with paywall ratio > 0.50 (2/2 = 1.0) must be deferred, bypassing search & judge."""
+        """Paragraph with paywall ratio > 0.50 (2/2 = 1.0) marks missing claims as not_downloaded, bypassing search & judge."""
         tei_content = """<?xml version="1.0" encoding="UTF-8"?>
 <TEI xmlns="http://www.tei-c.org/ns/1.0">
     <teiHeader><fileDesc><titleStmt><title>Paywall Test</title></titleStmt><sourceDesc><p></p></sourceDesc></fileDesc></teiHeader>
@@ -472,15 +472,12 @@ class TestSeedAudit(unittest.TestCase):
             self.assertEqual(t["downloaded"], 0)
             self.assertEqual(t["judged"], 0)
             self.assertEqual(t["Supports"], 0)
-            self.assertEqual(t["not_downloaded"], 0)
-            self.assertEqual(t["deferred_paywalled"], 2)
+            self.assertEqual(t["not_downloaded"], 2)
+            self.assertEqual(t["deferred_paywalled"], 0)
 
             for res in report["results"]:
-                self.assertEqual(res["outcome"], "deferred_paywalled")
-                self.assertEqual(res["judgement"], "Deferred (pending paywalled evidence)")
-                self.assertIn("Evaluation deferred:", res["reason"])
-                self.assertIn("2/2", res["reason"])
-                self.assertIn(">50% paywalled", res["reason"])
+                self.assertEqual(res["outcome"], "not_downloaded")
+                self.assertEqual(res["judgement"], "Not downloaded")
                 self.assertEqual(res["paywall_ratio"], 1.0)
                 self.assertEqual(len(res["paragraph_missing_refs"]), 2)
                 missing_xml_ids = {r["xml_id"] for r in res["paragraph_missing_refs"]}
@@ -666,10 +663,10 @@ class TestSeedAudit(unittest.TestCase):
             t = report["totals"]
             self.assertEqual(t["total"], 4)
             self.assertEqual(t["downloaded"], 2)
-            self.assertEqual(t["judged"], 1)
-            self.assertEqual(t["Supports"], 1)
-            self.assertEqual(t["deferred_paywalled"], 3)
-            self.assertEqual(t["not_downloaded"], 0)
+            self.assertEqual(t["judged"], 2)
+            self.assertEqual(t["Supports"], 2)
+            self.assertEqual(t["deferred_paywalled"], 0)
+            self.assertEqual(t["not_downloaded"], 2)
 
             # Paragraph 1 claim is evaluated
             p1_items = [r for r in report["results"] if r.get("paragraph_id") == "p_evaluated"]
@@ -677,16 +674,22 @@ class TestSeedAudit(unittest.TestCase):
             self.assertEqual(p1_items[0]["outcome"], "judged")
             self.assertEqual(p1_items[0]["judgement"], "Supports")
 
-            # Paragraph 2 claims are ALL deferred (including the one citing b0, because p2 ratio = 2/3 = 0.67 > 0.50)
+            # Paragraph 2: claim citing b0 is evaluated directly; missing references are not_downloaded
             p2_items = [r for r in report["results"] if r.get("paragraph_id") == "p_deferred"]
             self.assertEqual(len(p2_items), 3)
-            for item in p2_items:
-                self.assertEqual(item["outcome"], "deferred_paywalled")
-                self.assertEqual(item["judgement"], "Deferred (pending paywalled evidence)")
+            p2_b0 = [r for r in p2_items if r.get("ref", {}).get("xml_id") == "b0"]
+            self.assertEqual(len(p2_b0), 1)
+            self.assertEqual(p2_b0[0]["outcome"], "judged")
+            self.assertEqual(p2_b0[0]["judgement"], "Supports")
 
-            # Retrieval and LLM should only be invoked for Paragraph 1 (1 call)
-            self.assertEqual(mock_search.call_count, 1)
-            self.assertEqual(mock_judge.call_count, 1)
+            p2_missing = [r for r in p2_items if r.get("ref", {}).get("xml_id") in ("b1", "b2")]
+            self.assertEqual(len(p2_missing), 2)
+            for item in p2_missing:
+                self.assertEqual(item["outcome"], "not_downloaded")
+
+            # Retrieval and LLM should be invoked for both available claims (2 calls)
+            self.assertEqual(mock_search.call_count, 2)
+            self.assertEqual(mock_judge.call_count, 2)
         finally:
             os.unlink(tei_file)
             os.unlink(dummy_pdf_path)
@@ -831,7 +834,7 @@ class TestSeedAudit(unittest.TestCase):
             self.assertGreater(t["Does not support"], 0)
             self.assertGreater(t["Unclear / insufficient evidence"], 0)
             self.assertGreater(t["not_downloaded"], 0)
-            self.assertGreater(t["deferred_paywalled"], 0)
+            self.assertEqual(t["deferred_paywalled"], 0)
         finally:
             os.unlink(tei_file)
             os.unlink(dummy_pdf_path)
@@ -1897,3 +1900,141 @@ class TestManifestPathPortability(unittest.TestCase):
         self.assertEqual(manifest["doi:10.1/y"]["path"], "/old/mount/data/pulled_pdfs/doi_10.1_y.pdf")
         self.assertNotIn("recorded_path", manifest["doi:10.1/y"])
         self.assertIsNone(manifest["doi:10.1/z"]["path"])
+
+
+class TestQueryContextualizationAndCompoundCitations(unittest.TestCase):
+    """Verify paragraph-anchored query contextualization and compound citation missing refs."""
+
+    def test_contextualize_citation_queries_fallback(self):
+        from research_assistant.shared.seed_audit import contextualize_citation_queries
+
+        claims = [
+            {
+                "claim": "However, this method produces edge distortion.",
+                "context": "Settnes et al. (2015) introduced continuous wavelet transforms. «However, this method produces edge distortion.»",
+                "paragraph_id": "p_0",
+                "ref": {
+                    "authors": ["Settnes", "Smith"],
+                    "year": 2015,
+                    "title": "Wavelet Transforms for Seismic Imaging",
+                },
+            }
+        ]
+
+        with patch("research_assistant.shared.seed_audit.CITATION_AUDIT_CONTEXTUALIZE_QUERIES", False):
+            contextualize_citation_queries(claims)
+        self.assertIn("search_query", claims[0])
+        q = claims[0]["search_query"]
+        self.assertIn("Settnes", q)
+        self.assertIn("2015", q)
+        self.assertIn("Wavelet Transforms", q)
+        self.assertIn("edge distortion", q)
+
+    @patch("research_assistant.shared.llm.chat")
+    def test_contextualize_citation_queries_llm(self, mock_chat):
+        from research_assistant.shared.seed_audit import contextualize_citation_queries
+        from research_assistant.shared.llm import ChatResult
+
+        mock_chat.return_value = ChatResult(
+            content='["Settnes 2015 continuous wavelet transforms edge distortion boundary"]'
+        )
+
+        claims = [
+            {
+                "claim": "However, this method produces edge distortion.",
+                "context": "Settnes et al. (2015) introduced continuous wavelet transforms. «However, this method produces edge distortion.»",
+                "paragraph_id": "p_0",
+                "ref": {
+                    "authors": ["Settnes"],
+                    "year": 2015,
+                    "title": "Wavelet Transforms",
+                },
+            }
+        ]
+
+        with patch("research_assistant.shared.seed_audit.CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True):
+            contextualize_citation_queries(claims)
+
+        self.assertEqual(
+            claims[0]["search_query"],
+            "Settnes 2015 continuous wavelet transforms edge distortion boundary",
+        )
+
+    def test_compound_missing_refs_detection(self):
+        """When a sentence cites multiple papers and one is missing, compound_missing_refs is set."""
+        from research_assistant.shared.seed_audit import audit_seed_citations
+
+        tei_content = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+    <teiHeader><fileDesc><titleStmt><title>Compound Test</title></titleStmt><sourceDesc><p></p></sourceDesc></fileDesc></teiHeader>
+    <text>
+        <body>
+            <p xml:id="p_compound">Continuous wavelets and complex trace analysis enhance fault resolution <ref type="bibr" target="#b1">[1]</ref> <ref type="bibr" target="#b2">[2]</ref>.</p>
+        </body>
+        <back>
+            <div type="references">
+                <listBibl>
+                    <biblStruct xml:id="b1">
+                        <analytic><title level="a" type="main">Wavelet Transform Analysis</title></analytic>
+                        <monogr><imprint><date when="2015">2015</date></imprint></monogr>
+                    </biblStruct>
+                    <biblStruct xml:id="b2">
+                        <analytic><title level="a" type="main">Complex Trace Attributes</title></analytic>
+                        <monogr><imprint><date when="1984">1984</date></imprint></monogr>
+                    </biblStruct>
+                </listBibl>
+            </div>
+        </back>
+    </text>
+</TEI>"""
+        with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
+            tf.write(tei_content)
+            tei_file = tf.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".pdf", delete=False) as dummy_pdf:
+            dummy_pdf_path = dummy_pdf.name
+
+        try:
+            with patch("research_assistant.shared.seed_audit.find_tei_for_seed", return_value=tei_file), \
+                 patch("research_assistant.shared.seed_audit._load_downloaded_manifest") as mock_manifest, \
+                 patch("research_assistant.shared.seed_audit.hybrid_search") as mock_search, \
+                 patch("research_assistant.shared.seed_audit._judge_once") as mock_judge:
+
+                # Only b1 is downloaded, b2 is missing
+                mock_manifest.return_value = {
+                    "b1": {
+                        "key": "b1",
+                        "path": dummy_pdf_path,
+                        "title": "Wavelet Transform Analysis",
+                        "xml_id": "b1",
+                        "cited_by": "seed.pdf",
+                    }
+                }
+                mock_search.return_value = [{"text": "Wavelet transform improves fault detection.", "metadata": {"document": os.path.basename(dummy_pdf_path)}}]
+                mock_judge.return_value = {
+                    "judgement": "Supports",
+                    "confidence": "High",
+                    "supporting_span": "Wavelet transform improves fault detection.",
+                    "reason": "Direct support",
+                    "slots": {"finding": "Supports", "scope": "Supports", "strength": "Supports"},
+                    "evidence_sufficiency": "sufficient",
+                }
+
+                fake_resources = (MagicMock(), MagicMock(), [], [])
+                report = audit_seed_citations("seed.pdf", search_resources=fake_resources)
+
+                self.assertNotIn("error", report)
+                judged_claims = [r for r in report["results"] if r.get("outcome") == "judged"]
+                self.assertEqual(len(judged_claims), 1)
+                self.assertEqual(judged_claims[0]["ref"]["xml_id"], "b1")
+
+                self.assertIn("compound_missing_refs", judged_claims[0])
+                missing_xml_ids = [m["xml_id"] for m in judged_claims[0]["compound_missing_refs"]]
+                self.assertIn("b2", missing_xml_ids)
+
+                missing_claims = [r for r in report["results"] if r.get("outcome") == "not_downloaded"]
+                self.assertEqual(len(missing_claims), 1)
+                self.assertEqual(missing_claims[0]["ref"]["xml_id"], "b2")
+        finally:
+            os.unlink(tei_file)
+            os.unlink(dummy_pdf_path)

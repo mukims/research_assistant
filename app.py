@@ -670,6 +670,20 @@ def _render_seed_citation_audit(final):
                 if ref_info.get("doi"):
                     st.caption(f"DOI: [{ref_info['doi']}](https://doi.org/{ref_info['doi']})")
 
+                if item.get("compound_missing_refs"):
+                    c_missing = item["compound_missing_refs"]
+                    c_names = [m.get("title") or f"[{m.get('index') or '?'}]" for m in c_missing if isinstance(m, dict)]
+                    st.warning(
+                        f"⚠️ **Compound Citation:** This sentence also cites {len(c_missing)} reference(s) missing from the library: "
+                        + "; ".join(c_names[:2])
+                        + (" et al." if len(c_names) > 2 else "")
+                        + ". This paper was evaluated independently, but may only support part of the compound claim.",
+                        icon="⚠️",
+                    )
+
+                if item.get("search_query") and item.get("outcome") == "judged":
+                    st.caption(f"🔎 **Retrieval Query:** *{item['search_query']}*")
+
                 if outcome == "deferred_paywalled":
                     st.warning(
                         "⏳ **Evaluation Deferred (Pending Evidence)**: More than 50% of the cited references "

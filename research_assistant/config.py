@@ -227,6 +227,8 @@ JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS",
 # Ollama would truncate — silently, from the tail, which is exactly where the
 # worked examples live. Ignored by the openai backend.
 JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": 4096}
+CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
+
 
 # ─── Search Tunables ──────────────────────────────────────────────────────────
 RRF_K            = 60               # Reciprocal Rank Fusion constant
