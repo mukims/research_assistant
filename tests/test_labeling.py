@@ -18,6 +18,26 @@ def _cand(**over):
     return c
 
 
+class TestLabellerGuidance(unittest.TestCase):
+    """The rule the labelling pass has to state on screen.
+
+    Of 19 cases labelled on 2026-09-16, six overrode the judge and every one
+    of them turned "Unclear" into a decisive verdict — three into Supports
+    against evidence that never mentioned the claim's subject. The labeller
+    was deciding whether the cited paper plausibly supports the claim rather
+    than whether these passages do. That is Step 4 of the rubric, and the
+    script never said it.
+    """
+
+    def test_the_prompt_tells_the_operator_to_judge_the_evidence_not_the_paper(self):
+        from pathlib import Path
+        src = Path("scripts/judge_label.py").read_text(encoding="utf-8")
+        self.assertIn("these passages", src.lower())
+        self.assertIn("not whether the paper", src.lower())
+        # and it must offer the honest way out when they cannot tell
+        self.assertIn("Unclear", src)
+
+
 class TestIds(unittest.TestCase):
     def test_next_id_counts_past_existing(self):
         self.assertEqual(lb.next_id(set(), "h"), "h_001")

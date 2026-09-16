@@ -6,6 +6,12 @@ Shows claim and evidence; asks for s/p/c/d/u (x skips, q quits); for a
 Supports, offers to record a negated claim (becomes a Contradicts case);
 then reveals what the judge said at harvest time. Every label is written
 immediately to research_assistant/judgement/cases/human.jsonl.
+
+The label is a verdict on THESE PASSAGES, not on the cited paper. A pass on
+2026-09-16 lost that distinction: six of nineteen labels overrode the judge
+and every one turned "Unclear" into a decisive verdict, three of them into
+Supports against passages that never mentioned the claim's subject. A set
+built that way trains and scores the judge to stop hedging when it should.
 """
 
 import argparse
@@ -28,6 +34,18 @@ def _write_cases(path, cases):
             fh.write(json.dumps(c, ensure_ascii=False) + "\n")
 
 
+RULE = """\
+Label the EVIDENCE, not the paper.
+  The question is whether the passages shown support the claim — not whether
+  the cited paper, somewhere, does. If the passages are off-topic or too
+  fragmentary to tell, that is u (Unclear), even when you are confident the
+  paper would back the claim. "Does not support" says these passages report
+  the opposite or are silent on a matter they clearly cover; it does not mean
+  "the claim's subject is missing here" — that is u as well.
+  When in doubt, u. x skips.
+"""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", default=DEFAULT_CANDIDATES)
@@ -39,6 +57,7 @@ def main():
     cases = load_cases([args.out])
     todo = lb.unlabelled(candidates, cases)
     print(f"{len(todo)} candidate(s) to label, {len(cases)} already in {args.out}\n")
+    print(RULE)
 
     for i, cand in enumerate(todo, 1):
         print("=" * 78)
@@ -48,6 +67,7 @@ def main():
         if cand.get("context"):
             print("CONTEXT (what the judge saw around the claim):\n" + textwrap.fill(cand["context"], 78) + "\n")
         key = input(
+            "Does THIS EVIDENCE support the claim? (not whether the paper does)\n"
             "verdict [s=Supports p=Partially c=Contradicts d=Does not support u=Unclear | x=skip q=quit]: "
         ).strip().lower()
         if key == "q":
