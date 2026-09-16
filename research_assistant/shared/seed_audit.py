@@ -54,6 +54,7 @@ from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.search import expand_neighbours, hybrid_search
 from research_assistant.shared.source_key import normalise_doi
+from research_assistant.shared.tei_structure import artifact_registry, paragraph_artifacts, section_breadcrumb
 
 logger = get_logger("seed_audit")
 
@@ -227,6 +228,8 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         - paragraph_id: identifier of the body paragraph (e.g. "p_0" or xml:id)
         - paragraph_index: 0-based integer index of the body paragraph
         - paragraph_refs: list of unique evidential resolved reference dicts cited in this paragraph
+        - section_heading: breadcrumb of numbered headings ("2. Results > 2.1. THz analysis"), "" if unknown
+        - artifacts: figures/tables the paragraph points at: [{id, kind, label, caption}]
     """
     if isinstance(tei_source, BeautifulSoup):
         soup = tei_source
@@ -301,6 +304,7 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         return []
 
     number_map = _build_number_map(body, bib_by_id)
+    registry = artifact_registry(soup)
 
     claims = []
     seen_pairs = set()
@@ -312,6 +316,8 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
 
         p_id = p.get("xml:id") or p.get("id") or f"p_{p_idx}"
         section = _paragraph_section(p)
+        heading = section_breadcrumb(p)
+        p_artifacts = paragraph_artifacts(p, registry)
 
         # Citations become period-free tokens; what the old placeholder
         # embedded lives in this table instead.
@@ -377,6 +383,8 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                     "claim_quality": quality,
                     "context": context,
                     "section": section,
+                    "section_heading": heading,
+                    "artifacts": p_artifacts,
                     "cite_count": len(tokens),
                     "sentence_index": s_idx,
                     "paragraph_id": p_id,

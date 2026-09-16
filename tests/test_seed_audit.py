@@ -2038,3 +2038,37 @@ class TestQueryContextualizationAndCompoundCitations(unittest.TestCase):
         finally:
             os.unlink(tei_file)
             os.unlink(dummy_pdf_path)
+
+
+STRUCTURED_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+    <teiHeader><fileDesc><titleStmt><title>Structured Seed</title></titleStmt><sourceDesc><p></p></sourceDesc></fileDesc></teiHeader>
+    <text>
+        <body>
+            <div><head n="2.">Results and Discussion</head><p xml:id="p_top">Top-level result text cites a paper <ref type="bibr" target="#b0">[1]</ref>.</p></div>
+            <div><head n="2.1.">Terahertz Spectral Analysis</head>
+                <p xml:id="p_fig">The photoconductivity enhancement in <ref type="figure" target="#fig_0">1b</ref> agrees with the covalent network model <ref type="bibr" target="#b0">[1]</ref>.</p>
+            </div>
+            <figure xml:id="fig_0"><head>Figure 1 .</head><label>1</label><figDesc>Figure 1. THz spectral analysis on MoS2 films and covalent networks.</figDesc></figure>
+        </body>
+        <back><div type="references"><listBibl>
+            <biblStruct xml:id="b0"><analytic><title level="a" type="main">Covalent MoS2 networks</title>
+                <author><persName><forename>A.</forename><surname>Gabbett</surname></persName></author>
+                <idno type="DOI">10.1002/adma.202211157</idno></analytic>
+                <monogr><title level="j">Adv. Mater.</title><imprint><date type="published" when="2023">2023</date></imprint></monogr></biblStruct>
+        </listBibl></div></back>
+    </text>
+</TEI>"""
+
+
+class TestClaimStructureFields(unittest.TestCase):
+    def test_claims_carry_breadcrumb_and_artifacts(self):
+        claims = extract_seed_citation_claims(BeautifulSoup(STRUCTURED_TEI_XML, "xml"))
+        by_p = {c["paragraph_id"]: c for c in claims}
+        self.assertEqual(by_p["p_top"]["section_heading"], "2. Results and Discussion")
+        self.assertEqual(by_p["p_top"]["artifacts"], [])
+        self.assertEqual(by_p["p_fig"]["section_heading"], "2. Results and Discussion > 2.1. Terahertz Spectral Analysis")
+        self.assertEqual([a["label"] for a in by_p["p_fig"]["artifacts"]], ["Fig. 1"])
+        self.assertTrue(by_p["p_fig"]["artifacts"][0]["caption"].startswith("Figure 1. THz spectral analysis"))
+        # The kind is what it was: prioritisation and the report still read it.
+        self.assertEqual(by_p["p_top"]["section"], "results")
