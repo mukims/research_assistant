@@ -183,6 +183,38 @@ class TestLiveJudgement(unittest.TestCase):
         self.assertEqual(failures, [], "\n".join(failures))
 
 
+class TestBackendSelection(unittest.TestCase):
+    """A key in the environment is a default, not an override: an operator who
+    sets LLM_BACKEND=ollama to run the audit on a local model must get the
+    local model, whether or not a Gemini key happens to be present."""
+
+    def _call(self, **config):
+        captured = {}
+
+        def fake_chat(messages, model=None, temperature=None, options=None, backend=None):
+            captured.update(model=model, backend=backend)
+            return types.SimpleNamespace(content=json.dumps(_reply()))
+
+        patches = [patch.object(judge_mod, k, v) for k, v in config.items()]
+        for p_ in patches:
+            p_.start(); self.addCleanup(p_.stop)
+        with patch.object(judge_mod, "chat", side_effect=fake_chat):
+            judge_mod.judge("claim", "evidence")
+        return captured
+
+    def test_a_gemini_key_alone_still_routes_to_gemini(self):
+        got = self._call(GEMINI_API_KEY="k", LLM_BACKEND="openai", JUDGEMENT_MODEL="gemini-3.5-flash-lite")
+        self.assertEqual((got["backend"], got["model"]), ("openai", "gemini-3.5-flash-lite"))
+
+    def test_an_explicit_ollama_backend_wins_over_the_key(self):
+        got = self._call(GEMINI_API_KEY="k", LLM_BACKEND="ollama", JUDGEMENT_MODEL="gemma4:e2b")
+        self.assertEqual((got["backend"], got["model"]), ("ollama", "gemma4:e2b"))
+
+    def test_no_key_leaves_the_choice_to_chat(self):
+        got = self._call(GEMINI_API_KEY=None, LLM_BACKEND="ollama", JUDGEMENT_MODEL=None)
+        self.assertEqual((got["backend"], got["model"]), (None, None))
+
+
 def _reply(finding="Supports", scope="Supports", strength="Not applicable", judgement="Supports",
             span="the sentence", confidence="High", sufficiency="sufficient"):
     return {

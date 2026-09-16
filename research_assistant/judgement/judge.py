@@ -18,6 +18,7 @@ from pathlib import Path
 
 from research_assistant.config import (
     GEMINI_API_KEY,
+    LLM_BACKEND,
     JUDGEMENT_MODEL,
     JUDGEMENT_OLLAMA_OPTIONS,
     JUDGEMENT_TEMPERATURE,
@@ -356,11 +357,15 @@ def judge(
 ) -> dict:
     """Verdict on whether *citation_evidence* supports *claim*.
 
-    When GEMINI_API_KEY is present, citation check is carried out by Gemini via
-    OpenAI-compatible endpoint unless an explicit backend/model is provided.
+    A Gemini key routes the judgement to Gemini's OpenAI-compatible endpoint —
+    but only as a default. An operator who sets LLM_BACKEND (to run the audit
+    on a local Ollama model, say) means it: a key left in the environment does
+    not quietly send the claims to a hosted API. config.LLM_BACKEND is already
+    "openai" whenever the key is present and nothing else was asked for.
     """
-    effective_backend = backend or ("openai" if GEMINI_API_KEY else None)
-    effective_model = model or JUDGEMENT_MODEL or ("gemini-3.5-flash-lite" if GEMINI_API_KEY else None)
+    effective_backend = backend or (LLM_BACKEND if GEMINI_API_KEY else None)
+    gemini = (effective_backend or LLM_BACKEND) == "openai" and GEMINI_API_KEY
+    effective_model = model or JUDGEMENT_MODEL or ("gemini-3.5-flash-lite" if gemini else None)
     result = chat(
         [{"role": "user", "content": build_prompt(claim, citation_evidence, context=context)}],
         model=effective_model,
