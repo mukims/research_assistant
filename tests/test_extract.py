@@ -95,7 +95,7 @@ class TestSectionKinds(unittest.TestCase):
             self.assertEqual(ex.normalise_section_kind(heading), kind, heading)
 
     def test_running_header_detection(self):
-        for h in ["(3 of 11)", "Odashima et al.", "12", "Adv. Mater. 2023, 35, 2211157"]:
+        for h in ["(3 of 11)", "Odashima et al.", "12", "Adv. Mater. 2023, 35, 2211157", "DOI: 10.1002/adma.202211157"]:
             self.assertTrue(ex.is_running_header(h), h)
         for h in ["Introduction", "2.1 Green's functions", "Results"]:
             self.assertFalse(ex.is_running_header(h), h)

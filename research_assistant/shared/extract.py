@@ -97,6 +97,7 @@ _RUNNING = [
     re.compile(r"\bet al\.?$", re.I),
     re.compile(r"^\d+$"),
     re.compile(r"\b(19|20)\d{2}\b.*\b\d{3,}\b"),      # "Adv. Mater. 2023, 35, 2211157"
+    re.compile(r"^\s*doi\s*:", re.I),                 # "DOI: 10.1002/adma.202211157" — Wiley's first-page header
 ]
 
 
