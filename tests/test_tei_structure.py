@@ -64,3 +64,35 @@ class TestSectionBreadcrumb(unittest.TestCase):
     def test_a_later_sibling_skips_the_page_header(self):
         self.assertEqual(ts.section_breadcrumb(_p(_soup(), "p5")),
                          "2. Results and Discussion > 2.2. Charge Transport")
+
+
+class TestArtifactRegistry(unittest.TestCase):
+    def test_labelled_and_headed_figures_are_registered_and_fragments_are_not(self):
+        reg = ts.artifact_registry(_soup())
+        self.assertEqual(sorted(reg["by_id"]), ["fig_0", "fig_2", "tab_0"])
+        self.assertEqual(sorted(reg["by_number"]), [("figure", 1), ("figure", 4), ("table", 2)])
+        self.assertEqual(reg["by_id"]["fig_0"]["label"], "Fig. 1")
+        self.assertEqual(reg["by_id"]["tab_0"], {"id": "tab_0", "kind": "table", "label": "Table 2", "caption": "Fit parameters."})
+
+    def test_caption_is_capped(self):
+        reg = ts.artifact_registry(_soup())
+        self.assertEqual(len(reg["by_id"]["fig_0"]["caption"]), ts.CAPTION_MAX_CHARS)
+        self.assertTrue(reg["by_id"]["fig_0"]["caption"].startswith("Figure 1. THz spectra of films."))
+
+    def test_no_body_is_empty(self):
+        reg = ts.artifact_registry(BeautifulSoup("<TEI/>", "xml"))
+        self.assertEqual(reg, {"by_id": {}, "by_number": {}})
+
+
+class TestParagraphArtifacts(unittest.TestCase):
+    def test_targeted_ref_untargeted_ref_and_text_mention_each_once(self):
+        s = _soup()
+        arts = ts.paragraph_artifacts(_p(s, "p3"), ts.artifact_registry(s))
+        # fig_0 via target; tab_0 via the untargeted ref's own number; "Fig. 3" has no figure;
+        # "Fig. 1 again" is the same artifact and is not repeated.
+        self.assertEqual([a["label"] for a in arts], ["Fig. 1", "Table 2"])
+        self.assertEqual(arts[0]["id"], "fig_0")
+
+    def test_paragraph_without_references_is_empty(self):
+        s = _soup()
+        self.assertEqual(ts.paragraph_artifacts(_p(s, "p1"), ts.artifact_registry(s)), [])
