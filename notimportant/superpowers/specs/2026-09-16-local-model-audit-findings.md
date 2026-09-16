@@ -43,6 +43,24 @@ Keeping only the verdicts whose span is verbatim leaves 4 Supports and 1 Unclear
    claim — the prompt alone had outgrown the window at V1.5 and Ollama truncates from the tail,
    where the output schema lives. Fixed in `40eb472`, pinned by a test.
 
+## The span check needed hardening before it could carry a verdict
+
+Promoting `span_is_verbatim` from a confidence cap to a verdict rule made its false negatives
+expensive, and it had some. PDF text keeps the hyphen of a word split at a line break — `energy-
+dependent` where the extractor left the space, `informa-tion` where it closed it up — and a model
+quoting that sentence writes the word whole. Three of the hosted run's four unverified spans were
+that artefact, not invention. Dropping every hyphen on both sides of the comparison (`c5ffd35`,
+hardened in the follow-up) fixes them:
+
+| | before | after |
+|---|---|---|
+| gemini-3.5-flash-lite | 4 / 20 unverified | **1 / 20** |
+| gemma4:e2b (local) | 13 / 18 unverified | **13 / 18** |
+
+Real quotations stopped failing on extraction noise; not one fabrication was excused. The single
+remaining hosted failure is a genuine partial invention — the model wrote a plausible opening for a
+sentence and continued with the evidence's own words.
+
 ## Fit for purpose
 
 gemma4:e2b is not usable as the judge for this task. `qwen2.5:7b` is the other local model installed
