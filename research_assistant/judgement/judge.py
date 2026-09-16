@@ -99,11 +99,17 @@ def derive_judgement(slots: dict) -> str:
 
 _QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-"})
 _ELLIPSIS_RE = re.compile(r"(\.\.\.|…|\[\s*\.\.\.\s*\]|\[…\])")
+# PDF text keeps the hyphen of a word broken across a line — "energy- dependent"
+# — and a model quoting that sentence writes it whole. Closing the gap on both
+# sides makes the two agree without loosening the check: the span still has to
+# be the evidence's own words in the evidence's own order.
+_LINE_HYPHEN_RE = re.compile(r"-\s+")
 
 
 def _normalise(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "").translate(_QUOTES)
     text = _ELLIPSIS_RE.sub(" ", text)
+    text = _LINE_HYPHEN_RE.sub("-", text)
     return " ".join(text.lower().split())
 
 

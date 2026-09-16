@@ -367,6 +367,18 @@ class TestSpanIsVerbatim(unittest.TestCase):
     def test_whitespace_case_ligature_and_quote_differences_are_tolerated(self):
         self.assertTrue(judge_mod.span_is_verbatim('the films showed a 10% increase in Δσ_ph - "as expected".', self.EVIDENCE))
 
+    def test_hyphenation_broken_across_a_line_is_tolerated(self):
+        """PDF text carries "energy- dependent" where a word was hyphenated
+        across a line break, and a model quoting the sentence repairs it.
+        Seen on arxiv_2108.10114v3 citation 17: a real quotation from the
+        cited paper failed the check on that one space, and since the span
+        guard the cost is a flipped verdict, not just capped confidence."""
+        evidence = "We analyse the energy- dependent conductance ﬁngerprints of the device."
+        self.assertTrue(judge_mod.span_is_verbatim("the energy-dependent conductance fingerprints", evidence))
+        # and the other direction, for evidence that is already clean
+        self.assertTrue(judge_mod.span_is_verbatim(
+            "the energy- dependent conductance", "We analyse the energy-dependent conductance here."))
+
     def test_paraphrase_is_not_verbatim(self):
         self.assertFalse(judge_mod.span_is_verbatim("Films increased by ten percent.", self.EVIDENCE))
 
