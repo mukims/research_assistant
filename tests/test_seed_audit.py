@@ -2072,3 +2072,58 @@ class TestClaimStructureFields(unittest.TestCase):
         self.assertTrue(by_p["p_fig"]["artifacts"][0]["caption"].startswith("Figure 1. THz spectral analysis"))
         # The kind is what it was: prioritisation and the report still read it.
         self.assertEqual(by_p["p_top"]["section"], "results")
+
+
+class TestCitedSummaries(unittest.TestCase):
+    def test_summary_lands_on_every_claim_that_cites_the_document(self):
+        from research_assistant.shared.seed_audit import attach_cited_summaries
+        claims = [{"document": "a.pdf"}, {"document": "b.pdf"}, {"document": "a.pdf"}, {}]
+        with patch("research_assistant.shared.retrieve.document_summaries", return_value={"a.pdf": "About A."}) as ds:
+            attach_cited_summaries(claims)
+        self.assertEqual(ds.call_args[0][0], {"a.pdf", "b.pdf"})
+        self.assertEqual([c.get("cited_summary") for c in claims], ["About A.", None, "About A.", None])
+
+    def test_store_failure_costs_only_the_summary(self):
+        from research_assistant.shared.seed_audit import attach_cited_summaries
+        claims = [{"document": "a.pdf"}]
+        with patch("research_assistant.shared.retrieve.document_summaries", side_effect=RuntimeError("store down")):
+            attach_cited_summaries(claims)
+        self.assertNotIn("cited_summary", claims[0])
+
+    def test_no_documents_no_store_read(self):
+        from research_assistant.shared.seed_audit import attach_cited_summaries
+        with patch("research_assistant.shared.retrieve.document_summaries") as ds:
+            attach_cited_summaries([{"claim": "x"}])
+        ds.assert_not_called()
+
+    @patch("research_assistant.shared.seed_audit.contextualize_citation_queries")
+    @patch("research_assistant.shared.seed_audit.attach_cited_summaries")
+    @patch("research_assistant.shared.seed_audit._judge_once")
+    @patch("research_assistant.shared.seed_audit.hybrid_search")
+    @patch("research_assistant.shared.seed_audit.find_tei_for_seed")
+    @patch("research_assistant.shared.seed_audit._load_downloaded_manifest")
+    def test_summaries_are_attached_before_queries_are_written(
+        self, mock_manifest, mock_find_tei, mock_search, mock_judge, mock_attach, mock_ctx
+    ):
+        with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
+            tf.write(SAMPLE_TEI_XML); tei_file = tf.name
+        with tempfile.NamedTemporaryFile("w", suffix=".pdf", delete=False) as dummy_pdf:
+            pdf = dummy_pdf.name
+        mock_find_tei.return_value = tei_file
+        mock_manifest.return_value = {"doi:10.1126/science.1102896": {
+            "key": "doi:10.1126/science.1102896", "path": pdf, "doi": "10.1126/science.1102896",
+            "title": "Electric field effect in atomically thin carbon films", "cited_by": "seed.pdf", "xml_id": "b0"}}
+        mock_search.return_value = [{"text": "Evidence.", "metadata": {"document": os.path.basename(pdf)}}]
+        mock_judge.return_value = {
+            "judgement": "Supports", "confidence": "High", "supporting_span": "Evidence.", "reason": "r",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"},
+                      "strength": {"assertion": "t", "verdict": "Not applicable"}},
+            "evidence_sufficiency": "sufficient",
+        }
+        order = []
+        mock_attach.side_effect = lambda claims: order.append(("attach", len(claims)))
+        mock_ctx.side_effect = lambda claims: order.append(("queries", len(claims)))
+        with _audit_dirs():
+            audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []), max_claims=5)
+        self.assertEqual(order, [("attach", 1), ("queries", 1)])
+        os.unlink(tei_file); os.unlink(pdf)

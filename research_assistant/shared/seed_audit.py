@@ -468,6 +468,28 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
     return None
 
 
+def attach_cited_summaries(claims: list[dict]) -> None:
+    """Read the ingest-time summary of each cited paper into claim['cited_summary'].
+
+    One store read across the whole batch. If the store is down or has no
+    summaries yet, nothing is set; the audit continues without them.
+    """
+    from research_assistant.shared.retrieve import document_summaries
+
+    docs = {c["document"] for c in claims if c.get("document")}
+    if not docs:
+        return
+    try:
+        sums = document_summaries(docs)
+    except Exception as exc:
+        logger.warning("Could not read cited summaries (%s) — continuing without", exc)
+        return
+    for c in claims:
+        doc = c.get("document")
+        if doc and doc in sums:
+            c["cited_summary"] = sums[doc]
+
+
 def contextualize_citation_queries(claims: list[dict], model: str | None = None) -> None:
     """Batch-contextualize search queries for claims using paragraph context.
 
@@ -1140,6 +1162,7 @@ def audit_seed_citations(
     aborted = None
 
     if claims_to_judge:
+        attach_cited_summaries(claims_to_judge)
         pipeline_status.update_progress(detail="Contextualizing search queries from paragraph context")
         contextualize_citation_queries(claims_to_judge)
 
