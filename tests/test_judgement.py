@@ -57,7 +57,7 @@ def _good(**overrides):
 class TestCases(unittest.TestCase):
     def test_cases_are_well_formed(self):
         cases = load_cases()
-        self.assertEqual(len(cases), 6)
+        self.assertEqual(len(cases), 7)
         for case in cases:
             self.assertTrue(case["claim"])
             self.assertTrue(case["citation_evidence"])
@@ -339,12 +339,12 @@ class TestEnforceRubric(unittest.TestCase):
         self.assertEqual(out["judgement"], "Supports")
 
     def test_the_prompts_own_examples_do_not_trip_the_drift_check(self):
-        """The six worked examples are the floor: a guard that flags them
+        """The seven worked examples are the floor: a guard that flags them
         flags correct decompositions."""
         import re as _re
         text = judge_mod.PROMPT_TEMPLATE
         blocks = _re.findall(r"Claim: \*(.+?)\*\nEvidence: \*(.+?)\*\n.*?```\n(\{.*?\})\n```", text, _re.S)
-        self.assertEqual(len(blocks), 6)
+        self.assertEqual(len(blocks), 7)
         for claim, evidence, payload in blocks:
             r = json.loads(payload)
             out = judge_mod.enforce_rubric(r, evidence, claim=claim)

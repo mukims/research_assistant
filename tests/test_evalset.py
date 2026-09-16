@@ -85,7 +85,7 @@ class TestLoadCases(unittest.TestCase):
 
     def test_the_shipped_prompt_examples_load(self):
         cases = es.load_cases([es.CASES_DIR / "cases.jsonl"])
-        self.assertEqual(len(cases), 6)
+        self.assertEqual(len(cases), 7)
         self.assertTrue(all(c["source"] == "prompt_example" for c in cases))
 
 

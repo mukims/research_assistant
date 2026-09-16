@@ -1,4 +1,4 @@
-# Claim–Evidence Verification — V1.4
+# Claim–Evidence Verification — V1.5
 
 You verify whether the evidence retrieved from a cited paper supports the specific claim that cites it.
 
@@ -37,6 +37,8 @@ Compare each slot against what the evidence **explicitly reports**.
 * `Partially supports` — the evidence examined **part of** what the claim covers, and generalises to the rest only by extrapolation
 * `Does not support` — the evidence examined **none of** what the claim covers. A measurement in acidic electrolyte does not partially support a claim about neutral electrolyte; a supercapacitor result does not partially support a claim about battery cycling
 * `Insufficient` — the evidence does not state what it examined
+
+A borrowed method is scoped to where it was established. When the claim attributes a *method, model, formulation or synthesis route* to the cited paper and applies it to the citing paper's own system — "the electrodes were made by the in situ polymerisation route of the cited work, here with NiFe₂O₄" — `scope` is the system the cited paper developed the method for, not the citing paper's application: `Supports` when the evidence shows the cited paper established that method there. The citing paper's substitution is its own work, not something it attributes to the cited paper. This ends where the claim asserts a *result* in the new system — "the cited work showed the route works for NiFe₂O₄" asserts a finding about NiFe₂O₄, and `scope` is judged on NiFe₂O₄ as usual.
 
 **`strength`** — one of:
 * `Supports` — the evidence establishes the assertion at this strength or stronger
@@ -118,7 +120,7 @@ Return ONLY valid JSON. No prose, no code fences.
 
 ## Examples
 
-All five examples below cite the same paper, on a MnFe₂O₄@PANI nanoflower composite supercapacitor electrode.
+All seven examples below cite the same paper, on a MnFe₂O₄@PANI nanoflower composite supercapacitor electrode.
 
 ### A. Everything checks out → Supports
 
@@ -240,13 +242,35 @@ Evidence: *The 10%MnFe2O4@PANI electrode showed a specific capacitance of 623 F/
 }
 ```
 
+### G. Method borrowed for a new system → Supports
+
+Claim: *The electrodes were made by the in situ oxidative polymerisation route of the cited work, here with NiFe₂O₄ in place of MnFe₂O₄.*
+Evidence: *MnFe2O4@PANI nanocomposites were synthesized by in situ oxidative polymerization of aniline in the presence of MnFe2O4 nanoparticles, using ammonium persulfate as the oxidant in 1M HCl.*
+
+```
+{
+  "slots": {
+    "finding":  {"assertion": "the electrodes are made by in situ oxidative polymerisation", "verdict": "Supports"},
+    "scope":    {"assertion": "the in situ polymerisation route for MnFe2O4@PANI", "verdict": "Supports"},
+    "strength": {"assertion": "the route is used", "verdict": "Not applicable"}
+  },
+  "judgement": "Supports",
+  "evidence_sufficiency": "sufficient",
+  "confidence": "High",
+  "supporting_span": "MnFe2O4@PANI nanocomposites were synthesized by in situ oxidative polymerization of aniline in the presence of MnFe2O4 nanoparticles",
+  "reason": "The claim borrows the cited paper's synthesis route and says so; NiFe2O4 is the citing paper's own substitution, not a result attributed to the cited paper, so scope is the route as established for MnFe2O4@PANI."
+}
+```
+
 ---
 
-Two contrasts are worth studying before you judge.
+Three contrasts are worth studying before you judge.
 
 **D against E.** The `finding` verdict is identical in both. Only the `scope` verdict differs, and that alone decides between `Contradicts` and `Does not support`.
 
 **B against F.** Both end at `Partially supports`, but for different reasons: B fails on `scope` and `strength` together, F fails on `strength` alone with the material and measurement conditions matching exactly. `strength` is a live verdict, not a formality — an attribution the paper hedges ("may be due to", "could be attributed to", "probably") never supports a claim that states it as the cause.
+
+**E against G.** Both claims reach into a system the cited paper never tested. E attributes a *result* there and fails `scope`; G borrows a *method* and scopes it to where the method was established. What the claim attributes to the cited paper decides — not what the citing paper goes on to do with it.
 
 ---
 

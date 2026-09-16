@@ -1500,7 +1500,7 @@ with tab_audit:
     st.caption(
         "Upload a research manuscript (PDF or ZIP). The pipeline parses in-text citations with GROBID, "
         "retrieves open-access references from Unpaywall, Europe PMC, and arXiv, and audits each citation "
-        "against the source text using Rubric V1.4."
+        "against the source text using Rubric V1.5."
     )
 
     with st.form("upload_papers_form"):
