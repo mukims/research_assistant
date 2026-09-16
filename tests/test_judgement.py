@@ -286,6 +286,78 @@ class TestDeriveJudgement(unittest.TestCase):
                          "Unclear / insufficient evidence")
 
 
+class TestSupportFromAnInventedSpan(unittest.TestCase):
+    """The symmetric half of the absence guard.
+
+    The rubric already refuses absence asserted from insufficient evidence.
+    The mirror image is support asserted from a span that is not in the
+    evidence: Supports, Partially supports and Contradicts all assert that
+    the passages say something, and supporting_span is where the model shows
+    it. A span that does not occur there is not a paraphrase of the evidence
+    — measured on two live audits, unverified spans ran 0-39% verbatim, and
+    a local model echoed the citing paper's own sentence back, citation
+    markers and all. So the verdict rests on nothing and is recorded as
+    unclear, not as a green tick.
+    """
+
+    EVIDENCE = "The films showed a 10% increase in conductivity under illumination."
+
+    def _enforced(self, span, **over):
+        reply = _reply(span=span, **over)
+        return judge_mod.enforce_rubric(reply, self.EVIDENCE)
+
+    def test_supports_on_an_invented_span_becomes_unclear(self):
+        out = self._enforced("We demonstrate a fivefold enhancement in carrier mobility.")
+        self.assertEqual(out["judgement"], "Unclear / insufficient evidence")
+        self.assertEqual(out["model_judgement"], "Supports")
+        self.assertTrue(out["rubric_mismatch"])
+        self.assertFalse(out["span_verified"])
+        self.assertTrue(any("not in the evidence" in v for v in out["rubric_violations"]), out["rubric_violations"])
+
+    def test_partially_supports_and_contradicts_are_guarded_too(self):
+        for scope, finding, expected_model in (("Partially supports", "Supports", "Partially supports"),
+                                               ("Supports", "Contradicts", "Contradicts")):
+            out = self._enforced("A sentence that is nowhere in the evidence at all.",
+                                 scope=scope, finding=finding, judgement=expected_model)
+            self.assertEqual(out["judgement"], "Unclear / insufficient evidence", expected_model)
+            self.assertEqual(out["model_judgement"], expected_model)
+
+    def test_a_verbatim_span_is_untouched(self):
+        out = self._enforced("The films showed a 10% increase in conductivity")
+        self.assertEqual(out["judgement"], "Supports")
+        self.assertTrue(out["span_verified"])
+        self.assertEqual(out["rubric_violations"], [])
+
+    def test_no_span_at_all_is_not_an_invented_one(self):
+        """A missing span is a different defect; the rubric allows null and
+        this guard is about a quote that was given and is not there."""
+        out = self._enforced(None)
+        self.assertEqual(out["judgement"], "Supports")
+        self.assertIsNone(out["span_verified"])
+        self.assertEqual(out["rubric_violations"], [])
+
+    def test_does_not_support_keeps_its_verdict(self):
+        """A negative verdict does not rest on the span — its own guard, the
+        absence rule, already covers the way it can overreach."""
+        out = self._enforced("Not a sentence from the evidence.", finding="Does not support",
+                             judgement="Does not support", sufficiency="partial")
+        self.assertEqual(out["judgement"], "Does not support")
+        self.assertFalse(out["span_verified"])
+
+    def test_the_prompts_own_examples_are_not_demoted(self):
+        """The worked examples are the regression floor: every one of them
+        quotes its evidence verbatim, so none may trip this guard."""
+        import re as _re
+        blocks = _re.findall(r"Claim: \*(.+?)\*\nEvidence: \*(.+?)\*\n.*?```\n(\{.*?\})\n```",
+                             judge_mod.PROMPT_TEMPLATE, _re.S)
+        self.assertEqual(len(blocks), 7)
+        for claim, evidence, payload in blocks:
+            reply = json.loads(payload)
+            expected = reply["judgement"]
+            out = judge_mod.enforce_rubric(reply, evidence, claim=claim)
+            self.assertEqual(out["judgement"], expected, f"{claim[:50]}: {out['rubric_violations']}")
+
+
 class TestSpanIsVerbatim(unittest.TestCase):
     EVIDENCE = "The ﬁlms showed a 10% increase in Δσ_ph — “as expected”.  Next sentence."
 
@@ -337,10 +409,22 @@ class TestEnforceRubric(unittest.TestCase):
         self.assertTrue(out["rubric_mismatch"])
         self.assertEqual(out["confidence"], "Medium")
 
-    def test_unverified_span_caps_confidence_but_keeps_the_verdict(self):
+    def test_an_unverified_span_no_longer_leaves_a_supports_verdict_standing(self):
+        """Until the symmetric guard, this capped confidence and kept the
+        verdict — so a Supports resting on an invented quote still rendered
+        as a green tick. See TestSupportFromAnInventedSpan for the rule."""
         out = judge_mod.enforce_rubric(_reply(span="not in there"), "the evidence text")
         self.assertFalse(out["span_verified"])
-        self.assertEqual(out["judgement"], "Supports")
+        self.assertEqual(out["judgement"], "Unclear / insufficient evidence")
+        self.assertEqual(out["confidence"], "Medium")
+
+    def test_an_unverified_span_caps_confidence_on_a_verdict_it_does_not_change(self):
+        out = judge_mod.enforce_rubric(
+            _reply(span="not in there", finding="Does not support", judgement="Does not support",
+                   sufficiency="partial", confidence="High"),
+            "the evidence text")
+        self.assertFalse(out["span_verified"])
+        self.assertEqual(out["judgement"], "Does not support")
         self.assertEqual(out["confidence"], "Medium")
 
     def test_absence_cannot_be_asserted_from_insufficient_evidence(self):

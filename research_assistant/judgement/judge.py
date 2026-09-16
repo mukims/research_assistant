@@ -67,6 +67,11 @@ DERIVED_FIELDS = {
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 
+# Verdicts that assert the passages report something, and so rest on the
+# supporting span. "Does not support" asserts the opposite and has its own
+# guard; "Unclear" asserts nothing.
+_REST_ON_THE_SPAN = frozenset({"Supports", "Partially supports", "Contradicts"})
+
 
 def _slot_verdict(slots: dict, name: str) -> str:
     """The verdict as the rules see it: anything outside the slot's vocabulary
@@ -196,12 +201,22 @@ def enforce_rubric(result: dict, evidence: str, claim: str | None = None) -> dic
     evidence together. The verdict stands; the drift is recorded and
     confidence capped.
 
-    One more rule the slots cannot express: "Does not support" asserts that
+    Two more rules the slots cannot express. "Does not support" asserts that
     the paper reports nothing about the relationship, and the judge only ever
     sees a few chunks of it. When it also rates that evidence "insufficient"
     — too fragmentary to assess — it has not established absence, only that
     the retrieved passages were silent. That is a retrieval gap, and the
     record says "Unclear", not "the paper does not say this".
+
+    Its mirror image is support asserted from a span that is not in the
+    evidence. Supports, Partially supports and Contradicts all assert that
+    the passages report something, and the span is where the model shows
+    which sentence does. When that sentence does not occur in the evidence
+    the verdict rests on nothing: across two live audits every unverified
+    span was under 40% verbatim, and a local model quoted the citing
+    paper's own sentence back with its citation markers intact. Capping
+    confidence left such a verdict reading as a green tick, so it is
+    recorded as unclear instead.
     """
     slots = result["slots"]
     violations = [
@@ -217,17 +232,24 @@ def enforce_rubric(result: dict, evidence: str, claim: str | None = None) -> dic
                     f"{name}: assertion drift — {overlap:.0%} of its content words occur in the claim"
                 )
     derived = derive_judgement(slots)
+    span_verified = span_is_verbatim(result.get("supporting_span"), evidence)
     if derived == "Does not support" and result.get("evidence_sufficiency") == "insufficient":
         violations.append(
             "absence asserted from insufficient evidence: retrieved passages were silent, "
             "which does not show the paper is"
         )
         derived = "Unclear / insufficient evidence"
+    elif derived in _REST_ON_THE_SPAN and span_verified is False:
+        violations.append(
+            "support asserted from a span that is not in the evidence: the quoted sentence does "
+            "not occur in the retrieved passages, so nothing shows they report this"
+        )
+        derived = "Unclear / insufficient evidence"
     result["model_judgement"] = result["judgement"]
     result["rubric_mismatch"] = derived != result["judgement"]
     result["rubric_violations"] = violations
     result["judgement"] = derived
-    result["span_verified"] = span_is_verbatim(result.get("supporting_span"), evidence)
+    result["span_verified"] = span_verified
     result["span_cites_others"] = span_cites_others(result.get("supporting_span"))
 
     if violations or result["rubric_mismatch"] or result["span_verified"] is False:
