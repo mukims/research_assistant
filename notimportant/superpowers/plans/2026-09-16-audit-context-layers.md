@@ -1990,3 +1990,20 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - **Judging `method`-role citations.** Would change the budget and the prioritisation; decide first, then plan.
 - **A seed "thesis" / abstract in the judge prompt.** No evidence it helps; more context is the documented failure mode.
 - **The cited summary in the judge prompt.** Ruled out by the grounding rule (spec §3.2), not deferred.
+
+---
+
+## Post-execution notes (2026-09-16)
+
+All 17 tasks ran; the two gates decided as follows.
+
+- **Task 13 (judge-side context): lost, reverted** (`25d6fd9`). Breadcrumb + captions in the judge prompt: strict 75% → 69%, `figure_ref` 70% → 63%, drift 6% → 12% on 32 cases × 2 runs. `compose_context` and the harness stay; the audit sends the window.
+- **Task 16 (rubric V1.5): kept**, but the measurement had to be redone. Tasks 15–16 as written used `--context full`, assuming Task 13 would pass. Re-run under `window` (`aad1912`): strict 72% → 73%, `figure_ref` 67% → 72%, `method_transfer` 56% → 56%, drift 3% → 5%, in-prompt 14/14. No regression; the rule's effect on its own target is unmeasured because the four failing `method_transfer` case-runs fail on evidence that never names the borrowed method (h_009, n_009, h_021) or on a compound sentence (h_022).
+
+Three defects in this plan, fixed after execution:
+
+1. Tasks 15–16 hard-coded `--context full`; a task after a gate needs a branch for each outcome, not the assumed one. Harness default is now `window` (`525304a`).
+2. Task 10 copied `context` onto negation cases, whose claim is not the sentence the context marks. Negations carry no context (`7635142`).
+3. Task 6's test replied `"q0"`, which the ≤5-character guard rejects; the executor loosened the guard instead of the test. Guard restored (`04243f8`).
+
+Open, for a next plan: the judge answers `Unclear` for every `Partially supports` and `Does not support` case in the set (8/8) and for a quarter of the `Supports` cases — over-hedging into `Unclear` is the dominant error, ahead of anything context-related. And the `method_transfer` labels should be re-checked against their evidence chunks before the rule is measured again.
