@@ -229,6 +229,12 @@ JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS",
 # 12288 leaves room for the rubric, full evidence and a context block; a test
 # pins the invariant. Ignored by the openai backend.
 JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_JUDGEMENT_NUM_CTX", 12288)}
+# Claims judged per seed-paper audit. The cap bounds cost; it is not meant to
+# choose which citations matter, and at 20 it was doing the choosing: on
+# arxiv_2108.10114v3, 48 citations had their reference PDF in the corpus and
+# 20 were judged. 50 covers a typical paper's fetchable citations outright,
+# and prioritise_claims still orders the spend for anything larger.
+CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 50)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
 
 

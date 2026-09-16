@@ -48,6 +48,7 @@ from research_assistant.config import (
     PULLED_PDFS_DIR,
     RAW_DIR,
     CITATION_AUDIT_CONTEXTUALIZE_QUERIES,
+    CITATION_AUDIT_MAX_CLAIMS,
 )
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
@@ -1003,7 +1004,7 @@ def cross_check_seed_audit(
 def audit_seed_citations(
     seed_path: str,
     search_resources=None,
-    max_claims: int = 20,
+    max_claims: int = CITATION_AUDIT_MAX_CLAIMS,
     top_k: int = JUDGEMENT_TOP_K,
     force: bool = False,
     skip_if_cached: bool = True,
@@ -1014,6 +1015,7 @@ def audit_seed_citations(
         seed_path: Path to the seed PDF.
         search_resources: Tuple of (collection, bm25, texts, metadatas) or None to load.
         max_claims: Maximum number of claims citing downloaded papers to judge with the LLM.
+            Defaults to CITATION_AUDIT_MAX_CLAIMS; the rest are reported cap_exceeded.
         top_k: Number of hits to retrieve per claim.
         force: If True, bypasses any cached audit and runs from scratch.
         skip_if_cached: If True and an audit already exists, cross-checks and returns it.

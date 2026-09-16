@@ -1545,6 +1545,36 @@ BREAKER_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+class TestClaimBudget(unittest.TestCase):
+    """The budget exists to bound cost, not to decide which citations matter.
+
+    At 20 it was the binding constraint on real papers: arxiv_2108.10114v3
+    had 48 citations whose reference PDF was in the corpus and judged 20 of
+    them, leaving 28 fetched-but-unjudged — including the one the reader
+    went looking for.
+    """
+
+    def test_the_default_comes_from_config_and_is_50(self):
+        import inspect
+        from research_assistant.config import CITATION_AUDIT_MAX_CLAIMS
+        from research_assistant.shared.seed_audit import audit_seed_citations
+        self.assertEqual(CITATION_AUDIT_MAX_CLAIMS, 50)
+        self.assertEqual(
+            inspect.signature(audit_seed_citations).parameters["max_claims"].default,
+            CITATION_AUDIT_MAX_CLAIMS,
+        )
+
+    def test_the_budget_is_overridable_by_the_environment(self):
+        import importlib
+        from unittest.mock import patch as _patch
+        cfg = importlib.import_module("research_assistant.config")
+        # The restoring reload must happen once the patched environment is
+        # gone, or the module keeps the override for the rest of the session.
+        self.addCleanup(importlib.reload, cfg)
+        with _patch.dict(os.environ, {"CITATION_AUDIT_MAX_CLAIMS": "7"}):
+            self.assertEqual(importlib.reload(cfg).CITATION_AUDIT_MAX_CLAIMS, 7)
+
+
 class TestBudgetAndBreaker(unittest.TestCase):
     def _c(self, section, cite_count, p, s, xid):
         return {"section": section, "cite_count": cite_count, "paragraph_index": p, "sentence_index": s,
