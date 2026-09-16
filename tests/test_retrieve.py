@@ -7,6 +7,7 @@ the output honest: verdicts aligned to their summaries, every shortlisted
 paper read, keys checked against the shortlist.
 """
 
+import sys
 import types
 import unittest
 from unittest.mock import patch
@@ -221,3 +222,51 @@ class TestSingle(ResearchAnswerTestCase):
         self.assertEqual(hs.call_args.kwargs["doc_filter"], {"d1.pdf"})
 
 
+
+
+class TestDocumentSummaries(unittest.TestCase):
+    """One store read for all the cited papers, keyed by document; the
+    store is stubbed the way tests/test_db.py stubs it."""
+
+    def _chroma(self, rows, missing_collection=False):
+        calls = []
+
+        class _Col:
+            def get(self, ids, include):
+                calls.append(sorted(ids))
+                return {
+                    "ids": [f"sum::{d}" for d, _ in rows],
+                    "documents": [t for _, t in rows],
+                    "metadatas": [{"document": d} for d, _ in rows],
+                }
+
+        class _Client:
+            def __init__(self, path):
+                pass
+
+            def get_collection(self, name):
+                if missing_collection:
+                    raise ValueError("no such collection")
+                return _Col()
+
+        chroma = types.ModuleType("chromadb")
+        chroma.PersistentClient = _Client
+        return chroma, calls
+
+    def test_one_get_keyed_by_document_and_missing_ones_absent(self):
+        chroma, calls = self._chroma([("a.pdf", "A studies X by Y.")])
+        with patch.dict(sys.modules, {"chromadb": chroma}):
+            out = rt.document_summaries(["a.pdf", "b.pdf", "a.pdf", None, ""])
+        self.assertEqual(out, {"a.pdf": "A studies X by Y."})
+        self.assertEqual(calls, [["sum::a.pdf", "sum::b.pdf"]])
+
+    def test_no_collection_is_empty(self):
+        chroma, _ = self._chroma([], missing_collection=True)
+        with patch.dict(sys.modules, {"chromadb": chroma}):
+            self.assertEqual(rt.document_summaries(["a.pdf"]), {})
+
+    def test_nothing_wanted_does_not_touch_the_store(self):
+        chroma, calls = self._chroma([])
+        with patch.dict(sys.modules, {"chromadb": chroma}):
+            self.assertEqual(rt.document_summaries([]), {})
+        self.assertEqual(calls, [])

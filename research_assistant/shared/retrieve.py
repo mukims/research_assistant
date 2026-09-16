@@ -83,6 +83,30 @@ def rank_documents(query: str, k: int = DOC_SELECT_K) -> list[dict]:
     return out
 
 
+def document_summaries(documents) -> dict[str, str]:
+    """The ingest-time summary of each named document, keyed by document.
+    One store read for the lot; a document without a summary is absent
+    from the result, and no summary collection at all is an empty dict."""
+    import chromadb
+
+    wanted = sorted({d for d in documents if d})
+    if not wanted:
+        return {}
+    client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    try:
+        col = client.get_collection(SUMMARY_COLLECTION_NAME)
+    except Exception:
+        logger.warning("No summary collection yet — has anything been ingested?")
+        return {}
+    got = col.get(ids=[f"sum::{d}" for d in wanted], include=["documents", "metadatas"])
+    out: dict[str, str] = {}
+    for text, meta in zip(got.get("documents") or [], got.get("metadatas") or []):
+        doc = (meta or {}).get("document")
+        if doc and text:
+            out[doc] = text
+    return out
+
+
 _VERDICT_RE = re.compile(r"^\s*(\d+)\s*[:.)\-]\s*(YES|NO)\b", re.I | re.M)
 
 
