@@ -543,6 +543,7 @@ def _render_seed_citation_audit(final):
     with st.container(border=True):
         from research_assistant.shared.seed_audit import (
             explain_rubric_verdict,
+            explain_verdict_steps,
             generate_seed_audit_markdown,
             get_deferred_missing_references,
             save_and_register_reference_pdf,
@@ -689,6 +690,11 @@ def _render_seed_citation_audit(final):
                     ))
                 if item.get("cited_summary"):
                     st.caption(f"📄 **Cited paper, in brief:** {item['cited_summary']}")
+
+                steps = explain_verdict_steps(item)
+                if steps:
+                    st.markdown("**Why this verdict**")
+                    st.markdown("\n".join(f"- **{label}:** {text}" for label, text in steps))
 
                 if outcome == "deferred_paywalled":
                     st.warning(

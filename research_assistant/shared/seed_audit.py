@@ -1457,6 +1457,110 @@ def save_and_register_reference_pdf(
     return entry
 
 
+_GUARD_VIOLATION = "absence asserted from insufficient evidence"
+
+
+def _slot(item: dict, name: str) -> tuple[str, str]:
+    """(assertion, verdict) for one slot, tolerating the flat shape old
+    reports stored ({"finding": "Supports"})."""
+    s = (item.get("slots") or {}).get(name)
+    if isinstance(s, dict):
+        return str(s.get("assertion") or ""), str(s.get("verdict") or "")
+    return "", str(s or "")
+
+
+def explain_verdict_steps(item: dict) -> list[tuple[str, str]]:
+    """How this verdict was reached, as (label, text) lines.
+
+    Assembled from what the record already holds — the slot assertions, the
+    retrieval provenance, the model's own reason, the rubric violations — so
+    it costs no model call and cannot say anything the judgement did not.
+
+    The line that earns the function is the last one. "Unclear" is reached
+    two ways that ask the reader for opposite things: the model could not
+    tell from the passages (read them yourself), or the model said the paper
+    does not report this while rating those same passages insufficient —
+    which the rubric refuses, because three silent chunks are not a silent
+    paper (retrieve more of it). The old text called both "too fragmentary
+    or ambiguous" and left the reader to guess.
+    """
+    if item.get("outcome") != "judged":
+        return []
+
+    judgement = item.get("judgement") or ""
+    f_a, f_v = _slot(item, "finding")
+    s_a, s_v = _slot(item, "scope")
+    steps: list[tuple[str, str]] = []
+
+    attributed = f_a or item.get("claim") or "—"
+    if s_a:
+        attributed = f"{attributed} — in {s_a}"
+    steps.append(("Attributed to the cited paper", attributed))
+
+    hits = item.get("evidence_hits")
+    read = f"{hits} passage{'s' if hits != 1 else ''}" if hits else "the retrieved passages"
+    sections = ", ".join(item.get("evidence_sections") or [])
+    pages = ", ".join(str(p) for p in (item.get("evidence_pages") or []))
+    if sections:
+        read += f", from {sections}"
+    if pages:
+        read += f" (p. {pages})"
+    steps.append(("Read from the cited paper", read))
+
+    if item.get("reason"):
+        steps.append(("What the passages said", item["reason"]))
+
+    span = item.get("supporting_span")
+    if span and item.get("span_verified") is not False:
+        steps.append(("Verbatim in the cited paper", f"\u201c{span}\u201d"))
+
+    if judgement == "Supports":
+        return steps
+
+    guard = any(_GUARD_VIOLATION in v for v in (item.get("rubric_violations") or []))
+    hits_n = hits or 0
+    if guard:
+        gap = (
+            f"The model judged that the paper does not report this, but rated the same passages "
+            f"insufficient to tell — silence in {hits_n} passages is not silence in the paper, so the "
+            f"verdict is recorded as unclear rather than as a citation error."
+        )
+    elif s_v == "Does not support":
+        gap = (
+            f"The passages examined none of what the claim covers ({s_a or 'the stated scope'}), which "
+            f"decides the verdict on its own"
+            + (
+                " — a result outside the claim's scope is not a contradiction, however it reads."
+                if f_v == "Contradicts" else "."
+            )
+        )
+    elif f_v == "Does not support":
+        gap = "The passages are on a related topic but report nothing about this relationship."
+    elif f_v == "Insufficient" or s_v == "Insufficient":
+        gap = "The model could not tell from these passages whether the paper reports this."
+    else:
+        _, st_v = _slot(item, "strength")
+        weak = [n for n, v in (("scope", s_v), ("strength", st_v)) if v == "Partially supports"]
+        gap = (
+            f"The passages support a weaker version of the claim: {' and '.join(weak)} "
+            f"{'match' if len(weak) > 1 else 'matches'} only in part."
+            if weak else "Not every part of the claim is carried by these passages."
+        )
+    steps.append(("Why the verdict is not stronger", gap))
+
+    if guard or item.get("evidence_sufficiency") == "insufficient":
+        settle = (
+            "Reading more of the cited paper — raise the passages judged, or check the sections this "
+            "claim would live in. The paper may well say it; these passages do not."
+        )
+    elif s_v == "Does not support":
+        settle = f"A passage in the cited paper reporting this for {s_a or 'the scope the claim states'}."
+    else:
+        settle = f"A passage in the cited paper stating {f_a or 'the asserted finding'} outright."
+    steps.append(("What would settle it", settle))
+    return steps
+
+
 def explain_rubric_verdict(item: dict) -> str:
     """Explains why a citation received its verdict based on the 3-slot rubric."""
     judgement = item.get("judgement") or ""
@@ -1784,6 +1888,11 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
                 out_lines.append(f"- ⚠ **Rubric:** model said {item.get('model_judgement')}; the rules derive {item.get('judgement')}.")
             if "too_long" in (item.get("claim_quality") or []):
                 out_lines.append("- ⚠ **Long sentence:** the claim is over 80 words; the verdict is about the whole sentence.")
+
+            steps = explain_verdict_steps(item)
+            if steps:
+                out_lines.append("- **Why this verdict**")
+                out_lines.extend(f"    - *{label}:* {text}" for label, text in steps)
 
         slots = item.get("slots")
         if slots and isinstance(slots, dict):

@@ -2157,6 +2157,104 @@ class TestClaimStructureFields(unittest.TestCase):
         self.assertEqual(by_p["p_top"]["section"], "results")
 
 
+class TestVerdictReasoning(unittest.TestCase):
+    """The report has to say how the verdict was reached, not restate its name.
+    Every line is assembled from fields the record already carries — no model
+    call — and the two routes to 'Unclear' are named apart, because they ask
+    the reader for different things."""
+
+    def _item(self, **over):
+        item = {
+            "outcome": "judged",
+            "judgement": "Unclear / insufficient evidence",
+            "model_judgement": "Does not support",
+            "evidence_sufficiency": "insufficient",
+            "confidence": "Medium",
+            "slots": {
+                "finding": {"assertion": "the inversion works with other input signals", "verdict": "Does not support"},
+                "scope": {"assertion": "non-spatially-resolving inversion", "verdict": "Does not support"},
+                "strength": {"assertion": "has been shown", "verdict": "Not applicable"},
+            },
+            "reason": "The retrieved evidence discusses conductance spectra but never mentions other input signals.",
+            "rubric_violations": ["absence asserted from insufficient evidence: retrieved passages were silent, "
+                                  "which does not show the paper is"],
+            "evidence_hits": 3,
+            "evidence_sections": ["methods", "results"],
+            "evidence_pages": [3, 4],
+            "ref": {"index": 40, "title": "Disorder information from conductance"},
+        }
+        item.update(over)
+        return item
+
+    def _labels(self, item):
+        from research_assistant.shared.seed_audit import explain_verdict_steps
+        return {label: text for label, text in explain_verdict_steps(item)}
+
+    def test_the_guard_route_to_unclear_says_the_paper_was_not_shown_silent(self):
+        steps = self._labels(self._item())
+        self.assertIn("the inversion works with other input signals", steps["Attributed to the cited paper"])
+        self.assertIn("non-spatially-resolving inversion", steps["Attributed to the cited paper"])
+        self.assertIn("3 passage", steps["Read from the cited paper"])
+        self.assertIn("methods, results", steps["Read from the cited paper"])
+        self.assertIn("p. 3, 4", steps["Read from the cited paper"])
+        self.assertEqual(steps["What the passages said"],
+                         "The retrieved evidence discusses conductance spectra but never mentions other input signals.")
+        # The decisive point: the model claimed absence, the rubric would not let it.
+        self.assertIn("judged that the paper does not report this", steps["Why the verdict is not stronger"])
+        self.assertIn("rated the same passages insufficient", steps["Why the verdict is not stronger"])
+        self.assertIn("silence in 3 passages is not silence in the paper", steps["Why the verdict is not stronger"])
+        self.assertIn("more of the cited paper", steps["What would settle it"])
+
+    def test_unclear_the_model_itself_chose_is_not_the_guard_route(self):
+        steps = self._labels(self._item(
+            model_judgement="Unclear / insufficient evidence", rubric_violations=[],
+            slots={"finding": {"assertion": "f", "verdict": "Insufficient"},
+                   "scope": {"assertion": "s", "verdict": "Supports"},
+                   "strength": {"assertion": "t", "verdict": "Not applicable"}}))
+        self.assertNotIn("judged that the paper does not report this", steps["Why the verdict is not stronger"])
+        self.assertIn("could not tell from these passages", steps["Why the verdict is not stronger"])
+
+    def test_a_scope_failure_names_the_rule_that_decided_it(self):
+        steps = self._labels(self._item(
+            judgement="Does not support", model_judgement="Does not support",
+            evidence_sufficiency="partial", rubric_violations=[],
+            slots={"finding": {"assertion": "f", "verdict": "Contradicts"},
+                   "scope": {"assertion": "neutral electrolyte", "verdict": "Does not support"},
+                   "strength": {"assertion": "t", "verdict": "Not applicable"}}))
+        self.assertIn("examined none of", steps["Why the verdict is not stronger"])
+        self.assertIn("neutral electrolyte", steps["Why the verdict is not stronger"])
+        # Rule 1 outranks the contradiction, and the reader is told so.
+        self.assertIn("outside the claim's scope is not a contradiction", steps["Why the verdict is not stronger"])
+
+    def test_a_supports_verdict_states_what_was_verified_and_has_no_gap_line(self):
+        steps = self._labels(self._item(
+            judgement="Supports", model_judgement="Supports", evidence_sufficiency="sufficient",
+            confidence="High", rubric_violations=[],
+            slots={"finding": {"assertion": "the method extracts N from transport", "verdict": "Supports"},
+                   "scope": {"assertion": "the inversion procedure", "verdict": "Supports"},
+                   "strength": {"assertion": "t", "verdict": "Not applicable"}},
+            supporting_span="We introduce the quantum inverse problem from conductance.", span_verified=True))
+        self.assertIn("the method extracts N from transport", steps["Attributed to the cited paper"])
+        self.assertIn("quantum inverse problem", steps["Verbatim in the cited paper"])
+        self.assertNotIn("Why the verdict is not stronger", steps)
+        self.assertNotIn("What would settle it", steps)
+
+    def test_an_unjudged_item_has_no_steps(self):
+        from research_assistant.shared.seed_audit import explain_verdict_steps
+        self.assertEqual(explain_verdict_steps({"outcome": "not_downloaded", "judgement": "Not downloaded"}), [])
+
+    def test_the_markdown_report_carries_the_block(self):
+        md = generate_seed_audit_markdown({
+            "seed_name": "s.pdf", "generated": "now", "model": "gemma4:e2b",
+            "results": [self._item(sentence="S.", claim="S.", paragraph_id="p_0", paragraph_refs=[],
+                                   downloaded=True, reliability="UNRESOLVED", reliability_badge="⚪ Unclear")],
+            "totals": compute_totals([self._item(downloaded=True, reliability="UNRESOLVED")]),
+            "aborted": None,
+        })
+        self.assertIn("**Why this verdict**", md)
+        self.assertIn("silence in 3 passages is not silence in the paper", md)
+
+
 class TestCitedSummaries(unittest.TestCase):
     def test_summary_lands_on_every_claim_that_cites_the_document(self):
         from research_assistant.shared.seed_audit import attach_cited_summaries
