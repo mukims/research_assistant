@@ -246,10 +246,33 @@ class JudgementParseError(ValueError):
 
 
 _CONTEXT_HEADER = (
-    "**Context** (the sentences around the claim, from the citing paper; the claim is the "
-    "sentence between « and »; judge only that sentence, and use the rest only to resolve "
-    "what its words refer to — never as evidence):\n"
+    "**Context** (from the citing paper: the section the claim sits in, the captions of figures "
+    "and tables its paragraph points at, and the sentences around it; the claim is the sentence "
+    "between « and »; judge only that sentence, and use the rest only to resolve what its words "
+    "refer to — never as evidence):\n"
 )
+
+ARTIFACT_CAPTION_CHARS = 200
+
+
+def compose_context(window: str | None, section: str | None = None, artifacts: list | None = None) -> str | None:
+    """The judge's context block from its parts: a [Section: …] header, one
+    line per figure or table the paragraph points at, then the sentence
+    window with the claim marked. None without a window — a header alone
+    tells the judge nothing about the claim. The cited paper's summary is
+    deliberately not a part: it is model prose about the paper the
+    evidence comes from, and the grounding rule forbids using it as such."""
+    if not window or not str(window).strip():
+        return None
+    lines = []
+    if section and str(section).strip():
+        lines.append(f"[Section: {str(section).strip()}]")
+    for a in artifacts or []:
+        caption = " ".join(str(a.get("caption") or "").split())[:ARTIFACT_CAPTION_CHARS]
+        if a.get("label") and caption:
+            lines.append(f"[{a['label']}: {caption}]")
+    lines.append(str(window).strip())
+    return "\n".join(lines)
 
 
 def build_prompt(claim: str, citation_evidence: str, context: str | None = None) -> str:

@@ -365,3 +365,33 @@ class TestEnforceRubric(unittest.TestCase):
             out = judge_mod.judge("claim", "the evidence")
         self.assertEqual(out["judgement"], "Does not support")
         self.assertTrue(out["rubric_mismatch"])
+
+
+class TestComposeContext(unittest.TestCase):
+    """The judge's context block is assembled in one place, from the citing
+    paper's parts only. The cited paper's summary is never one of them."""
+
+    def test_window_alone_is_the_window(self):
+        self.assertEqual(judge_mod.compose_context("Before. «claim» After."), "Before. «claim» After.")
+
+    def test_section_and_artifacts_precede_the_window(self):
+        out = judge_mod.compose_context(
+            "Before. «claim» After.",
+            section="2. Results > 2.1. THz",
+            artifacts=[{"label": "Fig. 1", "caption": "THz  spectra\nof films."}, {"label": "Fig. 2", "caption": ""}],
+        )
+        self.assertEqual(out, "[Section: 2. Results > 2.1. THz]\n[Fig. 1: THz spectra of films.]\nBefore. «claim» After.")
+
+    def test_caption_is_capped(self):
+        out = judge_mod.compose_context("«c»", artifacts=[{"label": "Fig. 1", "caption": "x" * 500}])
+        self.assertEqual(out, f"[Fig. 1: {'x' * judge_mod.ARTIFACT_CAPTION_CHARS}]\n«c»")
+
+    def test_no_window_is_none_even_with_a_section(self):
+        self.assertIsNone(judge_mod.compose_context("", section="2. Results"))
+        self.assertIsNone(judge_mod.compose_context(None, artifacts=[{"label": "Fig. 1", "caption": "c"}]))
+
+    def test_header_names_the_parts_and_keeps_the_never_as_evidence_rule(self):
+        prompt = build_prompt("claim", "evidence", context="«claim»")
+        self.assertIn("captions of figures", prompt)
+        self.assertIn("never as evidence", prompt)
+
