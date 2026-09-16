@@ -654,14 +654,10 @@ def _judge_claim_entry(
     _provenance(top_k)
     item["escalated"] = False
 
-    # The breadcrumb when the TEI gave one, the kind otherwise; the captions
-    # of the figures the paragraph points at; never the cited summary.
-    from research_assistant.judgement.judge import compose_context
-
-    section = item.get("section_heading") or (
-        str(item["section"]).replace("_", " ").title() if item.get("section") else None
-    )
-    claim_context = compose_context(item.get("context"), section=section, artifacts=item.get("artifacts"))
+    claim_context = item.get("context")
+    if item.get("section") and claim_context and not str(claim_context).startswith("[Section:"):
+        sec_header = f"[Section: {str(item['section']).replace('_', ' ').title()}]\n"
+        claim_context = f"{sec_header}{claim_context}"
 
     try:
         verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
