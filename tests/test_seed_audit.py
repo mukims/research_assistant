@@ -2060,7 +2060,10 @@ class TestQueryContextualizationAndCompoundCitations(unittest.TestCase):
         from research_assistant.shared.seed_audit import contextualize_citation_queries
         from research_assistant.shared.llm import ChatResult
 
-        mock_chat.return_value = ChatResult(content='["q0", "q1"]')
+        mock_chat.return_value = ChatResult(content=(
+            '["Gabbett 2023 covalent MoS2 network THz photoconductivity enhancement", '
+            '"Gabbett 2023 covalent MoS2 networks terahertz spectroscopy"]'
+        ))
         shared = {
             "context": "Before. «The enhancement in Fig. 1b agrees with the network model.» After.",
             "paragraph_id": "p_fig",
@@ -2082,14 +2085,34 @@ class TestQueryContextualizationAndCompoundCitations(unittest.TestCase):
         # The same paper's summary is spelled out once and referred back to after that.
         self.assertEqual(prompt.count("Studies covalent MoS2 networks by terahertz spectroscopy."), 1)
         self.assertIn("What the cited paper is about: as for [0]", prompt)
-        self.assertEqual([c["search_query"] for c in claims], ["q0", "q1"])
+        self.assertEqual([c["search_query"] for c in claims], [
+            "Gabbett 2023 covalent MoS2 network THz photoconductivity enhancement",
+            "Gabbett 2023 covalent MoS2 networks terahertz spectroscopy",
+        ])
+
+    @patch("research_assistant.shared.llm.chat")
+    def test_a_reply_too_short_to_be_a_query_falls_back(self, mock_chat):
+        """A one-word or punctuation-only reply is not a retrieval query; the
+        claim keeps the author/year/title fallback instead."""
+        from research_assistant.shared.seed_audit import contextualize_citation_queries
+        from research_assistant.shared.llm import ChatResult
+
+        mock_chat.return_value = ChatResult(content='[".", "Gabbett 2023 covalent MoS2 networks hopping transport"]')
+        ref = {"authors": ["Gabbett"], "year": 2023, "title": "Covalent MoS2 networks"}
+        claims = [{"claim": "The networks conduct by hopping at low temperature.", "context": "«…»", "paragraph_id": "p_0", "ref": ref},
+                  {"claim": "The networks show enhanced photoconductivity.", "context": "«…»", "paragraph_id": "p_0", "ref": ref}]
+        with patch("research_assistant.shared.seed_audit.CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True):
+            contextualize_citation_queries(claims)
+        self.assertEqual(claims[0]["search_query"],
+                         "Gabbett 2023 Covalent MoS2 networks: The networks conduct by hopping at low temperature.")
+        self.assertEqual(claims[1]["search_query"], "Gabbett 2023 covalent MoS2 networks hopping transport")
 
     @patch("research_assistant.shared.llm.chat")
     def test_query_prompt_without_structure_has_no_empty_headings(self, mock_chat):
         from research_assistant.shared.seed_audit import contextualize_citation_queries
         from research_assistant.shared.llm import ChatResult
 
-        mock_chat.return_value = ChatResult(content='["q0"]')
+        mock_chat.return_value = ChatResult(content='["Settnes 2015 wavelet transform edge distortion"]')
         claims = [{"claim": "However, this method produces edge distortion.",
                    "context": "«However, this method produces edge distortion.»", "paragraph_id": "p_0",
                    "ref": {"authors": ["Settnes"], "year": 2015, "title": "Wavelet Transforms"}}]

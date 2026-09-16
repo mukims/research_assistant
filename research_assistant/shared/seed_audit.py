@@ -585,7 +585,7 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None)
             parsed = json.loads(raw)
             if isinstance(parsed, list) and len(parsed) == len(unqueried):
                 for c, q in zip(unqueried, parsed):
-                    if isinstance(q, str) and q.strip():
+                    if isinstance(q, str) and len(q.strip()) > 5:
                         c["search_query"] = q.strip()
                     else:
                         c["search_query"] = _fallback_query(c)
