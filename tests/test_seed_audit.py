@@ -2039,6 +2039,50 @@ class TestQueryContextualizationAndCompoundCitations(unittest.TestCase):
             os.unlink(tei_file)
             os.unlink(dummy_pdf_path)
 
+    @patch("research_assistant.shared.llm.chat")
+    def test_query_prompt_carries_section_captions_and_cited_summary(self, mock_chat):
+        from research_assistant.shared.seed_audit import contextualize_citation_queries
+        from research_assistant.shared.llm import ChatResult
+
+        mock_chat.return_value = ChatResult(content='["q0", "q1"]')
+        shared = {
+            "context": "Before. «The enhancement in Fig. 1b agrees with the network model.» After.",
+            "paragraph_id": "p_fig",
+            "section_heading": "2. Results and Discussion > 2.1. Terahertz Spectral Analysis",
+            "artifacts": [{"id": "fig_0", "kind": "figure", "label": "Fig. 1",
+                           "caption": "THz photoconductivity of MoS2 films and networks."}],
+            "ref": {"authors": ["Gabbett"], "year": 2023, "title": "Covalent MoS2 networks"},
+            "document": "gabbett.pdf",
+            "cited_summary": "Studies covalent MoS2 networks by terahertz spectroscopy.",
+        }
+        claims = [dict(shared, claim="The enhancement in Fig. 1b agrees with the network model."),
+                  dict(shared, claim="The same paper is cited again in this paragraph.")]
+        with patch("research_assistant.shared.seed_audit.CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True):
+            contextualize_citation_queries(claims)
+
+        prompt = mock_chat.call_args[0][0][0]["content"]
+        self.assertIn("Section of the citing paper: 2. Results and Discussion > 2.1. Terahertz Spectral Analysis", prompt)
+        self.assertIn("- Fig. 1: THz photoconductivity of MoS2 films and networks.", prompt)
+        # The same paper's summary is spelled out once and referred back to after that.
+        self.assertEqual(prompt.count("Studies covalent MoS2 networks by terahertz spectroscopy."), 1)
+        self.assertIn("What the cited paper is about: as for [0]", prompt)
+        self.assertEqual([c["search_query"] for c in claims], ["q0", "q1"])
+
+    @patch("research_assistant.shared.llm.chat")
+    def test_query_prompt_without_structure_has_no_empty_headings(self, mock_chat):
+        from research_assistant.shared.seed_audit import contextualize_citation_queries
+        from research_assistant.shared.llm import ChatResult
+
+        mock_chat.return_value = ChatResult(content='["q0"]')
+        claims = [{"claim": "However, this method produces edge distortion.",
+                   "context": "«However, this method produces edge distortion.»", "paragraph_id": "p_0",
+                   "ref": {"authors": ["Settnes"], "year": 2015, "title": "Wavelet Transforms"}}]
+        with patch("research_assistant.shared.seed_audit.CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True):
+            contextualize_citation_queries(claims)
+        prompt = mock_chat.call_args[0][0][0]["content"]
+        for absent in ("Section of the citing paper", "Figures and tables", "What the cited paper is about"):
+            self.assertNotIn(absent, prompt)
+
 
 STRUCTURED_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <TEI xmlns="http://www.tei-c.org/ns/1.0">

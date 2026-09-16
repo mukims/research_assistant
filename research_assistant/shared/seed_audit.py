@@ -530,14 +530,29 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None)
         if not unqueried:
             continue
 
-        context_text = unqueried[0].get("context") or unqueried[0].get("sentence") or ""
+        first = unqueried[0]
+        context_text = first.get("context") or first.get("sentence") or ""
+        section = first.get("section_heading") or ""
+        artifact_lines = "\n".join(
+            f"- {a['label']}: {a['caption']}" for a in (first.get("artifacts") or []) if a.get("caption")
+        )
+
+        # One summary per cited paper per paragraph: the second claim on the
+        # same paper points back at the first instead of repeating 180 words.
         claim_entries = []
+        summarised: dict[str, int] = {}
         for idx, c in enumerate(unqueried):
             ref = c.get("ref") or {}
             ref_str = f"{', '.join((ref.get('authors') or [])[:2])} ({ref.get('year') or 'n.d.'}) - '{ref.get('title') or ''}'"
-            claim_entries.append(
-                f"[{idx}] Cited Reference: {ref_str}\n    Claim Sentence: \"{c.get('claim', '')}\""
-            )
+            entry = f"[{idx}] Cited Reference: {ref_str}\n    Claim Sentence: \"{c.get('claim', '')}\""
+            summary, doc = c.get("cited_summary"), c.get("document")
+            if summary:
+                if doc in summarised:
+                    entry += f"\n    What the cited paper is about: as for [{summarised[doc]}]"
+                else:
+                    summarised[doc] = idx
+                    entry += f"\n    What the cited paper is about: {summary}"
+            claim_entries.append(entry)
 
         prompt = (
             "You are a scientific retrieval assistant. For each citation claim extracted from the "
@@ -546,12 +561,18 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None)
             "Rules:\n"
             "1. Resolve pronouns ('this method', 'they', 'the authors', 'this result') to the specific "
             "technique, theory, or findings described in the paragraph.\n"
-            "2. Include the cited author's name, publication year, and essential domain keywords.\n"
-            "3. Keep each query concise (10-25 words), focused on concrete technical search terms.\n"
-            "4. Return ONLY a valid JSON array of strings in the exact same order as the inputs, e.g.:\n"
+            "2. Where the sentence points at a figure or table, say what that figure shows (from its "
+            "caption below) instead of its number — the cited paper has its own figure numbers.\n"
+            "3. Phrase the query in the cited paper's own vocabulary: its summary, where given, says "
+            "what it calls its system and method.\n"
+            "4. Include the cited author's name, publication year, and essential domain keywords.\n"
+            "5. Keep each query concise (10-25 words), focused on concrete technical search terms.\n"
+            "6. Return ONLY a valid JSON array of strings in the exact same order as the inputs, e.g.:\n"
             '["query for 0", "query for 1"]\n\n'
-            f"Paragraph Context:\n\"\"\"\n{context_text}\n\"\"\"\n\n"
-            f"Citations to Contextualize:\n" + "\n".join(claim_entries) + "\n\n"
+            + (f"Section of the citing paper: {section}\n\n" if section else "")
+            + f"Paragraph Context:\n\"\"\"\n{context_text}\n\"\"\"\n\n"
+            + (f"Figures and tables the paragraph refers to:\n{artifact_lines}\n\n" if artifact_lines else "")
+            + "Citations to Contextualize:\n" + "\n".join(claim_entries) + "\n\n"
             "JSON array of queries:"
         )
 
@@ -564,7 +585,7 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None)
             parsed = json.loads(raw)
             if isinstance(parsed, list) and len(parsed) == len(unqueried):
                 for c, q in zip(unqueried, parsed):
-                    if isinstance(q, str) and len(q.strip()) > 5:
+                    if isinstance(q, str) and q.strip():
                         c["search_query"] = q.strip()
                     else:
                         c["search_query"] = _fallback_query(c)
