@@ -34,7 +34,7 @@ class TestJudgeMode(unittest.TestCase):
             "claim h_2": "Does not support",
             in_prompt["claim"]: in_prompt["expected_judgement"],
         }
-        with patch.object(ej, "judge", side_effect=lambda c, e: {"judgement": replies[c]}):
+        with patch.object(ej, "judge", side_effect=lambda c, e, context=None: {"judgement": replies[c]}):
             out = ej.run(cases, mode="judge", runs=2)
         self.assertEqual(out["summary"]["n"], 4)  # 2 held-out cases × 2 runs
         self.assertAlmostEqual(out["summary"]["strict_acc"], 0.5)
@@ -46,7 +46,7 @@ class TestJudgeMode(unittest.TestCase):
     def test_a_held_out_case_whose_text_is_in_the_prompt_is_refused(self):
         in_prompt = ej.load_cases([CASES_DIR / "cases.jsonl"])[0]
         leak = _case("h_9", citation_evidence=in_prompt["citation_evidence"])
-        with patch.object(ej, "judge", side_effect=lambda c, e: {"judgement": "Supports"}):
+        with patch.object(ej, "judge", side_effect=lambda c, e, context=None: {"judgement": "Supports"}):
             out = ej.run([leak], mode="judge", runs=1)
         self.assertEqual([c["id"] for c in out["refused"]], ["h_9"])
         self.assertEqual(out["summary"]["n"], 0)
@@ -56,6 +56,22 @@ class TestJudgeMode(unittest.TestCase):
             out = ej.run([_case("h_1")], mode="judge", runs=1)
         self.assertEqual(out["summary"]["errors"], 1)
         self.assertIn("boom", out["results"][0]["error"])
+
+    def test_context_mode_controls_what_the_judge_sees(self):
+        case = _case("h_1", context="Before. «claim h_1» After.", section_heading="2. Results",
+                     artifacts=[{"label": "Fig. 1", "caption": "cap"}])
+        seen = []
+
+        def fake_judge(c, e, context=None):
+            seen.append(context)
+            return {"judgement": "Supports"}
+
+        with patch.object(ej, "judge", side_effect=fake_judge):
+            for mode in ("none", "window", "full"):
+                out = ej.run([case], mode="judge", runs=1, context_mode=mode)
+                self.assertEqual(out["context_mode"], mode)
+        self.assertEqual(seen, [None, "Before. «claim h_1» After.",
+                                "[Section: 2. Results]\n[Fig. 1: cap]\nBefore. «claim h_1» After."])
 
 
 class TestVerifierMode(unittest.TestCase):

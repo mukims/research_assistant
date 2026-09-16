@@ -21,16 +21,27 @@ from datetime import datetime
 from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.config import DATA_DIR
 from research_assistant.judgement.evalset import DEFAULT_CASE_FILES, load_cases, split_held_out
-from research_assistant.judgement.judge import PROMPT_TEMPLATE, judge
+from research_assistant.judgement.judge import PROMPT_TEMPLATE, compose_context, judge
 from research_assistant.judgement.metrics import compare, render, score
 from research_assistant.shared.atomic import atomic_write_json
 
 RESULTS_DIR = os.path.join(DATA_DIR, "eval", "judge", "results")
 
 
-def _judge_one(case, mode):
+def _context_for(case, context_mode):
+    """What the judge is shown besides claim and evidence: nothing, the
+    sentence window the case was harvested with, or the full block the
+    audit builds (section, captions, window)."""
+    if context_mode == "none":
+        return None
+    if context_mode == "window":
+        return case.get("context")
+    return compose_context(case.get("context"), section=case.get("section_heading"), artifacts=case.get("artifacts"))
+
+
+def _judge_one(case, mode, context_mode="full"):
     if mode == "judge":
-        verdict = judge(case["claim"], case["citation_evidence"])
+        verdict = judge(case["claim"], case["citation_evidence"], context=_context_for(case, context_mode))
         return verdict["judgement"], verdict
     with tempfile.TemporaryDirectory() as d:
         draft = os.path.join(d, "draft.txt")
@@ -45,7 +56,7 @@ def _judge_one(case, mode):
     return entry["judgement"], entry
 
 
-def run(cases, mode="judge", runs=1, limit=None):
+def run(cases, mode="judge", runs=1, limit=None, context_mode="full"):
     held, refused = split_held_out(cases, PROMPT_TEMPLATE)
     in_prompt = [c for c in refused if c["source"] == "prompt_example"]
     refused = [c for c in refused if c["source"] != "prompt_example"]
@@ -63,7 +74,7 @@ def run(cases, mode="judge", runs=1, limit=None):
             t0 = time.perf_counter()
             got, verdict, error = None, None, None
             try:
-                got, verdict = _judge_one(case, mode)
+                got, verdict = _judge_one(case, mode, context_mode)
             except Exception as exc:  # noqa: BLE001 — recorded, never fatal
                 error = f"{type(exc).__name__}: {exc}"
             rec = {
@@ -83,6 +94,7 @@ def run(cases, mode="judge", runs=1, limit=None):
     in_prompt_summary = score(prompt_results) if prompt_results else None
     return {
         "mode": mode,
+        "context_mode": context_mode,
         "runs": runs,
         "generated": datetime.now().isoformat(timespec="seconds"),
         "summary": summary,
@@ -109,6 +121,12 @@ def run(cases, mode="judge", runs=1, limit=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["judge", "verifier"], default="judge")
+    ap.add_argument(
+        "--context",
+        choices=["none", "window", "full"],
+        default="full",
+        help="what the judge sees besides claim and evidence (judge mode)",
+    )
     ap.add_argument("--cases", nargs="*", default=None)
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--limit", type=int, default=None)
@@ -125,12 +143,12 @@ def main():
     cases = load_cases(args.cases or DEFAULT_CASE_FILES)
     if args.source:
         cases = [c for c in cases if c["source"] in set(args.source) or c["source"] == "prompt_example"]
-    out = run(cases, mode=args.mode, runs=args.runs, limit=args.limit)
+    out = run(cases, mode=args.mode, runs=args.runs, limit=args.limit, context_mode=args.context)
     print("\n" + render(out["summary"], out["refused"], out["in_prompt"]))
     if out["skipped_no_paper"]:
         print(f"(verifier mode skipped {out['skipped_no_paper']} case(s) with no paper reference)")
     os.makedirs(args.out, exist_ok=True)
-    path = os.path.join(args.out, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{args.mode}.json")
+    path = os.path.join(args.out, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{args.mode}-{args.context}.json")
     atomic_write_json(path, out)
     print(f"\nwritten {path}")
 

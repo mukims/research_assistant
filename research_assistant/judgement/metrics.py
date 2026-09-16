@@ -44,12 +44,12 @@ def score(results: list[dict]) -> dict:
         "dns_as_contradicts": confusion["Does not support"]["Contradicts"],
     }
 
-    def _group(key):
+    def _group(keys):
         groups = defaultdict(list)
         for r in scored:
-            k = key(r)
-            if k:
-                groups[k].append(r)
+            for k in keys(r):
+                if k:
+                    groups[k].append(r)
         return {
             k: {
                 "n": len(v),
@@ -67,6 +67,11 @@ def score(results: list[dict]) -> dict:
         "span_unverified": _rate(
             [(v["span_verified"] is False) if "span_verified" in v else None for v in verdicts]
         ),
+        "drift": _rate([
+            any("assertion drift" in x for x in (v.get("rubric_violations") or []))
+            if "rubric_violations" in v else None
+            for v in verdicts
+        ]),
         "escalated": _rate(esc),
         "escalation_changed": (sum(changed) / len(changed)) if changed else None,
     }
@@ -93,8 +98,9 @@ def score(results: list[dict]) -> dict:
         "confusion": confusion,
         "per_class": per_class,
         "cd_confusion": cd,
-        "by_source": _group(lambda r: r["case"]["source"]),
-        "by_transform": _group(lambda r: r["case"].get("transform")),
+        "by_source": _group(lambda r: [r["case"]["source"]]),
+        "by_transform": _group(lambda r: [r["case"].get("transform")]),
+        "by_tag": _group(lambda r: r["case"].get("tags") or []),
         "signals": signals,
         "stability": stability,
         "latency": latency,
@@ -121,6 +127,8 @@ def render(summary: dict, refused: list[dict], in_prompt: dict | None = None) ->
         lines.append(f"| {k} | {v['n']} | {_pct(v['strict'])} | {_pct(v['lenient'])} |")
     for k, v in sorted(summary["by_transform"].items()):
         lines.append(f"| ↳ {k} | {v['n']} | {_pct(v['strict'])} | {_pct(v['lenient'])} |")
+    for k, v in sorted(summary.get("by_tag", {}).items()):
+        lines.append(f"| # {k} | {v['n']} | {_pct(v['strict'])} | {_pct(v['lenient'])} |")
     lines += [
         "",
         "| expected \\ got | " + " | ".join(j.split(" /")[0] for j in JUDGEMENTS) + " |",
@@ -136,7 +144,7 @@ def render(summary: dict, refused: list[dict], in_prompt: dict | None = None) ->
     s = summary["signals"]
     lines.append(
         f"rubric_mismatch {_pct(s['rubric_mismatch'])}  span_unverified {_pct(s['span_unverified'])}  "
-        f"escalated {_pct(s['escalated'])}  escalation changed verdict {_pct(s['escalation_changed'])}"
+        f"drift {_pct(s.get('drift'))}  escalated {_pct(s['escalated'])}  escalation changed verdict {_pct(s['escalation_changed'])}"
     )
     return "\n".join(lines)
 
@@ -146,7 +154,16 @@ def compare(a: dict, b: dict) -> str:
     lines = [
         f"strict {_pct(sa['strict_acc'])} → {_pct(sb['strict_acc'])}   lenient {_pct(sa['lenient_acc'])} → {_pct(sb['lenient_acc'])}"
         f"   median latency {sa['latency']['median']:.1f}s → {sb['latency']['median']:.1f}s",
+        f"drift {_pct(sa['signals'].get('drift'))} → {_pct(sb['signals'].get('drift'))}",
         "",
+    ]
+    for tag in sorted(set(sa.get("by_tag", {})) | set(sb.get("by_tag", {}))):
+        ta, tb = sa.get("by_tag", {}).get(tag), sb.get("by_tag", {}).get(tag)
+        lines.append(
+            f"# {tag}: strict {_pct(ta['strict'] if ta else None)} → {_pct(tb['strict'] if tb else None)}"
+            f"  (n {ta['n'] if ta else 0} → {tb['n'] if tb else 0})"
+        )
+    lines += [
         "| case | A | B |",
         "|---|---|---|",
     ]

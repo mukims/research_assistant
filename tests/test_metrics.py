@@ -15,6 +15,7 @@ def _r(
     seconds=1.0,
     verdict=None,
     error=None,
+    tags=None,
 ):
     case = validate_case({
         "id": id,
@@ -24,11 +25,27 @@ def _r(
         "citation_evidence": "e",
         "expected_judgement": expected,
         "accept": accept,
+        "tags": tags,
     })
     return {"case": case, "got": got, "verdict": verdict, "seconds": seconds, "run": run, "error": error}
 
 
 class TestScore(unittest.TestCase):
+    def test_drift_signal_and_tag_groups(self):
+        rs = [
+            _r("1", "Supports", "Supports", tags=["figure_ref"],
+               verdict={"rubric_violations": ["finding: assertion drift — 20% of its content words occur in the claim"]}),
+            _r("2", "Supports", "Contradicts", tags=["figure_ref", "method_transfer"], verdict={"rubric_violations": []}),
+            _r("3", "Supports", "Supports", verdict={}),
+        ]
+        s = mx.score(rs)
+        self.assertAlmostEqual(s["signals"]["drift"], 0.5)   # case 3 reported no violations field: not counted
+        self.assertEqual(s["by_tag"]["figure_ref"]["n"], 2)
+        self.assertAlmostEqual(s["by_tag"]["figure_ref"]["strict"], 0.5)
+        self.assertEqual(s["by_tag"]["method_transfer"]["n"], 1)
+        self.assertIn("figure_ref", mx.render(s, refused=[]))
+        self.assertIn("figure_ref", mx.compare({"summary": s, "results": []}, {"summary": s, "results": []}))
+
     def test_accuracies_confusion_and_cd_cells(self):
         rs = [
             _r("1", "Supports", "Supports"),
