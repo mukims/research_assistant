@@ -45,6 +45,8 @@ def main():
         print(f"[{i}/{len(todo)}] {cand['id']}  ({cand['source']}; {cand.get('citation_source') or '?'})\n")
         print("CLAIM:\n" + textwrap.fill(cand["claim"], 78) + "\n")
         print("EVIDENCE:\n" + textwrap.fill(cand["citation_evidence"], 78) + "\n")
+        if cand.get("context"):
+            print("CONTEXT (what the judge saw around the claim):\n" + textwrap.fill(cand["context"], 78) + "\n")
         key = input(
             "verdict [s=Supports p=Partially c=Contradicts d=Does not support u=Unclear | x=skip q=quit]: "
         ).strip().lower()
@@ -55,7 +57,8 @@ def main():
             continue
         negation = input("negated claim for a Contradicts case (Enter to skip): ").strip() if key == "s" else ""
         note = input("note (Enter to skip): ").strip()
-        new = lb.apply_label(cand, key, {c["id"] for c in cases}, note=note, negation=negation)
+        tags = [t.strip() for t in input("tags, comma-separated — figure_ref, method_transfer, … (Enter to skip): ").split(",") if t.strip()]
+        new = lb.apply_label(cand, key, {c["id"] for c in cases}, note=note, negation=negation, tags=tags)
         cases.extend(new)
         _write_cases(args.out, cases)
         hidden = (cand.get("hidden") or {}).get("model_judgement")

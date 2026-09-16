@@ -19,19 +19,26 @@ def next_id(existing_ids: set, prefix: str) -> str:
     return f"{prefix}_{n + 1:03d}"
 
 
-def apply_label(candidate: dict, key: str, existing_ids: set, note: str = "", negation: str = "") -> list[dict]:
+def apply_label(candidate: dict, key: str, existing_ids: set, note: str = "", negation: str = "", tags=()) -> list[dict]:
     judgement = KEYS[key.strip().lower()]
     ids = set(existing_ids)
     hid = next_id(ids, "h")
     ids.add(hid)
+    carried = {
+        "document": candidate.get("document"),
+        "citation_source": candidate.get("citation_source"),
+        "context": candidate.get("context"),
+        "section_heading": candidate.get("section_heading"),
+        "artifacts": candidate.get("artifacts"),
+        "tags": [str(t) for t in tags],
+    }
     human = {
         "id": hid,
         "source": "human",
         "claim": candidate["claim"],
         "citation_evidence": candidate["citation_evidence"],
         "expected_judgement": judgement,
-        "document": candidate.get("document"),
-        "citation_source": candidate.get("citation_source"),
+        **carried,
         "notes": note or "",
         "model_judgement_at_harvest": (candidate.get("hidden") or {}).get("model_judgement"),
     }
@@ -44,8 +51,7 @@ def apply_label(candidate: dict, key: str, existing_ids: set, note: str = "", ne
             "citation_evidence": candidate["citation_evidence"],
             "expected_judgement": "Contradicts",
             "origin": hid,
-            "document": candidate.get("document"),
-            "citation_source": candidate.get("citation_source"),
+            **carried,
             "notes": "operator-written negation of " + hid,
         })
     return out

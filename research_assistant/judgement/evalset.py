@@ -27,6 +27,13 @@ _OPTIONAL_DEFAULTS = {
     "citation_source": None,
     "notes": "",
     "model_judgement_at_harvest": None,
+    # What the judge was shown besides claim and evidence, when the case
+    # was harvested from an audit; None for cases that never had it.
+    "context": None,
+    "section_heading": None,
+    "artifacts": None,
+    # Operator labels for slicing the score: "figure_ref", "method_transfer", …
+    "tags": None,
 }
 
 
@@ -53,6 +60,7 @@ def validate_case(raw: dict) -> dict:
     if case["expected_judgement"] not in accept:
         accept.insert(0, case["expected_judgement"])
     case["accept"] = accept
+    case["tags"] = [str(t) for t in (case.get("tags") or [])]
     return case
 
 

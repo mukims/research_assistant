@@ -60,6 +60,18 @@ class TestApplyLabel(unittest.TestCase):
         for c in lb.apply_label(_cand(), "s", set(), negation="No."):
             validate_case(c)
 
+    def test_context_and_tags_ride_along_on_every_case(self):
+        cand = _cand(context="B. «claim» A.", section_heading="2. Results",
+                     artifacts=[{"label": "Fig. 1", "caption": "cap"}])
+        human, negation = lb.apply_label(cand, "s", set(), negation="MoS2 networks do not conduct by hopping.",
+                                         tags=["figure_ref", "method_transfer"])
+        for case in (human, negation):
+            self.assertEqual(case["context"], "B. «claim» A.")
+            self.assertEqual(case["section_heading"], "2. Results")
+            self.assertEqual(case["artifacts"][0]["label"], "Fig. 1")
+            self.assertEqual(case["tags"], ["figure_ref", "method_transfer"])
+        self.assertEqual(lb.apply_label(_cand(), "d", set())[0]["tags"], [])
+
 
 class TestUnlabelled(unittest.TestCase):
     def test_already_labelled_candidates_are_skipped_by_content(self):

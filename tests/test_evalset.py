@@ -57,6 +57,15 @@ class TestValidateCase(unittest.TestCase):
         )
         self.assertEqual(set(c["accept"]), {"Does not support", "Unclear / insufficient evidence"})
 
+    def test_context_fields_default_to_none_and_tags_to_a_list(self):
+        c = es.validate_case(_case())
+        self.assertIsNone(c["context"])
+        self.assertIsNone(c["section_heading"])
+        self.assertIsNone(c["artifacts"])
+        self.assertEqual(c["tags"], [])
+        c = es.validate_case(_case(tags=["figure_ref"], context="«x»", section_heading="2. Results"))
+        self.assertEqual((c["tags"], c["context"], c["section_heading"]), (["figure_ref"], "«x»", "2. Results"))
+
 
 class TestLoadCases(unittest.TestCase):
     def test_loads_several_files_skips_missing_and_rejects_duplicate_ids(self):

@@ -67,6 +67,9 @@ def candidates_from_verification(report: dict, prefix: str) -> list[dict]:
             "document": None,
             "citation_source": entry.get("citation_source"),
             "section": None,
+            "context": entry.get("context"),
+            "section_heading": entry.get("section_heading"),
+            "artifacts": entry.get("artifacts"),
             "hidden": {"model_judgement": entry.get("judgement")},
         })
     return out

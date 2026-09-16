@@ -95,6 +95,17 @@ class TestCandidates(unittest.TestCase):
         self.assertEqual(out[0]["source"], "verification")
         self.assertIsNone(out[0]["document"])
 
+    def test_candidates_from_verification_carry_the_context_the_judge_saw(self):
+        report = {"results": [{
+            "outcome": "judged", "claim": "C1", "evidence": "E1", "citation_source": "S1", "judgement": "Supports",
+            "context": "B. «C1» A.", "section_heading": "2. Results",
+            "artifacts": [{"id": "fig_0", "kind": "figure", "label": "Fig. 1", "caption": "cap"}],
+        }, {"outcome": "judged", "claim": "C2", "evidence": "E2", "citation_source": "S2", "judgement": "Supports"}]}
+        out = hv.candidates_from_verification(report, prefix="v1")
+        self.assertEqual((out[0]["context"], out[0]["section_heading"], out[0]["artifacts"][0]["label"]),
+                         ("B. «C1» A.", "2. Results", "Fig. 1"))
+        self.assertEqual((out[1]["context"], out[1]["section_heading"], out[1]["artifacts"]), (None, None, None))
+
 
 if __name__ == "__main__":
     unittest.main()
