@@ -2187,3 +2187,41 @@ class TestCitedSummaries(unittest.TestCase):
             audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []), max_claims=5)
         self.assertEqual(order, [("attach", 1), ("queries", 1)])
         os.unlink(tei_file); os.unlink(pdf)
+
+
+class TestJudgeContext(unittest.TestCase):
+    def _verdict(self):
+        return {
+            "judgement": "Supports", "confidence": "High", "supporting_span": "Evidence.", "reason": "r",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"},
+                      "strength": {"assertion": "t", "verdict": "Not applicable"}},
+            "evidence_sufficiency": "sufficient",
+        }
+
+    @patch("research_assistant.shared.seed_audit._judge_once")
+    @patch("research_assistant.shared.seed_audit.hybrid_search")
+    def test_judge_sees_breadcrumb_and_captions_but_never_the_cited_summary(self, mock_search, mock_judge):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+        mock_search.return_value = [{"text": "Evidence.", "metadata": {"document": "x.pdf", "section": "results", "page": 3}}]
+        mock_judge.return_value = self._verdict()
+        item = {"claim": "The enhancement in Fig. 1b agrees with the model.", "document": "x.pdf",
+                "context": "Before. «The enhancement in Fig. 1b agrees with the model.» After.",
+                "section": "results", "section_heading": "2. Results > 2.1. THz",
+                "artifacts": [{"id": "fig_0", "kind": "figure", "label": "Fig. 1", "caption": "THz photoconductivity."}],
+                "cited_summary": "SUMMARY-MUST-NOT-APPEAR"}
+        _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+        ctx = mock_judge.call_args.kwargs["context"]
+        self.assertEqual(ctx, "[Section: 2. Results > 2.1. THz]\n[Fig. 1: THz photoconductivity.]\n"
+                              "Before. «The enhancement in Fig. 1b agrees with the model.» After.")
+        self.assertNotIn("SUMMARY-MUST-NOT-APPEAR", ctx)
+
+    @patch("research_assistant.shared.seed_audit._judge_once")
+    @patch("research_assistant.shared.seed_audit.hybrid_search")
+    def test_the_kind_stands_in_when_no_heading_is_known(self, mock_search, mock_judge):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+        mock_search.return_value = [{"text": "Evidence.", "metadata": {"document": "x.pdf"}}]
+        mock_judge.return_value = self._verdict()
+        item = {"claim": "A claim.", "document": "x.pdf", "context": "«A claim.»", "section": "results", "section_heading": ""}
+        _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+        self.assertEqual(mock_judge.call_args.kwargs["context"], "[Section: Results]\n«A claim.»")
+
