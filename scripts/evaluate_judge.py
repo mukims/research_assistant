@@ -4,7 +4,10 @@
     PYTHONPATH=. CITATION_INDEX_VERSION=2 CITATION_LOG_FILE=0 python scripts/evaluate_judge.py --mode verifier
     PYTHONPATH=. python scripts/evaluate_judge.py --compare data/eval/judge/results/A.json data/eval/judge/results/B.json
 
-judge mode: judge(claim, evidence) on each case's stored evidence.
+judge mode: judge(claim, evidence, context) on each case's stored evidence;
+--context picks what the judge sees besides them: 'window' (default — the
+sentence window, as the audit sends it), 'full' (adds the section breadcrumb
+and figure captions; lost its gate in 25d6fd9), or 'none'.
 verifier mode: a one-sentence draft per case through verify_draft() against
 the live index (needs `document` and `citation_source` on the case).
 In-prompt cases (cases.jsonl) are reported separately and never in the
@@ -39,7 +42,7 @@ def _context_for(case, context_mode):
     return compose_context(case.get("context"), section=case.get("section_heading"), artifacts=case.get("artifacts"))
 
 
-def _judge_one(case, mode, context_mode="full"):
+def _judge_one(case, mode, context_mode="window"):
     if mode == "judge":
         verdict = judge(case["claim"], case["citation_evidence"], context=_context_for(case, context_mode))
         return verdict["judgement"], verdict
@@ -56,7 +59,7 @@ def _judge_one(case, mode, context_mode="full"):
     return entry["judgement"], entry
 
 
-def run(cases, mode="judge", runs=1, limit=None, context_mode="full"):
+def run(cases, mode="judge", runs=1, limit=None, context_mode="window"):
     held, refused = split_held_out(cases, PROMPT_TEMPLATE)
     in_prompt = [c for c in refused if c["source"] == "prompt_example"]
     refused = [c for c in refused if c["source"] != "prompt_example"]
@@ -124,8 +127,9 @@ def main():
     ap.add_argument(
         "--context",
         choices=["none", "window", "full"],
-        default="full",
-        help="what the judge sees besides claim and evidence (judge mode)",
+        default="window",
+        help="what the judge sees besides claim and evidence (judge mode); "
+             "'window' is what the audit sends, 'full' adds the section breadcrumb and figure captions",
     )
     ap.add_argument("--cases", nargs="*", default=None)
     ap.add_argument("--runs", type=int, default=1)

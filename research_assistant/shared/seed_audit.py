@@ -1183,8 +1183,8 @@ def audit_seed_citations(
     aborted = None
 
     if claims_to_judge:
+        pipeline_status.update_progress(detail="Reading cited summaries; contextualizing search queries")
         attach_cited_summaries(claims_to_judge)
-        pipeline_status.update_progress(detail="Contextualizing search queries from paragraph context")
         contextualize_citation_queries(claims_to_judge)
 
         if search_resources is None:

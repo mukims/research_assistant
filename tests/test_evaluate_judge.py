@@ -73,6 +73,17 @@ class TestJudgeMode(unittest.TestCase):
         self.assertEqual(seen, [None, "Before. «claim h_1» After.",
                                 "[Section: 2. Results]\n[Fig. 1: cap]\nBefore. «claim h_1» After."])
 
+    def test_the_default_is_what_the_audit_sends(self):
+        """The audit sends the sentence window (25d6fd9 reverted the full
+        block), so an unqualified run scores the judge as production runs it."""
+        case = _case("h_1", context="Before. «claim h_1» After.", section_heading="2. Results",
+                     artifacts=[{"label": "Fig. 1", "caption": "cap"}])
+        seen = []
+        with patch.object(ej, "judge", side_effect=lambda c, e, context=None: (seen.append(context), {"judgement": "Supports"})[1]):
+            out = ej.run([case], mode="judge", runs=1)
+        self.assertEqual(out["context_mode"], "window")
+        self.assertEqual(seen, ["Before. «claim h_1» After."])
+
 
 class TestVerifierMode(unittest.TestCase):
     def test_writes_a_one_sentence_draft_and_uses_the_entry(self):
