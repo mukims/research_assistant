@@ -183,6 +183,33 @@ class TestLiveJudgement(unittest.TestCase):
         self.assertEqual(failures, [], "\n".join(failures))
 
 
+class TestLocalContextWindow(unittest.TestCase):
+    """The local (Ollama) path has a fixed context window, and a prompt that
+    overflows it is truncated silently — the model then replies with a bare
+    fence and every judgement fails to parse. V1.5's rubric grew the prompt
+    past the window that V1.4 fitted in, which is how this guard was earned."""
+
+    # 4 chars per token is the usual English approximation; the margin below
+    # is wide enough that it does not matter which way it errs.
+    CHARS_PER_TOKEN = 4
+
+    def test_the_prompt_and_a_full_evidence_block_fit_the_local_window(self):
+        from research_assistant.config import JUDGEMENT_EVIDENCE_MAX_CHARS, JUDGEMENT_OLLAMA_OPTIONS
+
+        prompt = judge_mod.build_prompt(
+            "A claim of the length the audit actually produces, naming a material system and a measured quantity.",
+            "E" * JUDGEMENT_EVIDENCE_MAX_CHARS,
+            context="[Section: 2. Results > 2.1. Transport]\n" + "C" * 600,
+        )
+        approx_tokens = len(prompt) / self.CHARS_PER_TOKEN
+        num_ctx = JUDGEMENT_OLLAMA_OPTIONS["num_ctx"]
+        self.assertLess(
+            approx_tokens, num_ctx * 0.9,
+            f"the judgement prompt is ≈{approx_tokens:.0f} tokens at full evidence but num_ctx is {num_ctx}; "
+            "raise CITATION_JUDGEMENT_NUM_CTX or shorten the rubric",
+        )
+
+
 class TestBackendSelection(unittest.TestCase):
     """A key in the environment is a default, not an override: an operator who
     sets LLM_BACKEND=ollama to run the audit on a local model must get the
