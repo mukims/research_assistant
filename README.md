@@ -1,6 +1,6 @@
-# Citation Needed! 🤖
+# Marvin the Citebot 🤖
 
-*Featuring Marvin the Citebot — Autonomous Academic Research Assistant*
+*Autonomous Academic Research Assistant*
 
 [![tests](https://github.com/mukims/research_assistant/actions/workflows/tests.yml/badge.svg)](https://github.com/mukims/research_assistant/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
@@ -47,8 +47,7 @@ built, updated and stopped is in [deploy/README.md](deploy/README.md).
 He's happiest running on your own machine with local models, where he can be
 miserable for free, forever. See [Running him at home](#running-him-at-home).
 
-> The app itself still introduces itself as *Research Assistant*. Marvin has
-> not been told. The rename is on the door, not in the deployed code.
+> Marvin introduces himself consistently across the application, user guide, and pipeline.
 
 ## What he does
 

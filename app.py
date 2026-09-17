@@ -22,7 +22,7 @@ from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
 
-st.set_page_config(page_title="Citation Needed! · Marvin the Citebot", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Marvin the Citebot", page_icon="🤖", layout="wide")
 os.makedirs(config.DATA_DIR, exist_ok=True)
 
 
@@ -40,7 +40,7 @@ def _check_auth() -> bool:
     if st.session_state.get("authenticated", False):
         return True
 
-    st.markdown("### 🔐 Research Assistant — Access Verification")
+    st.markdown("### 🔐 Marvin the Citebot — Access Verification")
     st.caption("This research instance is currently protected during review. Please enter the access code to continue.")
     with st.form("auth_form", clear_on_submit=False):
         entered = st.text_input("Access Code", type="password", placeholder="Enter access password")
@@ -517,16 +517,12 @@ def _render_seed_citation_audit(final):
                     key="btn_run_seed_audit",
                     type="secondary",
                 ):
-                    with st.status(
-                        "Auditing in-text citations from seed paper…", expanded=True
-                    ) as status:
-                        from research_assistant.shared.seed_audit import audit_seed_citations
-
-                        cached_res = get_cached_search_resources(_get_resources_mtime())
-                        audit_res = audit_seed_citations(seed_path, search_resources=cached_res)
-                        final["citation_audit"] = audit_res
-                        st.session_state["build_result"] = final
-                        status.update(label="Citation audit complete!", state="complete")
+                    label = (
+                        final.get("seed_label")
+                        or final.get("query")
+                        or (os.path.splitext(os.path.basename(seed_path))[0] if seed_path else "seed_paper")
+                    )
+                    if _start_audit_job(seed_path, label=label, origin="audit", force=True, existing_final=final):
                         st.rerun()
 
     if not audit:
@@ -951,17 +947,12 @@ def _render_seed_citation_audit(final):
                         key="btn_rerun_audit_uploaded",
                         type="primary",
                     ):
-                        with st.status(
-                            "Re-auditing seed citations with newly uploaded reference papers…",
-                            expanded=True,
-                        ) as status:
-                            from research_assistant.shared.seed_audit import audit_seed_citations
-
-                            cached_res = get_cached_search_resources(_get_resources_mtime())
-                            audit_res = audit_seed_citations(seed_path, search_resources=cached_res)
-                            final["citation_audit"] = audit_res
-                            st.session_state["build_result"] = final
-                            status.update(label="Citation audit complete!", state="complete")
+                        label = (
+                            final.get("seed_label")
+                            or final.get("query")
+                            or stem
+                        )
+                        if _start_audit_job(seed_path, label=label, origin="audit", force=True, existing_final=final):
                             st.rerun()
 
         with tab_all:
@@ -970,14 +961,12 @@ def _render_seed_citation_audit(final):
 
         if seed_path and os.path.exists(seed_path):
             if st.button("🔄 Re-run Seed Citation Audit", key="btn_rerun_seed_audit"):
-                with st.status("Re-auditing in-text citations from seed paper…", expanded=True) as status:
-                    from research_assistant.shared.seed_audit import audit_seed_citations
-
-                    cached_res = get_cached_search_resources(_get_resources_mtime())
-                    audit_res = audit_seed_citations(seed_path, search_resources=cached_res)
-                    final["citation_audit"] = audit_res
-                    st.session_state["build_result"] = final
-                    status.update(label="Citation audit complete!", state="complete")
+                label = (
+                    final.get("seed_label")
+                    or final.get("query")
+                    or stem
+                )
+                if _start_audit_job(seed_path, label=label, origin="audit", force=True, existing_final=final):
                     st.rerun()
 
 
@@ -1162,11 +1151,11 @@ with st.sidebar:
 
 # ─── Main ───────────────────────────────────────────────────────────────────
 
-st.title("📚 Citation Needed!")
+st.title("🤖 Marvin the Citebot")
 st.caption(
-    "Marvin the Citebot — Autonomous AI Research Assistant. Give it a research idea → "
+    "Autonomous AI Research Assistant. Give it a research idea → "
     "it builds a corpus from the literature and tells you what's already been done. "
-    "Or hand it a sentence and it finds the citation."
+    "Or hand it a paper to audit its citations against the evidence."
 )
 
 tab_audit, tab_idea, tab_draft, tab_chat, tab_help = st.tabs(
@@ -1355,11 +1344,17 @@ def _start_pipeline_job(
     return job_id
 
 
-def _start_audit_job(seed_file_path: str, label: str, origin: str = "audit") -> str | None:
+def _start_audit_job(
+    seed_file_path: str,
+    label: str,
+    origin: str = "audit",
+    force: bool = True,
+    existing_final: dict | None = None,
+) -> str | None:
     """Re-run only the citation audit for a paper whose seed and references
     are already in the corpus — the case where a cached report exists but
-    the judge never ran on it. Same job machinery as the full pipeline, so
-    it too survives a refresh."""
+    the judge never ran on it, or when the user explicitly triggers a re-run.
+    Same job machinery as the full pipeline, so it too survives a refresh."""
     from research_assistant.shared import run_jobs
     from research_assistant.shared.seed_audit import audit_seed_citations
 
@@ -1368,13 +1363,20 @@ def _start_audit_job(seed_file_path: str, label: str, origin: str = "audit") -> 
     def runner():
         pipeline_status.set_status(
             active=True, stage="respond", stage_label="Auditing citations",
-            current_step=5, total_steps=5, detail=f"Re-running citation audit for: {label[:50]}",
+            current_step=5, total_steps=5, detail=f"Auditing citations for: {label[:50]}",
         )
-        pipeline_status.add_event(f"🔍 Re-running citation audit: {label[:40]}")
+        pipeline_status.add_event(f"🔍 Auditing citations: {label[:40]}")
         try:
-            audit = audit_seed_citations(seed_file_path, force=True, skip_if_cached=False)
+            audit = audit_seed_citations(seed_file_path, force=force, skip_if_cached=not force)
             pipeline_status.add_event("✅ Seed citation audit complete")
-            return {"seed_path": seed_file_path, "seed_label": label, "citation_audit": audit, "audit_only": True}
+            result = dict(existing_final or {})
+            result.update({
+                "seed_path": seed_file_path,
+                "seed_label": label,
+                "citation_audit": audit,
+                "audit_only": True,
+            })
+            return result
         finally:
             pipeline_status.set_status(active=False, stage="idle", stage_label="Idle", detail="Audit complete")
 
@@ -1387,6 +1389,8 @@ def _start_audit_job(seed_file_path: str, label: str, origin: str = "audit") -> 
             icon="⏳",
         )
         return None
+    for key in ("audit_result", "audit_query", "build_result", "build_query"):
+        st.session_state.pop(key, None)
     st.query_params["job"] = job_id
     st.session_state["active_job"] = job_id
     st.session_state["active_job_origin"] = origin

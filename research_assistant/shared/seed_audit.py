@@ -1185,7 +1185,11 @@ def audit_seed_citations(
     aborted = None
 
     if claims_to_judge:
-        pipeline_status.update_progress(detail="Reading cited summaries; contextualizing search queries")
+        pipeline_status.update_progress(
+            detail="Reading cited summaries; contextualizing search queries",
+            item_current=0,
+            item_total=len(claims_to_judge),
+        )
         attach_cited_summaries(claims_to_judge)
         contextualize_citation_queries(claims_to_judge)
 
@@ -1209,7 +1213,10 @@ def audit_seed_citations(
             ref_info = item.get("ref") or {}
             ref_lbl = f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
             pipeline_status.update_progress(
-                detail=f"Judging citation ({i}/{len(claims_to_judge)}): {ref_lbl[:40]}"
+                item_current=i,
+                item_total=len(claims_to_judge),
+                current_item_name=ref_lbl[:60],
+                detail=f"Judging citation ({i}/{len(claims_to_judge)}): {ref_lbl[:40]}",
             )
             logger.info("[%d/%d] Auditing citation %s: %s", i, len(claims_to_judge), ref_lbl[:40], item["claim"][:80])
             _judge_claim_entry(item, collection, bm25, texts, metadatas, top_k=top_k, escalate_k=escalate_k)

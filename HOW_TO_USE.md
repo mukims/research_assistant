@@ -1,6 +1,6 @@
-# 📚 Citation Needed! (Marvin the Citebot) — Complete User Guide
+# 🤖 Marvin the Citebot — Complete User Guide
 
-Welcome to **Citation Needed!**, powered by **Marvin the Citebot** (Autonomous Academic Research Assistant). 
+Welcome to **Marvin the Citebot**, your autonomous academic research assistant.
 
 This system builds and searches an evidence-grounded academic literature corpus, automatically cites scientific manuscripts, verifies citations against full-text source papers with an explicit rubric, and facilitates interactive literature brainstorming.
 
@@ -10,7 +10,7 @@ This system builds and searches an evidence-grounded academic literature corpus,
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                       📚 Citation Needed!                                              │
+│                                       🤖 Marvin the Citebot                                            │
 │                                                                                                        │
 │  [Tab 1: Citation auditor]   [Tab 2: Research idea]  [Tab 3: Cite a draft]    [Tab 4: Chat]   [Tab 5]   │
 │  Audit in-text citations     Discover literature &   Batch-cite manuscript &  Interactive     Manual   │

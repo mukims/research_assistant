@@ -77,6 +77,30 @@ class TestJobResolution(unittest.TestCase):
         state, _, error, _ = app._resolve_job("f")
         self.assertEqual(state, "failed"); self.assertIn("boom", error)
 
+    def test_start_audit_job_registers_and_clears_stale_state(self):
+        import time
+        from unittest.mock import patch
+        import streamlit as st
+        st.session_state["audit_result"] = {"stale": True}
+        st.session_state["build_result"] = {"stale": True}
+        with patch("research_assistant.shared.seed_audit.audit_seed_citations") as mock_audit:
+            mock_audit.return_value = {"totals": {"total": 1}, "results": []}
+            job_id = app._start_audit_job("p.pdf", "p.pdf", origin="audit", force=True, existing_final={"answer": "saved"})
+            self.assertIsNotNone(job_id)
+            self.assertNotIn("audit_result", st.session_state)
+            self.assertNotIn("build_result", st.session_state)
+            self.assertEqual(st.session_state.get("active_job"), job_id)
+            job = self.run_jobs.get_job(job_id)
+            self.assertIsNotNone(job)
+            deadline = time.time() + 5
+            while job.state == "running" and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(job.state, "done")
+            mock_audit.assert_called_once_with("p.pdf", force=True, skip_if_cached=False)
+            self.assertEqual(job.result.get("answer"), "saved")
+            self.assertEqual(job.result.get("citation_audit"), {"totals": {"total": 1}, "results": []})
+
+
 
 class TestPipelineExecutionIsStreamlitFree(unittest.TestCase):
     def test_execute_pipeline_never_calls_streamlit(self):

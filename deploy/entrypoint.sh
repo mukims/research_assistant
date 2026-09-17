@@ -2,7 +2,7 @@
 set -e
 
 echo "=========================================================="
-echo " Starting Research Assistant All-in-One Standalone Container"
+echo " Starting Marvin the Citebot Standalone Container"
 echo "=========================================================="
 
 OLLAMA_PID=""
