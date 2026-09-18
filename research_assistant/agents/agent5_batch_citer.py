@@ -537,6 +537,12 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
 
     queries = contextualized_queries(sentences, contexts, paragraph_ids, needs_cite) if CITATION_CITER_CONTEXTUALIZE else {}
 
+    if CITATION_CITER_JUDGE:
+        # The judge's rubric prompt is the slow path on a local model; the
+        # audit's warning says so once per run. A no-op unless LLM_BACKEND is ollama.
+        from research_assistant.agents.agent8_verifier import _warn_if_context_is_tight  # agent8 imports this module
+        _warn_if_context_is_tight()
+
     # ── Process sentences ────────────────────────────────────────────────
     cited_sentences = []
     key_registry = {}      # every source offered to the model: citation → cite_N

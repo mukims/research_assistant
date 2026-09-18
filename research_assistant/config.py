@@ -239,12 +239,16 @@ CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 50)
 # accept the citation: Supports (or Partially supports, flagged) with a
 # verbatim supporting span. On since 2026-09-18: precision 18→21%, end_to_end
 # 13→12% (within the 1.6–4.7 pt noise floor), declined 6→25, 2 runs on 64
-# cited sentences.
+# cited sentences. Cost: up to three judge calls (the full rubric prompt) per
+# sentence that needs a citation, in place of one rewrite call; set
+# CITATION_CITER_JUDGE=0 to get the old path.
 CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", True)
 # The citer searches with a query written from the sentence's paragraph —
 # pronouns and "this approach" resolved — instead of the bare sentence, the
-# way the audit already does. Off until its gate on the citer evaluation
-# passes — scripts/evaluate_citer.py, query raw against ctx.
+# way the audit already does. Off: gate B on 2026-09-18 (raw vs
+# contextualized, judge on, 2 runs) moved sentence_hit 34→33% and
+# target_precision 22→22% — inside the noise floor, but the rule needs a
+# rise. Re-gate with the citer's own prompt before trying again.
 # Reuses the audit's contextualizer, so CITATION_AUDIT_CONTEXTUALIZE_QUERIES=False makes this a no-op.
 CITATION_CITER_CONTEXTUALIZE = _env_bool("CITATION_CITER_CONTEXTUALIZE", False)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
