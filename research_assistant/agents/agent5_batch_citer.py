@@ -239,9 +239,10 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
     if keys:
         return CiteResult(original=sentence, cited_text=cited_sentence, keys=keys,
                           candidates=candidates, reasoning=reasoning, query=query)
-    # A successful call is not a citation: when the model declines, or the
-    # reply could not be parsed, the sentence comes back unchanged.
-    return CiteResult(original=sentence, cited_text=sentence, candidates=candidates,
+    # A successful call is not a citation: decide from the text. The model's
+    # rewrite is kept even when it carries no key — that is what the batch
+    # loop always wrote, and this seam changes no output.
+    return CiteResult(original=sentence, cited_text=cited_sentence, candidates=candidates,
                       reasoning=reasoning, query=query,
                       skip_reason="context retrieved but the model did not cite it")
 

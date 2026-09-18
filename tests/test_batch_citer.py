@@ -348,6 +348,17 @@ class TestCiteSentence(unittest.TestCase):
         self.assertEqual(res.reasoning, "The context is about something else.")
         self.assertEqual(len(res.candidates), 1)
 
+    def test_declined_rewrite_is_kept_as_the_loop_always_did(self):
+        # The seam is an extraction, not a fix: a declining model's text
+        # reaches the draft exactly as before (spec §3.1, byte-identical).
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
+             patch("research_assistant.agents.agent5_batch_citer.chat",
+                   return_value=_reply("CITED: Nothing to see here.\nREASON: Off topic.")):
+            res = cite_sentence("Nothing here.", self.RES, {})
+        self.assertFalse(res.cited)
+        self.assertEqual(res.cited_text, "Nothing to see here.")
+        self.assertEqual(res.original, "Nothing here.")
+
     def test_query_and_exclusion_reach_retrieval(self):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[]) as hs:
             res = cite_sentence("This approach works.", self.RES, {},
