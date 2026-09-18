@@ -51,7 +51,7 @@ def seed_documents(seed_stem: str, metadatas) -> set:
     return out
 
 
-def run(cases, resources, runs=1):
+def run(cases, resources, runs=1, *, judge_gate=None):
     """The citer on every case: need check batched per seed file, as
     run_batch_citer batches a draft, then cite_sentence with the seed
     excluded. One sentence's failure is recorded, never fatal."""
@@ -84,6 +84,7 @@ def run(cases, resources, runs=1):
                             c["sentence"], resources, key_registry,
                             context=c.get("context"), exclude_docs=set(excluded[seed]),
                             paragraph_id=c.get("paragraph_id"),
+                            judge_gate=judge_gate,
                         )
                         rec["cite"] = asdict(res)
                     except Exception as exc:  # noqa: BLE001 — recorded, never fatal
@@ -97,6 +98,7 @@ def run(cases, resources, runs=1):
     return {
         "generated": datetime.now().isoformat(timespec="seconds"),
         "runs": runs,
+        "judge_gate": judge_gate,
         "excluded": excluded,
         "summary": score(results),
         "results": results,
@@ -109,6 +111,8 @@ def main():
     ap.add_argument("--score", action="store_true")
     ap.add_argument("--cases", nargs="*", default=None)
     ap.add_argument("--runs", type=int, default=1)
+    ap.add_argument("--judge", choices=["on", "off", "config"], default="config",
+                    help="force the judge acceptance test on or off; config reads CITATION_CITER_JUDGE")
     ap.add_argument("--out", default=RESULTS_DIR)
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
     args = ap.parse_args()
@@ -131,12 +135,16 @@ def main():
         from research_assistant.shared.db import load_search_resources
 
         cases = load_cases(args.cases)
-        out = run(cases, load_search_resources(), runs=args.runs)
+        judge_gate = {"on": True, "off": False}.get(args.judge)
+        if judge_gate is None:
+            from research_assistant.config import CITATION_CITER_JUDGE
+            judge_gate = CITATION_CITER_JUDGE
+        out = run(cases, load_search_resources(), runs=args.runs, judge_gate=judge_gate)
         print("\n" + render(out["summary"]))
         for seed, docs in out["excluded"].items():
             print(f"(excluded from search for {seed}: {docs or 'nothing — seed not in the index'})")
         os.makedirs(args.out, exist_ok=True)
-        path = os.path.join(args.out, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-citer.json")
+        path = os.path.join(args.out, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-judge{'on' if judge_gate else 'off'}.json")
         atomic_write_json(path, out)
         print(f"\nwritten {path}")
         return

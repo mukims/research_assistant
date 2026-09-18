@@ -235,6 +235,11 @@ JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_JUDGEMENT_NUM_CTX", 12
 # 20 were judged. 50 covers a typical paper's fetchable citations outright,
 # and prioritise_claims still orders the spend for anything larger.
 CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 50)
+# The citer accepts a candidate source only if the auditor's judge would
+# accept the citation: Supports (or Partially supports, flagged) with a
+# verbatim supporting span. Off until its gate on the citer evaluation
+# passes — scripts/evaluate_citer.py, judge off against on.
+CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", False)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
 
 

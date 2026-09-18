@@ -8,6 +8,7 @@ from research_assistant.agents.agent5_batch_citer import (
     CiteResult,
     _batch_needs_citation,
     _cite_keys,
+    _insert_cite,
     cite_sentence,
     run_batch_citer,
 )
@@ -244,7 +245,7 @@ from research_assistant.agents.agent5_batch_citer import _restore_terminal_punct
 
 
 class TestTerminalPunctuationSurvivesCitation(unittest.TestCase):
-    """gemma4:e2b drops the full stop when it appends \cite{}. The draft is
+    r"""gemma4:e2b drops the full stop when it appends \cite{}. The draft is
     joined with spaces and Agent 8 splits on [.!?]+whitespace, so a lost stop
     merges two sentences into one claim. Seen 2026-09-12."""
 
@@ -367,6 +368,114 @@ class TestCiteSentence(unittest.TestCase):
         self.assertEqual(hs.call_args.kwargs["exclude_docs"], {"seed.pdf"})
         self.assertEqual(res.query, "recursive Green's function inversion works")
         self.assertEqual(res.original, "This approach works.")
+
+
+def _verdict(judgement, span_verified=True, reason="because", span="the evidence sentence"):
+    return {"judgement": judgement, "model_judgement": judgement, "confidence": "High",
+            "evidence_sufficiency": "sufficient", "supporting_span": span, "span_verified": span_verified,
+            "reason": reason, "rubric_violations": [],
+            "slots": {"finding": {"assertion": "f", "verdict": "Supports"},
+                      "scope": {"assertion": "s", "verdict": "Supports"},
+                      "strength": {"assertion": "t", "verdict": "Not applicable"}}}
+
+
+class TestInsertCite(unittest.TestCase):
+    def test_before_terminal_punctuation(self):
+        self.assertEqual(_insert_cite("Graphene is ballistic.", "cite_1"), "Graphene is ballistic \\cite{cite_1}.")
+        self.assertEqual(_insert_cite("Is it ballistic?", "cite_2"), "Is it ballistic \\cite{cite_2}?")
+
+    def test_appended_when_there_is_none(self):
+        self.assertEqual(_insert_cite("Graphene is ballistic", "cite_1"), "Graphene is ballistic \\cite{cite_1}")
+
+    def test_trailing_whitespace_is_dropped(self):
+        self.assertEqual(_insert_cite("Ballistic.  ", "cite_1"), "Ballistic \\cite{cite_1}.")
+
+
+class TestCiteByJudge(unittest.TestCase):
+    """The citer and the auditor apply the same test. A candidate is cited
+    only if the judge would pass it — Supports with a verbatim span — and the
+    key is placed by code, so nothing has to be parsed out of a rewrite."""
+
+    RES = (None, None, [], [])
+    HITS = [
+        {"text": "Off-topic passage.", "chunk_index": 1, "rrf_score": 0.03,
+         "metadata": {"citation_source": "Roe 2019", "document": "roe.pdf"}},
+        {"text": "Ballistic transport observed in graphene.", "chunk_index": 2, "rrf_score": 0.02,
+         "metadata": {"citation_source": "Doe 2020", "document": "doe.pdf"}},
+        {"text": "Another passage.", "chunk_index": 3, "rrf_score": 0.01,
+         "metadata": {"citation_source": "Poe 2021", "document": "poe.pdf"}},
+    ]
+
+    def _cite(self, verdicts, **kw):
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(h) for h in self.HITS]), \
+             patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=verdicts) as judge, \
+             patch("research_assistant.agents.agent5_batch_citer.chat") as chat:
+            res = cite_sentence("Graphene is ballistic.", self.RES, {}, judge_gate=True, **kw)
+        return res, judge, chat
+
+    def test_first_supports_with_a_verified_span_is_cited_and_the_rewrite_is_never_asked_for(self):
+        res, judge, chat = self._cite([_verdict("Unclear / insufficient evidence"), _verdict("Supports")])
+        self.assertEqual(res.keys, ["cite_2"])
+        self.assertEqual(res.cited_text, "Graphene is ballistic \\cite{cite_2}.")
+        self.assertEqual(res.reasoning, "because")
+        self.assertFalse(res.partial)
+        self.assertEqual([v["judgement"] for v in res.verdicts], ["Unclear / insufficient evidence", "Supports"])
+        self.assertEqual(res.verdicts[1]["document"], "doe.pdf")
+        self.assertEqual(judge.call_count, 2)          # stopped at the first pass
+        chat.assert_not_called()
+
+    def test_supports_without_a_verified_span_is_not_accepted(self):
+        res, judge, _ = self._cite([_verdict("Supports", span_verified=False),
+                                    _verdict("Does not support"), _verdict("Unclear / insufficient evidence")])
+        self.assertFalse(res.cited)
+        self.assertEqual(res.cited_text, "Graphene is ballistic.")
+        self.assertEqual(res.skip_reason, "no candidate passed the judge")
+        self.assertEqual(judge.call_count, 3)
+        # The closest candidate is the unverified Supports, first by verdict rank; it is marked and its reason kept.
+        self.assertTrue(res.verdicts[0]["best"])
+        self.assertEqual(res.reasoning, "because")
+
+    def test_partially_supports_is_accepted_only_when_nothing_supports_and_is_flagged(self):
+        res, _, _ = self._cite([_verdict("Partially supports"), _verdict("Does not support"), _verdict("Unclear / insufficient evidence")])
+        self.assertEqual(res.keys, ["cite_1"])
+        self.assertTrue(res.partial)
+        res, _, _ = self._cite([_verdict("Partially supports"), _verdict("Supports")])
+        self.assertEqual(res.keys, ["cite_2"])
+        self.assertFalse(res.partial)
+
+    def test_a_failing_judge_call_moves_to_the_next_candidate(self):
+        res, _, _ = self._cite([RuntimeError("model down"), _verdict("Supports")])
+        self.assertEqual(res.keys, ["cite_2"])
+        self.assertIn("model down", res.verdicts[0]["error"])
+        self.assertNotIn("judgement", res.verdicts[0])
+
+    def test_every_call_failing_is_its_own_reason(self):
+        res, _, _ = self._cite([RuntimeError("a"), RuntimeError("b"), RuntimeError("c")])
+        self.assertFalse(res.cited)
+        self.assertEqual(res.skip_reason, "judge failed on every candidate")
+
+    def test_the_paragraph_window_reaches_the_judge_as_context(self):
+        _, judge, _ = self._cite([_verdict("Supports")], context="Before. «Graphene is ballistic.» After.")
+        self.assertEqual(judge.call_args.kwargs["context"], "Before. «Graphene is ballistic.» After.")
+
+    def test_gate_off_is_the_legacy_path(self):
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HITS[1])]), \
+             patch("research_assistant.agents.agent5_batch_citer.judge") as judge, \
+             patch("research_assistant.agents.agent5_batch_citer.chat",
+                   return_value=_reply("CITED: Graphene is ballistic \\cite{cite_1}.\nREASON: r")):
+            res = cite_sentence("Graphene is ballistic.", self.RES, {}, judge_gate=False)
+        judge.assert_not_called()
+        self.assertEqual(res.keys, ["cite_1"])
+        self.assertEqual(res.verdicts, [])
+
+    def test_gate_none_reads_the_config(self):
+        with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", True), \
+             patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HITS[1])]), \
+             patch("research_assistant.agents.agent5_batch_citer.judge", return_value=_verdict("Supports")), \
+             patch("research_assistant.agents.agent5_batch_citer.chat") as chat:
+            res = cite_sentence("Graphene is ballistic.", self.RES, {})
+        self.assertEqual(res.keys, ["cite_1"])
+        chat.assert_not_called()
 
 
 if __name__ == "__main__":

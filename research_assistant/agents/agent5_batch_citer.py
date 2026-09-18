@@ -12,7 +12,13 @@ from research_assistant.prompts import (
 )
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.db import load_search_resources
-from research_assistant.shared.search import hybrid_search
+from research_assistant.config import (
+    CITATION_CITER_JUDGE,
+    JUDGEMENT_EVIDENCE_MAX_CHARS,
+    JUDGEMENT_NEIGHBOUR_WINDOW,
+)
+from research_assistant.judgement.judge import compose_context, judge
+from research_assistant.shared.search import expand_neighbours, hybrid_search
 from research_assistant.shared.retry import retry
 from research_assistant.shared.llm import chat
 
@@ -199,13 +205,15 @@ class CiteResult:
 
 
 def cite_sentence(sentence, resources, key_registry, *, context=None, query=None,
-                  exclude_docs=None, paragraph_id=None) -> CiteResult:
+                  exclude_docs=None, paragraph_id=None, judge_gate=None) -> CiteResult:
     """Retrieve context for one sentence and ask the model to cite it.
 
     ``key_registry`` maps citation_source → cite key and is shared across a
     draft so a source keeps its key; entries are only ever added, so the
     next key is len + 1. ``query`` is what to search with (the sentence
     when None); ``exclude_docs`` keeps named documents out of retrieval.
+    ``judge_gate``: True/False forces the judge acceptance test on or off;
+    None reads CITATION_CITER_JUDGE.
     A model or retrieval failure propagates — the caller decides what a
     failed sentence means.
     """
@@ -234,6 +242,10 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
             "chunk_index": r.get("chunk_index"), "rrf_score": r.get("rrf_score"),
         })
 
+    if CITATION_CITER_JUDGE if judge_gate is None else judge_gate:
+        return _cite_by_judge(sentence, results, candidates, context=context, query=query,
+                              texts=texts, metadatas=metadatas)
+
     cited_sentence, reasoning = _cite_sentence_with_reasoning(sentence, context_str)
     keys = sorted(_cite_keys(cited_sentence))
     if keys:
@@ -245,6 +257,69 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
     return CiteResult(original=sentence, cited_text=cited_sentence, candidates=candidates,
                       reasoning=reasoning, query=query,
                       skip_reason="context retrieved but the model did not cite it")
+
+
+_VERDICT_RANK = {"Supports": 0, "Partially supports": 1, "Contradicts": 2,
+                 "Does not support": 3, "Unclear / insufficient evidence": 4}
+_VERDICT_FIELDS = ("judgement", "model_judgement", "confidence", "evidence_sufficiency",
+                   "supporting_span", "span_verified", "reason", "rubric_violations", "slots")
+
+
+def _insert_cite(sentence: str, key: str) -> str:
+    """\\cite{key} before the terminal punctuation — where the legacy rewrite
+    already ends up after _restore_terminal_punctuation — or appended."""
+    s = sentence.rstrip()
+    if s and s[-1] in _TERMINAL:
+        return f"{s[:-1].rstrip()} \\cite{{{key}}}{s[-1]}"
+    return f"{s} \\cite{{{key}}}"
+
+
+def _accepted(sentence, cand, record, candidates, verdicts, query, *, partial) -> CiteResult:
+    return CiteResult(original=sentence, cited_text=_insert_cite(sentence, cand["key"]),
+                      keys=[cand["key"]], candidates=candidates, reasoning=record.get("reason") or "",
+                      query=query, verdicts=verdicts, partial=partial)
+
+
+def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadatas) -> CiteResult:
+    """Judge each candidate in retrieval order with the auditor's own judge
+    and cite the first that passes: Supports with a verbatim span, else the
+    first Partially supports with one, flagged. The key is placed by code —
+    the judge chose, nothing has to be parsed out of a rewrite. Nothing
+    passing means no citation and a record of what came closest, so the
+    report can show the same account the audit would.
+    """
+    from research_assistant.agents.agent8_verifier import assemble_evidence  # agent8 imports this module
+
+    expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+    ctx = compose_context(context) if context else None
+    verdicts, partial = [], None
+    for hit, cand in zip(hits, candidates):
+        evidence = assemble_evidence([hit], JUDGEMENT_EVIDENCE_MAX_CHARS)
+        record = {"key": cand["key"], "document": cand.get("document"), "evidence": evidence}
+        try:
+            v = judge(sentence, evidence, context=ctx)
+        except Exception as exc:  # noqa: BLE001 — one candidate's failure is not the sentence's
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            verdicts.append(record)
+            continue
+        record.update({k: v.get(k) for k in _VERDICT_FIELDS})
+        verdicts.append(record)
+        if v.get("judgement") == "Supports" and v.get("span_verified") is True:
+            return _accepted(sentence, cand, record, candidates, verdicts, query, partial=False)
+        if partial is None and v.get("judgement") == "Partially supports" and v.get("span_verified") is True:
+            partial = (cand, record)
+    if partial is not None:
+        return _accepted(sentence, partial[0], partial[1], candidates, verdicts, query, partial=True)
+
+    judged = [r for r in verdicts if "judgement" in r]
+    if not judged:
+        return CiteResult(original=sentence, cited_text=sentence, candidates=candidates,
+                          verdicts=verdicts, query=query, skip_reason="judge failed on every candidate")
+    best = min(judged, key=lambda r: _VERDICT_RANK.get(r["judgement"], 9))   # ties keep retrieval order
+    best["best"] = True
+    return CiteResult(original=sentence, cited_text=sentence, candidates=candidates, verdicts=verdicts,
+                      query=query, reasoning=best.get("reason") or "",
+                      skip_reason="no candidate passed the judge")
 
 
 def _generate_report(

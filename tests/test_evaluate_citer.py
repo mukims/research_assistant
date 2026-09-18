@@ -89,3 +89,16 @@ class TestRun(unittest.TestCase):
             out = ec.run([_case("c_1"), _case("c_2")], self.RESOURCES, runs=1)
         cite.assert_not_called()
         self.assertTrue(all("misaligned" in r["error"] for r in out["results"]))
+
+    def test_judge_gate_is_forwarded_and_named_in_the_result(self):
+        seen = {}
+
+        def fake_cite(sentence, resources, key_registry, **kw):
+            seen.update(kw)
+            return CiteResult(original=sentence, cited_text=sentence, query=sentence, skip_reason="no candidate passed the judge")
+
+        with patch.object(ec.citer, "_batch_needs_citation", return_value=[True]), \
+             patch.object(ec.citer, "cite_sentence", side_effect=fake_cite):
+            out = ec.run([_case("c_1")], self.RESOURCES, runs=1, judge_gate=True)
+        self.assertIs(seen["judge_gate"], True)
+        self.assertIs(out["judge_gate"], True)
