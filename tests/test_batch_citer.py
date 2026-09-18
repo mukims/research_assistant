@@ -549,6 +549,68 @@ class TestReportShowsTheJudgesAccount(unittest.TestCase):
                 report = f.read()
         self.assertIn("⚠ **Partial support**", report)
 
+    # Two chunks of one paper share a citation_source and so a key. The
+    # report used to pick the first verdict with the cited key — chunk 3's
+    # Unclear — under a sentence cited on the strength of chunk 4.
+    SAME_PAPER_HITS = [
+        {"text": "Graphene was grown by CVD.", "chunk_index": 3, "rrf_score": 0.03,
+         "metadata": {"citation_source": "Doe 2020", "document": "doe.pdf"}},
+        {"text": "Ballistic transport observed in graphene.", "chunk_index": 4, "rrf_score": 0.02,
+         "metadata": {"citation_source": "Doe 2020", "document": "doe.pdf"}},
+    ]
+    SAME_PAPER_VERDICTS = [
+        _verdict("Unclear / insufficient evidence", span_verified=False, span=None,
+                 reason="The growth passage says nothing about transport."),
+        _verdict("Supports", span="Ballistic transport observed in graphene."),
+    ]
+
+    def test_the_report_shows_the_verdict_of_the_chunk_that_was_accepted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w") as f:
+                f.write("Graphene shows ballistic transport.")
+            out_path = os.path.join(tmpdir, "cited.txt")
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", True), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(h) for h in self.SAME_PAPER_HITS]), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", return_value=_reply("1. YES")), \
+                 patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=list(self.SAME_PAPER_VERDICTS)):
+                run_batch_citer(draft_path, out_path)
+            with open(out_path) as f:
+                self.assertEqual(f.read(), "Graphene shows ballistic transport \\cite{cite_1}.")
+            with open(out_path.replace(".txt", "_report.md")) as f:
+                report = f.read()
+        self.assertIn("**Verified span:** “Ballistic transport observed in graphene.”", report)
+        self.assertNotIn("The growth passage says nothing about transport.", report)
+
+    def test_the_accepted_verdict_is_flagged_on_its_record(self):
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(h) for h in self.SAME_PAPER_HITS]), \
+             patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=list(self.SAME_PAPER_VERDICTS)):
+            res = cite_sentence("Graphene shows ballistic transport.", (None, None, [], []), {}, judge_gate=True)
+        self.assertEqual(res.keys, ["cite_1"])
+        self.assertEqual([v["key"] for v in res.verdicts], ["cite_1", "cite_1"])
+        self.assertEqual([v["chunk_index"] for v in res.verdicts], [3, 4])
+        self.assertIs(res.verdicts[1]["accepted"], True)
+        self.assertNotIn("accepted", res.verdicts[0])
+
+    def test_the_log_names_the_judges_reason_when_every_candidate_failed(self):
+        # "retrieved context did not support the claim" was logged for every
+        # decline with candidates — wrong when the judge itself failed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w") as f:
+                f.write("Graphene shows ballistic transport.")
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", True), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HIT)]), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", return_value=_reply("1. YES")), \
+                 patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=RuntimeError("model down")), \
+                 patch("research_assistant.shared.retry.time.sleep"), \
+                 self.assertLogs("agent5", level="INFO") as cm:
+                run_batch_citer(draft_path, os.path.join(tmpdir, "cited.txt"))
+        self.assertTrue(any("Declined: judge failed on every candidate" in line for line in cm.output), cm.output)
+        self.assertFalse(any("did not support the claim" in line for line in cm.output))
+
 
 class TestSplitterLivesInClaimText(unittest.TestCase):
     def test_agent5_re_exports_the_shared_splitter(self):

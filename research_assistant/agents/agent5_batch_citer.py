@@ -270,7 +270,8 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
 _VERDICT_RANK = {"Supports": 0, "Partially supports": 1, "Contradicts": 2,
                  "Does not support": 3, "Unclear / insufficient evidence": 4}
 _VERDICT_FIELDS = ("judgement", "model_judgement", "confidence", "evidence_sufficiency",
-                   "supporting_span", "span_verified", "reason", "rubric_violations", "slots")
+                   "supporting_span", "span_verified", "span_cites_others", "reason",
+                   "rubric_violations", "slots")
 
 
 def _insert_cite(sentence: str, key: str) -> str:
@@ -283,6 +284,9 @@ def _insert_cite(sentence: str, key: str) -> str:
 
 
 def _accepted(sentence, cand, record, candidates, verdicts, query, *, partial) -> CiteResult:
+    # Marked on the record, as ``best`` is when nothing passes: two chunks of
+    # one paper share a key, so the report cannot find this one by key alone.
+    record["accepted"] = True
     return CiteResult(original=sentence, cited_text=_insert_cite(sentence, cand["key"]),
                       keys=[cand["key"]], candidates=candidates, reasoning=record.get("reason") or "",
                       query=query, verdicts=verdicts, partial=partial)
@@ -303,7 +307,8 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
     verdicts, partial = [], None
     for hit, cand in zip(hits, candidates):
         evidence = assemble_evidence([hit], JUDGEMENT_EVIDENCE_MAX_CHARS)
-        record = {"key": cand["key"], "document": cand.get("document"), "evidence": evidence}
+        record = {"key": cand["key"], "document": cand.get("document"),
+                  "chunk_index": hit.get("chunk_index"), "evidence": evidence}
         try:
             v = judge(sentence, evidence, context=ctx)
         except Exception as exc:  # noqa: BLE001 — one candidate's failure is not the sentence's
@@ -336,7 +341,8 @@ def _verdict_steps(record: dict, sentence: str) -> list:
     from research_assistant.shared.seed_audit import explain_verdict_steps
 
     item = {"outcome": "judged", "claim": sentence, "evidence_hits": 1}
-    item.update({k: v for k, v in record.items() if k not in ("key", "document", "evidence", "best", "error")})
+    item.update({k: v for k, v in record.items()
+                 if k not in ("key", "document", "chunk_index", "evidence", "best", "accepted", "error")})
     return explain_verdict_steps(item)
 
 
@@ -427,14 +433,16 @@ def _generate_report(
                 lines.append("**Reasoning:**")
                 lines.append(f"{entry['reasoning']}\n")
 
-            chosen = next((v for v in entry.get("verdicts") or [] if v.get("key") in _cite_keys(entry["cited_text"])), None)
-            if chosen:
+            # By the flag, not by key: two chunks of one paper share a key,
+            # and the first one judged may be the one that did not pass.
+            accepted_verdict = next((v for v in entry.get("verdicts") or [] if v.get("accepted")), None)
+            if accepted_verdict:
                 if entry.get("partial"):
                     lines.append("⚠ **Partial support** — the judge found the source carries a weaker version of this sentence.\n")
-                if chosen.get("supporting_span"):
-                    lines.append(f"**Verified span:** “{chosen['supporting_span']}”\n")
+                if accepted_verdict.get("supporting_span"):
+                    lines.append(f"**Verified span:** “{accepted_verdict['supporting_span']}”\n")
                 lines.append("**Why this citation**")
-                lines.extend(f"- *{label}:* {text}" for label, text in _verdict_steps(chosen, entry["original"]))
+                lines.extend(f"- *{label}:* {text}" for label, text in _verdict_steps(accepted_verdict, entry["original"]))
                 lines.append("")
 
             # Separate what was actually cited from what was merely retrieved —
@@ -560,7 +568,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             entry["sources"] = res.candidates
         else:
             if res.candidates:
-                logger.info(" -> Declined: retrieved context did not support the claim.")
+                logger.info(" -> Declined: %s", res.skip_reason)
                 entry["candidates"] = res.candidates
             else:
                 logger.info(" -> No context found.")
