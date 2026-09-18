@@ -17,6 +17,7 @@ include = ["research_assistant*"]
 # the only mechanism that ships them.
 [tool.setuptools.package-data]
 "research_assistant.judgement" = ["prompt.md", "cases/*.jsonl"]
+"research_assistant.eval" = ["cases/*.jsonl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
