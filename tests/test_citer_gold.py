@@ -97,6 +97,11 @@ class TestBuild(unittest.TestCase):
         b = [r["sentence"] for r in self._build(negatives_seed=1) if r["kind"] == "uncited"]
         self.assertEqual(a, b)
 
+    def test_id_prefix_tells_same_month_seeds_apart(self):
+        self.assertEqual(cg._short("arxiv_2108.10114v3"), "2108.10114")
+        self.assertNotEqual(cg._short("arxiv_2108.10114v3"), cg._short("arxiv_2108.99999v1"))
+        self.assertEqual(cg._short("doi_10.1038_nature12952"), "doi_10.1038_nature12952")
+
     def test_no_tei_raises(self):
         with patch.object(cg, "find_tei_for_seed", return_value=None):
             with self.assertRaises(FileNotFoundError):

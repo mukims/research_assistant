@@ -41,9 +41,11 @@ def _stem(path: str) -> str:
 
 
 def _short(stem: str) -> str:
-    """An id prefix: the arXiv year-month when there is one, else the stem."""
-    m = re.search(r"(\d{4})\.\d{4,5}", stem)
-    return m.group(1) if m else stem[:16]
+    """An id prefix: the full arXiv id when there is one, else the stem.
+    Ids must be unique across every gold file load_cases() reads, so the
+    prefix keeps whatever tells two seeds apart."""
+    m = re.search(r"\d{4}\.\d{4,5}", stem)
+    return m.group(0) if m else stem
 
 
 def cited_records(claims: list[dict], seed_name: str, manifest: dict) -> list[dict]:
