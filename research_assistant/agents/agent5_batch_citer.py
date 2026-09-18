@@ -251,10 +251,11 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
     if keys:
         return CiteResult(original=sentence, cited_text=cited_sentence, keys=keys,
                           candidates=candidates, reasoning=reasoning, query=query)
-    # A successful call is not a citation: decide from the text. The model's
-    # rewrite is kept even when it carries no key — that is what the batch
-    # loop always wrote, and this seam changes no output.
-    return CiteResult(original=sentence, cited_text=cited_sentence, candidates=candidates,
+    # A successful call is not a citation: decide from the text. A reply with
+    # no key is a decline, and a declining model's rewrite is noise — the
+    # draft keeps the author's sentence, as the report already says it does.
+    # (The judge path never uses the rewrite at all: _insert_cite places the key.)
+    return CiteResult(original=sentence, cited_text=sentence, candidates=candidates,
                       reasoning=reasoning, query=query,
                       skip_reason="context retrieved but the model did not cite it")
 

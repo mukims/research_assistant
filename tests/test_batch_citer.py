@@ -194,6 +194,12 @@ class TestRunBatchCiter(unittest.TestCase):
             self.assertTrue(os.path.exists(mapping_path))
             self.assertTrue(os.path.exists(report_path))
 
+            with open(out_path) as f:
+                draft = f.read()
+            # The model's declined reply above is a paraphrase, not the
+            # sentence. Nothing of it may reach the draft.
+            self.assertEqual(draft, self.DRAFT_TEXT)
+
             with open(mapping_path) as f:
                 mapping = json.load(f)
             # The retrieved source was never actually used in a \cite{}, so
@@ -349,16 +355,17 @@ class TestCiteSentence(unittest.TestCase):
         self.assertEqual(res.reasoning, "The context is about something else.")
         self.assertEqual(len(res.candidates), 1)
 
-    def test_declined_rewrite_is_kept_as_the_loop_always_did(self):
-        # The seam is an extraction, not a fix: a declining model's text
-        # reaches the draft exactly as before (spec §3.1, byte-identical).
+    def test_declined_rewrite_never_reaches_the_draft(self):
+        # A decline carries no key, so the model's text is noise: the draft
+        # keeps the author's sentence, as the report already claims it does.
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
              patch("research_assistant.agents.agent5_batch_citer.chat",
                    return_value=_reply("CITED: Nothing to see here.\nREASON: Off topic.")):
             res = cite_sentence("Nothing here.", self.RES, {})
         self.assertFalse(res.cited)
-        self.assertEqual(res.cited_text, "Nothing to see here.")
+        self.assertEqual(res.cited_text, "Nothing here.")
         self.assertEqual(res.original, "Nothing here.")
+        self.assertEqual(res.reasoning, "Off topic.")
 
     def test_query_and_exclusion_reach_retrieval(self):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[]) as hs:
