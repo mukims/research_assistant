@@ -285,9 +285,11 @@ class TestExcludeDocs(unittest.TestCase):
         def __init__(self, ids):
             super().__init__(ids)
             self.where = None
+            self.n_results = None
 
         def query(self, **kwargs):
             self.where = kwargs.get("where")
+            self.n_results = kwargs.get("n_results")
             return super().query(**kwargs)
 
     def test_sparse_side_drops_excluded_documents(self):
@@ -296,6 +298,18 @@ class TestExcludeDocs(unittest.TestCase):
         out = hybrid_search("q", FakeCollection([]), FakeBM25([3.0, 2.0, 1.0]), texts, metas,
                             top_k=3, embeddings_model=FakeEmbeddings(), exclude_docs={"seed.pdf"})
         self.assertEqual([r["chunk_index"] for r in out], [1])
+
+    def test_exclusion_widens_the_candidate_pool_like_doc_filter(self):
+        # The sparse side drops the excluded chunks after ranking; a seed's
+        # own chunks dominate a query written from its sentences, so the
+        # narrow 15-deep pool lost a mean 3.8 of 15 candidates on nature12952.
+        coll = self._Coll([])
+        texts, metas = _corpus(2)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1,
+                      embeddings_model=FakeEmbeddings(), exclude_docs={"seed.pdf"})
+        self.assertEqual(coll.n_results, 60)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1, embeddings_model=FakeEmbeddings())
+        self.assertEqual(coll.n_results, 15)
 
     def test_dense_where_carries_the_exclusion(self):
         coll = self._Coll([])

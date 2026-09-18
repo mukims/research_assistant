@@ -85,7 +85,10 @@ def hybrid_search(
 
     # When narrowing to a handful of documents, most global candidates get
     # discarded — widen the candidate pool so enough survive the filter.
-    k_cand = max(60, top_k * 10) if doc_filter else max(15, top_k * 3)
+    # Excluding a document costs the same way: the sparse side drops the
+    # excluded chunks from the pool after ranking, and a seed paper's own
+    # chunks dominate a query written from its sentences.
+    k_cand = max(60, top_k * 10) if (doc_filter or exclude_docs) else max(15, top_k * 3)
 
     # 1. Sparse (BM25) retrieval — tokenised the way the pickle was built
     # (db.load_search_resources tags the object; an untagged object is v1).
