@@ -237,9 +237,10 @@ JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_JUDGEMENT_NUM_CTX", 12
 CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 50)
 # The citer accepts a candidate source only if the auditor's judge would
 # accept the citation: Supports (or Partially supports, flagged) with a
-# verbatim supporting span. Off until its gate on the citer evaluation
-# passes — scripts/evaluate_citer.py, judge off against on.
-CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", False)
+# verbatim supporting span. On since 2026-09-18: precision 18→21%, end_to_end
+# 13→12% (within the 1.6–4.7 pt noise floor), declined 6→25, 2 runs on 64
+# cited sentences.
+CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", True)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
 
 
