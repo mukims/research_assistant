@@ -379,7 +379,7 @@ class TestCiteSentence(unittest.TestCase):
 
     def test_query_and_exclusion_reach_retrieval(self):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[]) as hs:
-            res = cite_sentence("This approach works.", self.RES, {},
+            res = cite_sentence("This approach works.", self.RES, {}, judge_gate=False,
                                 query="recursive Green's function inversion works", exclude_docs={"seed.pdf"})
         self.assertEqual(hs.call_args[0][0], "recursive Green's function inversion works")
         self.assertEqual(hs.call_args.kwargs["exclude_docs"], {"seed.pdf"})
@@ -493,6 +493,26 @@ class TestCiteByJudge(unittest.TestCase):
     def test_the_paragraph_window_reaches_the_judge_as_context(self):
         _, judge, _ = self._cite([_verdict("Supports")], context="Before. «Graphene is ballistic.» After.")
         self.assertEqual(judge.call_args.kwargs["context"], "Before. «Graphene is ballistic.» After.")
+
+    def test_the_judge_receives_the_sentence_and_the_neighbour_expanded_chunk(self):
+        # The evidence is assembled as the audit assembles it: the hit
+        # wrapped in its JUDGEMENT_NEIGHBOUR_WINDOW (1) adjacent chunks of
+        # the same document, before / hit / after, newline-joined.
+        texts = ["before.", "Ballistic transport observed in graphene.", "after."]
+        metadatas = [{"citation_source": "Doe 2020", "document": "doe.pdf"}] * 3
+        hit = {"text": texts[1], "chunk_index": 1, "rrf_score": 0.02, "metadata": dict(metadatas[1])}
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[hit]), \
+             patch("research_assistant.agents.agent5_batch_citer.judge", return_value=_verdict("Supports")) as judge:
+            res = cite_sentence("Graphene is ballistic.", (None, None, texts, metadatas), {}, judge_gate=True)
+        self.assertEqual(res.keys, ["cite_1"])
+        sentence, evidence = judge.call_args.args
+        self.assertEqual(sentence, "Graphene is ballistic.")
+        self.assertIn("before.", evidence)
+        self.assertIn("Ballistic transport observed in graphene.", evidence)
+        self.assertIn("after.", evidence)
+        self.assertLess(evidence.index("before."), evidence.index("Ballistic"))
+        self.assertLess(evidence.index("Ballistic"), evidence.index("after."))
+        self.assertEqual(res.verdicts[0]["evidence"], evidence)
 
     def test_gate_off_is_the_legacy_path(self):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HITS[1])]), \
