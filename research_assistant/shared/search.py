@@ -25,12 +25,15 @@ def _get_embeddings():
     return get_embeddings()
 
 
-def _where(doc_filter, exclude_types):
-    """ChromaDB where-clause for the dense side. Two conditions need $and;
-    one stands alone; none is None (Chroma rejects an empty dict)."""
+def _where(doc_filter, exclude_types, exclude_docs=None):
+    """ChromaDB where-clause for the dense side. Two or more conditions need
+    $and; one stands alone; none is None (Chroma rejects an empty dict).
+    doc_filter sorts for a stable clause; the exclusions sort likewise."""
     clauses = []
     if doc_filter:
-        clauses.append({"document": {"$in": list(doc_filter)}})
+        clauses.append({"document": {"$in": sorted(doc_filter)}})
+    if exclude_docs:
+        clauses.append({"document": {"$nin": sorted(exclude_docs)}})
     if exclude_types:
         clauses.append({"type": {"$nin": sorted(exclude_types)}})
     if not clauses:
@@ -49,6 +52,7 @@ def hybrid_search(
     embeddings_model=None,
     doc_filter: set | None = None,
     exclude_types: set | None = None,
+    exclude_docs: set | None = None,
 ) -> list[dict]:
     """
     Perform hybrid (BM25 sparse + dense vector) search with Reciprocal Rank Fusion.
@@ -69,6 +73,9 @@ def hybrid_search(
                           both retrievers (e.g. ``{"figure_description"}``
                           — Agent 8 never takes a model's reading of a plot
                           as evidence).
+        exclude_docs:     Chunk ``metadata["document"]`` values to leave out of
+                          both retrievers — the citer's evaluation keeps the
+                          seed paper out of its own search.
 
     Returns:
         list[dict]: Each entry has keys: chunk_index, text, metadata, rrf_score.
@@ -104,6 +111,8 @@ def hybrid_search(
         sparse_top_indices = [i for i in sparse_top_indices if _meta(i).get("document") in doc_filter]
     if exclude_types:
         sparse_top_indices = [i for i in sparse_top_indices if _meta(i).get("type") not in exclude_types]
+    if exclude_docs:
+        sparse_top_indices = [i for i in sparse_top_indices if _meta(i).get("document") not in exclude_docs]
 
     # 2. Dense (embedding) retrieval
     query_emb = embeddings_model.embed_query(query)
@@ -111,7 +120,7 @@ def hybrid_search(
         query_embeddings=[query_emb],
         n_results=k_cand,
         include=["documents", "metadatas", "distances"],
-        where=_where(doc_filter, exclude_types),
+        where=_where(doc_filter, exclude_types, exclude_docs),
     )
 
     # The integer in a "chunk_N" id doubles as the position of that chunk in

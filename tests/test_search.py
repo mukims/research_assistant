@@ -276,6 +276,54 @@ class TestExcludeTypes(unittest.TestCase):
         self.assertIsNone(coll.where)
 
 
+class TestExcludeDocs(unittest.TestCase):
+    """The citer's evaluation runs on a seed paper's own sentences. Two of the
+    three seeds are in the chunk index, so without an exclusion retrieval
+    would hand the citer the seed's own text and the score would be a lie."""
+
+    class _Coll(FakeCollection):
+        def __init__(self, ids):
+            super().__init__(ids)
+            self.where = None
+
+        def query(self, **kwargs):
+            self.where = kwargs.get("where")
+            return super().query(**kwargs)
+
+    def test_sparse_side_drops_excluded_documents(self):
+        texts = ["a", "b", "c"]
+        metas = [{"document": "seed.pdf"}, {"document": "ref.pdf"}, {"document": "seed.pdf"}]
+        out = hybrid_search("q", FakeCollection([]), FakeBM25([3.0, 2.0, 1.0]), texts, metas,
+                            top_k=3, embeddings_model=FakeEmbeddings(), exclude_docs={"seed.pdf"})
+        self.assertEqual([r["chunk_index"] for r in out], [1])
+
+    def test_dense_where_carries_the_exclusion(self):
+        coll = self._Coll([])
+        texts, metas = _corpus(2)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1,
+                      embeddings_model=FakeEmbeddings(), exclude_docs={"doc0.pdf"})
+        self.assertEqual(coll.where, {"document": {"$nin": ["doc0.pdf"]}})
+
+    def test_exclusion_combines_with_the_other_filters(self):
+        coll = self._Coll([])
+        texts, metas = _corpus(2)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1,
+                      embeddings_model=FakeEmbeddings(),
+                      doc_filter={"doc0.pdf", "doc1.pdf"}, exclude_docs={"doc1.pdf"}, exclude_types={"caption"})
+        self.assertEqual(coll.where, {"$and": [
+            {"document": {"$in": ["doc0.pdf", "doc1.pdf"]}},
+            {"document": {"$nin": ["doc1.pdf"]}},
+            {"type": {"$nin": ["caption"]}},
+        ]})
+
+    def test_no_exclusion_changes_nothing(self):
+        coll = self._Coll([])
+        texts, metas = _corpus(2)
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0]), texts, metas, top_k=1,
+                      embeddings_model=FakeEmbeddings(), exclude_docs=set())
+        self.assertIsNone(coll.where)
+
+
 from research_assistant.shared.search import expand_neighbours
 
 
