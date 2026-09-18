@@ -245,6 +245,7 @@ CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", True)
 # pronouns and "this approach" resolved — instead of the bare sentence, the
 # way the audit already does. Off until its gate on the citer evaluation
 # passes — scripts/evaluate_citer.py, query raw against ctx.
+# Reuses the audit's contextualizer, so CITATION_AUDIT_CONTEXTUALIZE_QUERIES=False makes this a no-op.
 CITATION_CITER_CONTEXTUALIZE = _env_bool("CITATION_CITER_CONTEXTUALIZE", False)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
 

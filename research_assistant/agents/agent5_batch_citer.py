@@ -28,11 +28,11 @@ logger = get_logger("agent5")
 
 
 def split_paragraphs(text: str) -> list:
-    """Sentences per paragraph, paragraphs being blank-line separated. The
-    flat sentence list is what split_into_sentences gave for the whole text
-    — a paragraph break is whitespace after a full stop to the splitter —
-    so the draft is rebuilt exactly as before; the paragraphs are for the
-    context each sentence is cited in."""
+    """Paragraphs are blank-line separated. Each paragraph is sentence-split on
+    its own, so a heading or a colon lead-in with no terminal punctuation is
+    its own unit instead of being glued to the next sentence, and the draft
+    is rebuilt paragraph by paragraph (see run_batch_citer). A single
+    paragraph splits exactly as split_into_sentences did on the whole text."""
     paragraphs = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
     return [split_into_sentences(p) for p in paragraphs] or [[]]
 
@@ -487,8 +487,9 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     else:
         collection, bm25, texts, metadatas = load_search_resources()
 
+    paragraphs = split_paragraphs(draft_text)
     sentences, contexts, paragraph_ids = [], [], []
-    for p_idx, para in enumerate(split_paragraphs(draft_text)):
+    for p_idx, para in enumerate(paragraphs):
         for s_idx, sent in enumerate(para):
             sentences.append(sent)
             contexts.append(sentence_context(para, s_idx))
@@ -569,7 +570,14 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         citation_entries.append(entry)
 
     # ── Write outputs ────────────────────────────────────────────────────
-    final_draft = " ".join(cited_sentences)
+    # Rebuilt paragraph by paragraph: a multi-paragraph draft keeps its
+    # blank lines and a heading stays on its own line. (The flat join
+    # used to fold every paragraph onto one line.)
+    rebuilt, pos = [], 0
+    for para in paragraphs:
+        rebuilt.append(" ".join(cited_sentences[pos:pos + len(para)]))
+        pos += len(para)
+    final_draft = "\n\n".join(p for p in rebuilt if p)
 
     with open(out_path, "w") as f:
         f.write(final_draft)

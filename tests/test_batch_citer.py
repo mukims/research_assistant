@@ -571,6 +571,36 @@ class TestParagraphs(unittest.TestCase):
         self.assertEqual(split_paragraphs("A one. A two."), [["A one.", "A two."]])
 
 
+class TestMultiParagraphDraftKeepsItsShape(unittest.TestCase):
+    """A heading is its own unit and the rebuilt draft keeps the blank line —
+    the flat join used to fold every paragraph onto one line."""
+
+    def setUp(self):
+        for name, value in (("CITATION_CITER_JUDGE", False), ("CITATION_CITER_CONTEXTUALIZE", False)):
+            p = patch(f"research_assistant.agents.agent5_batch_citer.{name}", value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_heading_and_two_paragraphs(self):
+        draft = "## Introduction\n\nGraphene shows ballistic transport at low temperature.\n\nThis paragraph needs no citation."
+        hit = {"text": "Ballistic transport in graphene.", "chunk_index": 1, "rrf_score": 0.1,
+               "metadata": {"citation_source": "Doe 2020", "document": "doe.pdf"}}
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "draft.txt"); out = os.path.join(d, "cited.txt")
+            with open(src, "w") as f:
+                f.write(draft)
+            with patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[hit]), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", side_effect=[
+                     _reply("1. YES\n2. NO"),
+                     _reply("CITED: Graphene shows ballistic transport at low temperature \\cite{cite_1}.\nREASON: Reported."),
+                 ]):
+                run_batch_citer(src, out)
+            with open(out) as f:
+                self.assertEqual(f.read(),
+                    "## Introduction\n\nGraphene shows ballistic transport at low temperature \\cite{cite_1}.\n\nThis paragraph needs no citation.")
+
+
 class TestContextualizedQueries(unittest.TestCase):
     SENTS = ["We use the recursive Green's function method.", "This approach scales linearly.", "Unrelated."]
     CTX = ["«We use the recursive Green's function method.» This approach scales linearly.",
