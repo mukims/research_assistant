@@ -601,21 +601,34 @@ pipeline, not the UI.
 
 ## 9. Verification (Agent 8)
 
-### 9.1 An audit pass, not an inline gate
+### 9.1 The judge is also the citer's gate
 
-Agent 8 runs after Agent 5, over its output. Agents 4 and 5 are unchanged.
+Agent 8 still runs after Agent 5, over its output. Since 2026-09-18 the
+same judge also sits inside Agent 5's per-sentence seam
+(`agent5_batch_citer.cite_sentence`, behind `CITATION_CITER_JUDGE`, on by
+default): each retrieved candidate is judged in retrieval order and the
+first that the audit would accept — `Supports` with a verbatim span, else
+`Partially supports`, flagged — is inserted deterministically by
+`_insert_cite`. Nothing is parsed out of a model rewrite any more.
 
-**Why.** Judgement is one claim–evidence pair at a time; the slot
-decomposition is what makes it accurate and it cannot be batched without
-losing that. Agent 5 already batches its citation-need check
-(`CITATION_CHECK_BATCH_SIZE = 20`) because per-sentence calls were too
-expensive, and putting judgement inline on every retrieved candidate roughly
-triples a batch run's call count — acceptable against a hosted API,
-impractical against a local CPU model.
+**Why now.** The citer had never been measured. `research_assistant/eval/`
+builds a ground truth from the seed papers' own citations and
+`scripts/evaluate_citer.py` scores it; on that gate (64 cited sentences,
+three seeds, 2 runs) the judge raised target precision 18→21% and moved
+end-to-end 13→12%, inside the run-to-run noise floor, while declining four
+times as many sentences. The rule was met, not exceeded — the number is in
+`config.py` next to the flag.
 
-**The trade-off.** A wrong citation is inserted and then flagged rather than
-blocked, and the draft is not corrected automatically. Making judgement a gate
-is a coherent future change; it is not this one.
+**The cost.** Up to three judge calls (the full rubric prompt) per sentence
+that needs a citation, in place of one rewrite call. Acceptable against a
+hosted API; against a local CPU model it is the slow path §9.1 used to warn
+about, and `run_batch_citer` now logs that warning once per run when the
+backend is Ollama. `CITATION_CITER_JUDGE=0` restores the rewrite path.
+
+**What the audit still adds.** The gate judges the top three retrieved
+chunks for one sentence; the audit judges every citation in a finished
+draft against re-retrieved evidence, with neighbour expansion and
+escalation. A wrong citation the gate lets through is still flagged there.
 
 ### 9.2 Evidence is re-retrieved, not replayed
 

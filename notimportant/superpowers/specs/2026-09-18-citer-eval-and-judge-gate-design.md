@@ -79,6 +79,9 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
   {"$nin": [...]}}` in the where-clause), next to the existing `exclude_types`.
 - Behaviour with `context=None` and the judge off is byte-identical to today; the existing tests
   and two new ones on the seam pin it.
+- Amended 2026-09-18: two deliberate departures — a declining rewrite no longer replaces the
+  sentence (4831d7b), and a multi-paragraph draft is rebuilt paragraph by paragraph, keeping its
+  blank lines (04dbcde). Single-paragraph drafts on the rewrite path are still byte-identical.
 
 ### 3.2 G — gold, metrics, harness
 
@@ -129,7 +132,7 @@ cite scores as wrong.*
 **Harness** — `scripts/evaluate_citer.py`, mirroring `evaluate_judge.py`:
 
 - `--build <seed.pdf> [...]` writes the gold file(s).
-- `--score [--cases ...] [--runs N] [--seed-filter stem]` runs need-check and `cite_sentence` on each
+- `--score [--cases ...] [--runs N]` (`--cases` selects gold files) runs need-check and `cite_sentence` on each
   case with `exclude_docs={that case's seed document}` (resolved from the index by stem; a seed not
   in the index excludes nothing) and the seed's own context as `context`; writes
   `data/eval/citer/results/<stamp>-<judge on|off>-<query raw|ctx>.json`.
