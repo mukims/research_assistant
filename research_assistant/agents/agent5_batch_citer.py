@@ -292,6 +292,15 @@ def _accepted(sentence, cand, record, candidates, verdicts, query, *, partial) -
                       query=query, verdicts=verdicts, partial=partial)
 
 
+# Two attempts: shared.retry counts attempts, not retries.
+_JUDGE_ATTEMPTS = 2
+
+
+@retry(max_retries=_JUDGE_ATTEMPTS, backoff=1.0)
+def _judge_once(claim, evidence, context=None):
+    return judge(claim, evidence, context=context)
+
+
 def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadatas) -> CiteResult:
     """Judge each candidate in retrieval order with the auditor's own judge
     and cite the first that passes: Supports with a verbatim span, else the
@@ -310,7 +319,7 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
         record = {"key": cand["key"], "document": cand.get("document"),
                   "chunk_index": hit.get("chunk_index"), "evidence": evidence}
         try:
-            v = judge(sentence, evidence, context=ctx)
+            v = _judge_once(sentence, evidence, context=ctx)
         except Exception as exc:  # noqa: BLE001 — one candidate's failure is not the sentence's
             record["error"] = f"{type(exc).__name__}: {exc}"
             verdicts.append(record)

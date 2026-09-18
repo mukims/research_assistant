@@ -424,9 +424,13 @@ class TestCiteByJudge(unittest.TestCase):
     ]
 
     def _cite(self, verdicts, **kw):
+        # A failed judge call is retried once (two attempts, as in agent8),
+        # so a failing candidate consumes two side effects; the backoff
+        # sleep is stubbed.
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(h) for h in self.HITS]), \
              patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=verdicts) as judge, \
-             patch("research_assistant.agents.agent5_batch_citer.chat") as chat:
+             patch("research_assistant.agents.agent5_batch_citer.chat") as chat, \
+             patch("research_assistant.shared.retry.time.sleep"):
             res = cite_sentence("Graphene is ballistic.", self.RES, {}, judge_gate=True, **kw)
         return res, judge, chat
 
@@ -461,13 +465,28 @@ class TestCiteByJudge(unittest.TestCase):
         self.assertFalse(res.partial)
 
     def test_a_failing_judge_call_moves_to_the_next_candidate(self):
-        res, _, _ = self._cite([RuntimeError("model down"), _verdict("Supports")])
+        res, judge, _ = self._cite([RuntimeError("model down"), RuntimeError("still down"), _verdict("Supports")])
         self.assertEqual(res.keys, ["cite_2"])
-        self.assertIn("model down", res.verdicts[0]["error"])
+        self.assertIn("still down", res.verdicts[0]["error"])
         self.assertNotIn("judgement", res.verdicts[0])
+        self.assertEqual(judge.call_count, 3)          # two attempts on the first, one on the second
+
+    def test_a_transient_failure_is_retried_once_and_the_candidate_is_kept(self):
+        # JudgementParseError is common on local models; before the retry a
+        # parse failure on the rank-1 candidate silently fell to rank 2.
+        from research_assistant.judgement.judge import JudgementParseError
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HITS[1])]), \
+             patch("research_assistant.agents.agent5_batch_citer.judge",
+                   side_effect=[JudgementParseError("bad"), _verdict("Supports")]) as judge, \
+             patch("research_assistant.shared.retry.time.sleep"):
+            res = cite_sentence("Graphene is ballistic.", self.RES, {}, judge_gate=True)
+        self.assertEqual(res.keys, ["cite_1"])
+        self.assertNotIn("error", res.verdicts[0])
+        self.assertEqual(res.verdicts[0]["judgement"], "Supports")
+        self.assertEqual(judge.call_count, 2)
 
     def test_every_call_failing_is_its_own_reason(self):
-        res, _, _ = self._cite([RuntimeError("a"), RuntimeError("b"), RuntimeError("c")])
+        res, _, _ = self._cite([RuntimeError(x) for x in "aabbcc"])
         self.assertFalse(res.cited)
         self.assertEqual(res.skip_reason, "judge failed on every candidate")
 
