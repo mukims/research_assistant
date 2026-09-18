@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from research_assistant.prompts import (
@@ -172,6 +173,79 @@ def _cite_sentence_with_reasoning(sentence, context_str):
     return _restore_terminal_punctuation(sentence, cited_sentence), reasoning
 
 
+# ─── The per-sentence seam ────────────────────────────────────────────────────
+
+@dataclass
+class CiteResult:
+    """What citing one sentence produced.
+
+    ``candidates`` are every chunk retrieval offered, in rank order, each
+    with the ``document`` it came from — the name the audit and the citer's
+    evaluation key on. The batch loop used to keep only ``citation_source``.
+    """
+    original: str
+    cited_text: str
+    keys: list = field(default_factory=list)
+    candidates: list = field(default_factory=list)
+    reasoning: str = ""
+    skip_reason: str | None = None
+    query: str = ""
+    verdicts: list = field(default_factory=list)
+    partial: bool = False
+
+    @property
+    def cited(self) -> bool:
+        return bool(self.keys)
+
+
+def cite_sentence(sentence, resources, key_registry, *, context=None, query=None,
+                  exclude_docs=None, paragraph_id=None) -> CiteResult:
+    """Retrieve context for one sentence and ask the model to cite it.
+
+    ``key_registry`` maps citation_source → cite key and is shared across a
+    draft so a source keeps its key; entries are only ever added, so the
+    next key is len + 1. ``query`` is what to search with (the sentence
+    when None); ``exclude_docs`` keeps named documents out of retrieval.
+    A model or retrieval failure propagates — the caller decides what a
+    failed sentence means.
+    """
+    collection, bm25, texts, metadatas = resources
+    query = query or sentence
+    results = hybrid_search(query, collection, bm25, texts, metadatas, top_k=3, exclude_docs=exclude_docs)
+    if not results:
+        return CiteResult(original=sentence, cited_text=sentence, query=query,
+                          skip_reason="no relevant context found in database")
+
+    context_str = ""
+    candidates = []
+    for r in results:
+        meta = r.get("metadata") or {}
+        cit_source = meta.get("citation_source", "Unknown")
+        # Keys are registered for every retrieved chunk so the model has a
+        # stable label to reference, but registration is NOT the same as
+        # use — the caller filters the final mapping down to keys that
+        # actually made it into the draft.
+        if cit_source not in key_registry:
+            key_registry[cit_source] = f"cite_{len(key_registry) + 1}"
+        cite_key = key_registry[cit_source]
+        context_str += f"--- Context (Cite Key: {cite_key}) ---\n{r['text']}\n\n"
+        candidates.append({
+            "key": cite_key, "citation": cit_source, "document": meta.get("document"),
+            "chunk_index": r.get("chunk_index"), "rrf_score": r.get("rrf_score"),
+        })
+
+    cited_sentence, reasoning = _cite_sentence_with_reasoning(sentence, context_str)
+    keys = sorted(_cite_keys(cited_sentence))
+    if keys:
+        return CiteResult(original=sentence, cited_text=cited_sentence, keys=keys,
+                          candidates=candidates, reasoning=reasoning, query=query)
+    # A successful call is not a citation: when the model declines, or the
+    # reply could not be parsed, the sentence comes back unchanged.
+    return CiteResult(original=sentence, cited_text=sentence, candidates=candidates,
+                      reasoning=reasoning, query=query,
+                      skip_reason="context retrieved but the model did not cite it")
+
+
 def _generate_report(
     file_path: str,
     report_path: str,
@@ -332,7 +406,6 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     cited_sentences = []
     key_registry = {}      # every source offered to the model: citation → cite_N
     citation_entries = []  # For the report
-    next_cite_idx = 1
 
     for i, sentence in enumerate(sentences):
         logger.info("[%d/%d] %s", i + 1, len(sentences), sentence[:80])
@@ -347,54 +420,31 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             continue
 
         logger.info(" -> Needs citation. Searching context…")
-        results = hybrid_search(sentence, collection, bm25, texts, metadatas, top_k=3)
-
-        if not results:
-            logger.info(" -> No context found.")
-            cited_sentences.append(sentence)
-            entry["skip_reason"] = "no relevant context found in database"
-            citation_entries.append(entry)
-            continue
-
-        context_str = ""
-        candidates = []
-        for r in results:
-            cit_source = r["metadata"].get("citation_source", "Unknown")
-            # Keys are registered for every retrieved chunk so the model has a
-            # stable label to reference, but registration is NOT the same as
-            # use — the final mapping is filtered down to keys that actually
-            # made it into the draft (see below).
-            if cit_source not in key_registry:
-                key_registry[cit_source] = f"cite_{next_cite_idx}"
-                next_cite_idx += 1
-
-            cite_key = key_registry[cit_source]
-            context_str += f"--- Context (Cite Key: {cite_key}) ---\n{r['text']}\n\n"
-            candidates.append({"key": cite_key, "citation": cit_source})
-
         try:
-            cited_sentence, reasoning = _cite_sentence_with_reasoning(sentence, context_str)
-            cited_sentences.append(cited_sentence)
-
-            # A successful call is not a citation. When the model declines, or
-            # when the response could not be parsed, _cite_sentence_with_reasoning
-            # returns the original sentence unchanged — so decide from the text.
-            if _cite_keys(cited_sentence):
-                logger.info(" -> Cited: %s", cited_sentence[:80])
-                entry["cited"] = True
-                entry["cited_text"] = cited_sentence
-                entry["reasoning"] = reasoning
-                entry["sources"] = candidates
-            else:
-                logger.info(" -> Declined: retrieved context did not support the claim.")
-                entry["skip_reason"] = "context retrieved but the model did not cite it"
-                entry["reasoning"] = reasoning
-                entry["candidates"] = candidates
+            res = cite_sentence(sentence, (collection, bm25, texts, metadatas), key_registry)
         except Exception as e:
             logger.error(" -> Error during citing: %s", e)
             cited_sentences.append(sentence)
             entry["skip_reason"] = f"LLM error: {e}"
+            citation_entries.append(entry)
+            continue
 
+        cited_sentences.append(res.cited_text)
+        if res.cited:
+            logger.info(" -> Cited: %s", res.cited_text[:80])
+            entry["cited"] = True
+            entry["cited_text"] = res.cited_text
+            entry["reasoning"] = res.reasoning
+            entry["sources"] = res.candidates
+        else:
+            if res.candidates:
+                logger.info(" -> Declined: retrieved context did not support the claim.")
+                entry["candidates"] = res.candidates
+            else:
+                logger.info(" -> No context found.")
+            entry["skip_reason"] = res.skip_reason
+            if res.reasoning:
+                entry["reasoning"] = res.reasoning
         citation_entries.append(entry)
 
     # ── Write outputs ────────────────────────────────────────────────────

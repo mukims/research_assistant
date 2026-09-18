@@ -5,8 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from research_assistant.agents.agent5_batch_citer import (
+    CiteResult,
     _batch_needs_citation,
     _cite_keys,
+    cite_sentence,
     run_batch_citer,
 )
 from research_assistant.shared.llm import ChatResult
@@ -287,6 +289,73 @@ class TestCiteSentenceKeepsPunctuation(unittest.TestCase):
             cited, reason = a5._cite_sentence_with_reasoning("Films are good.", "--- Context (Cite Key: cite_1) ---\nx")
         self.assertEqual(cited, "Films are good \\cite{cite_1}.")
         self.assertEqual(reason, "because.")
+
+
+class TestCiteSentence(unittest.TestCase):
+    """The per-sentence seam. Everything the batch loop did inline lives here,
+    so it can be called by an evaluation, gated by a judge, and tested."""
+
+    RES = (None, None, [], [])
+    HIT = {
+        "text": "Ballistic transport has been observed in graphene at cryogenic temperatures.",
+        "chunk_index": 7, "rrf_score": 0.03,
+        "metadata": {"citation_source": "Doe, J. et al. (2020)", "document": "doe2020.pdf"},
+    }
+
+    def test_a_citation_carries_key_and_document(self):
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
+             patch("research_assistant.agents.agent5_batch_citer.chat",
+                   return_value=_reply("CITED: Graphene is ballistic \\cite{cite_1}.\nREASON: Directly reported.")):
+            res = cite_sentence("Graphene is ballistic.", self.RES, {})
+        self.assertIsInstance(res, CiteResult)
+        self.assertTrue(res.cited)
+        self.assertEqual(res.keys, ["cite_1"])
+        self.assertEqual(res.cited_text, "Graphene is ballistic \\cite{cite_1}.")
+        self.assertEqual(res.reasoning, "Directly reported.")
+        self.assertEqual(res.candidates, [{
+            "key": "cite_1", "citation": "Doe, J. et al. (2020)", "document": "doe2020.pdf",
+            "chunk_index": 7, "rrf_score": 0.03,
+        }])
+        self.assertIsNone(res.skip_reason)
+        self.assertEqual(res.query, "Graphene is ballistic.")
+
+    def test_registry_keys_are_stable_across_sentences(self):
+        registry = {}
+        other = dict(self.HIT, metadata={"citation_source": "Roe 2019", "document": "roe.pdf"})
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search",
+                   side_effect=[[self.HIT], [other, self.HIT]]), \
+             patch("research_assistant.agents.agent5_batch_citer.chat",
+                   return_value=_reply("CITED: S.\nREASON: no")):
+            cite_sentence("First.", self.RES, registry)
+            res = cite_sentence("Second.", self.RES, registry)
+        self.assertEqual(registry, {"Doe, J. et al. (2020)": "cite_1", "Roe 2019": "cite_2"})
+        self.assertEqual([c["key"] for c in res.candidates], ["cite_2", "cite_1"])
+
+    def test_no_context_and_declined_are_told_apart(self):
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[]):
+            res = cite_sentence("Nothing here.", self.RES, {})
+        self.assertFalse(res.cited)
+        self.assertEqual(res.cited_text, "Nothing here.")
+        self.assertEqual(res.skip_reason, "no relevant context found in database")
+        self.assertEqual(res.candidates, [])
+
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
+             patch("research_assistant.agents.agent5_batch_citer.chat",
+                   return_value=_reply("CITED: Nothing here.\nREASON: The context is about something else.")):
+            res = cite_sentence("Nothing here.", self.RES, {})
+        self.assertFalse(res.cited)
+        self.assertEqual(res.skip_reason, "context retrieved but the model did not cite it")
+        self.assertEqual(res.reasoning, "The context is about something else.")
+        self.assertEqual(len(res.candidates), 1)
+
+    def test_query_and_exclusion_reach_retrieval(self):
+        with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[]) as hs:
+            res = cite_sentence("This approach works.", self.RES, {},
+                                query="recursive Green's function inversion works", exclude_docs={"seed.pdf"})
+        self.assertEqual(hs.call_args[0][0], "recursive Green's function inversion works")
+        self.assertEqual(hs.call_args.kwargs["exclude_docs"], {"seed.pdf"})
+        self.assertEqual(res.query, "recursive Green's function inversion works")
+        self.assertEqual(res.original, "This approach works.")
 
 
 if __name__ == "__main__":
