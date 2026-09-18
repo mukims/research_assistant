@@ -151,6 +151,13 @@ class TestRunBatchCiter(unittest.TestCase):
 
     DRAFT_TEXT = "Graphene exhibits ballistic transport at low temperature."
 
+    def setUp(self):
+        # The three output files are pinned byte-for-byte on the rewrite
+        # path; the judge default must not leak into that pin.
+        p = patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", False)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _write_draft(self, tmpdir):
         draft_path = os.path.join(tmpdir, "draft.txt")
         with open(draft_path, "w") as f:
@@ -300,7 +307,8 @@ class TestCiteSentenceKeepsPunctuation(unittest.TestCase):
 
 class TestCiteSentence(unittest.TestCase):
     """The per-sentence seam. Everything the batch loop did inline lives here,
-    so it can be called by an evaluation, gated by a judge, and tested."""
+    so it can be called by an evaluation, gated by a judge, and tested.
+    Calls pass judge_gate=False: these pin the rewrite path, whatever the default."""
 
     RES = (None, None, [], [])
     HIT = {
@@ -313,7 +321,7 @@ class TestCiteSentence(unittest.TestCase):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
              patch("research_assistant.agents.agent5_batch_citer.chat",
                    return_value=_reply("CITED: Graphene is ballistic \\cite{cite_1}.\nREASON: Directly reported.")):
-            res = cite_sentence("Graphene is ballistic.", self.RES, {})
+            res = cite_sentence("Graphene is ballistic.", self.RES, {}, judge_gate=False)
         self.assertIsInstance(res, CiteResult)
         self.assertTrue(res.cited)
         self.assertEqual(res.keys, ["cite_1"])
@@ -333,14 +341,14 @@ class TestCiteSentence(unittest.TestCase):
                    side_effect=[[self.HIT], [other, self.HIT]]), \
              patch("research_assistant.agents.agent5_batch_citer.chat",
                    return_value=_reply("CITED: S.\nREASON: no")):
-            cite_sentence("First.", self.RES, registry)
-            res = cite_sentence("Second.", self.RES, registry)
+            cite_sentence("First.", self.RES, registry, judge_gate=False)
+            res = cite_sentence("Second.", self.RES, registry, judge_gate=False)
         self.assertEqual(registry, {"Doe, J. et al. (2020)": "cite_1", "Roe 2019": "cite_2"})
         self.assertEqual([c["key"] for c in res.candidates], ["cite_2", "cite_1"])
 
     def test_no_context_and_declined_are_told_apart(self):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[]):
-            res = cite_sentence("Nothing here.", self.RES, {})
+            res = cite_sentence("Nothing here.", self.RES, {}, judge_gate=False)
         self.assertFalse(res.cited)
         self.assertEqual(res.cited_text, "Nothing here.")
         self.assertEqual(res.skip_reason, "no relevant context found in database")
@@ -349,7 +357,7 @@ class TestCiteSentence(unittest.TestCase):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
              patch("research_assistant.agents.agent5_batch_citer.chat",
                    return_value=_reply("CITED: Nothing here.\nREASON: The context is about something else.")):
-            res = cite_sentence("Nothing here.", self.RES, {})
+            res = cite_sentence("Nothing here.", self.RES, {}, judge_gate=False)
         self.assertFalse(res.cited)
         self.assertEqual(res.skip_reason, "context retrieved but the model did not cite it")
         self.assertEqual(res.reasoning, "The context is about something else.")
@@ -361,7 +369,7 @@ class TestCiteSentence(unittest.TestCase):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[self.HIT]), \
              patch("research_assistant.agents.agent5_batch_citer.chat",
                    return_value=_reply("CITED: Nothing to see here.\nREASON: Off topic.")):
-            res = cite_sentence("Nothing here.", self.RES, {})
+            res = cite_sentence("Nothing here.", self.RES, {}, judge_gate=False)
         self.assertFalse(res.cited)
         self.assertEqual(res.cited_text, "Nothing here.")
         self.assertEqual(res.original, "Nothing here.")
