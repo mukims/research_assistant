@@ -13,11 +13,13 @@ from research_assistant.prompts import (
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.db import load_search_resources
 from research_assistant.config import (
+    CITATION_CITER_CONTEXTUALIZE,
     CITATION_CITER_JUDGE,
     JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_NEIGHBOUR_WINDOW,
 )
 from research_assistant.judgement.judge import compose_context, judge
+from research_assistant.shared.claim_text import sentence_context, split_into_sentences  # re-exported: seed_audit, agent8 and tests import it from here
 from research_assistant.shared.search import expand_neighbours, hybrid_search
 from research_assistant.shared.retry import retry
 from research_assistant.shared.llm import chat
@@ -25,27 +27,32 @@ from research_assistant.shared.llm import chat
 logger = get_logger("agent5")
 
 
-# ─── Improved sentence splitter ──────────────────────────────────────────────
+def split_paragraphs(text: str) -> list:
+    """Sentences per paragraph, paragraphs being blank-line separated. The
+    flat sentence list is what split_into_sentences gave for the whole text
+    — a paragraph break is whitespace after a full stop to the splitter —
+    so the draft is rebuilt exactly as before; the paragraphs are for the
+    context each sentence is cited in."""
+    paragraphs = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+    return [split_into_sentences(p) for p in paragraphs] or [[]]
 
-# Abbreviations and initials that should NOT trigger a sentence break
-_ABBREVS = r"(?:et al|Fig|Figs|Eq|Eqs|Dr|Prof|Mr|Mrs|Ms|Jr|Sr|vs|i\.e|e\.g|cf|approx|Ref|Refs|Vol|No|Ch|Sec|pp|[A-Za-z])"
 
-def split_into_sentences(text):
-    """
-    Split text into sentences, handling common scientific abbreviations
-    and author initials that contain periods (e.g., "et al.", "Fig.", "Eq.", "K.J.").
-    """
-    _TOKEN = "<PD>"
-    def replace_abbrev_period(match):
-        return match.group(0).replace('.', _TOKEN)
-    
-    # Mask periods in known abbreviations and author initials (case-insensitive)
-    pattern = rf'\b({_ABBREVS})\.'
-    masked_text = re.sub(pattern, replace_abbrev_period, text, flags=re.IGNORECASE)
-    
-    # Split on sentence-ending punctuation followed by whitespace
-    sentences = re.split(r'(?<=[.!?])\s+', masked_text.strip())
-    return [s.replace(_TOKEN, '.').strip() for s in sentences if s.strip()]
+def contextualized_queries(sentences, contexts, paragraph_ids, needs_cite) -> dict:
+    """{sentence index: query} for the sentences that need a citation, from
+    the audit's query contextualization — one model call per paragraph. A
+    failure means no queries: the caller searches with the sentences."""
+    from research_assistant.shared.seed_audit import contextualize_citation_queries  # seed_audit imports this module
+
+    indices = [i for i, need in enumerate(needs_cite) if need]
+    if not indices:
+        return {}
+    claims = [{"claim": sentences[i], "context": contexts[i], "paragraph_id": paragraph_ids[i]} for i in indices]
+    try:
+        contextualize_citation_queries(claims)
+    except Exception as exc:  # noqa: BLE001 — the query is better with it, fine without
+        logger.warning("Query contextualization failed (%s) — searching with the sentences.", exc)
+        return {}
+    return {i: c["search_query"] for i, c in zip(indices, claims) if c.get("search_query")}
 
 
 # ─── Citation key extraction ─────────────────────────────────────────────────
@@ -480,8 +487,13 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     else:
         collection, bm25, texts, metadatas = load_search_resources()
 
-    sentences = split_into_sentences(draft_text)
-    logger.info("Split draft into %d sentences.", len(sentences))
+    sentences, contexts, paragraph_ids = [], [], []
+    for p_idx, para in enumerate(split_paragraphs(draft_text)):
+        for s_idx, sent in enumerate(para):
+            sentences.append(sent)
+            contexts.append(sentence_context(para, s_idx))
+            paragraph_ids.append(f"p_{p_idx}")
+    logger.info("Split draft into %d sentences in %d paragraph(s).", len(sentences), len(set(paragraph_ids)))
 
     # ── Batch citation-need check ────────────────────────────────────────
     eligible_indices = [i for i, s in enumerate(sentences) if len(s.split()) >= 4]
@@ -505,6 +517,8 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         for idx, needs in zip(eligible_indices, batch_results):
             needs_cite[idx] = needs
 
+    queries = contextualized_queries(sentences, contexts, paragraph_ids, needs_cite) if CITATION_CITER_CONTEXTUALIZE else {}
+
     # ── Process sentences ────────────────────────────────────────────────
     cited_sentences = []
     key_registry = {}      # every source offered to the model: citation → cite_N
@@ -524,7 +538,8 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
 
         logger.info(" -> Needs citation. Searching context…")
         try:
-            res = cite_sentence(sentence, (collection, bm25, texts, metadatas), key_registry)
+            res = cite_sentence(sentence, (collection, bm25, texts, metadatas), key_registry,
+                                context=contexts[i], query=queries.get(i), paragraph_id=paragraph_ids[i])
         except Exception as e:
             logger.error(" -> Error during citing: %s", e)
             cited_sentences.append(sentence)

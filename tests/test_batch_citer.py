@@ -10,7 +10,9 @@ from research_assistant.agents.agent5_batch_citer import (
     _cite_keys,
     _insert_cite,
     cite_sentence,
+    contextualized_queries,
     run_batch_citer,
+    split_paragraphs,
 )
 from research_assistant.shared.llm import ChatResult
 
@@ -546,6 +548,96 @@ class TestReportShowsTheJudgesAccount(unittest.TestCase):
             with open(out_path.replace(".txt", "_report.md")) as f:
                 report = f.read()
         self.assertIn("⚠ **Partial support**", report)
+
+
+class TestSplitterLivesInClaimText(unittest.TestCase):
+    def test_agent5_re_exports_the_shared_splitter(self):
+        from research_assistant.shared import claim_text
+        from research_assistant.agents import agent5_batch_citer
+        self.assertIs(agent5_batch_citer.split_into_sentences, claim_text.split_into_sentences)
+        self.assertEqual(claim_text.split_into_sentences("See Fig. 3. Then et al. agreed."), ["See Fig. 3.", "Then et al. agreed."])
+
+
+class TestParagraphs(unittest.TestCase):
+    def test_blank_lines_split_paragraphs_and_sentences_are_unchanged(self):
+        from research_assistant.agents.agent5_batch_citer import split_into_sentences
+        text = "A one. A two.\n\nB one.\n\n\n  C one. C two. C three."
+        paras = split_paragraphs(text)
+        self.assertEqual(paras, [["A one.", "A two."], ["B one."], ["C one.", "C two.", "C three."]])
+        # The flat sentence list the draft is rebuilt from is what the whole-text split gave before.
+        self.assertEqual([s for p in paras for s in p], split_into_sentences(text))
+
+    def test_a_draft_without_blank_lines_is_one_paragraph(self):
+        self.assertEqual(split_paragraphs("A one. A two."), [["A one.", "A two."]])
+
+
+class TestContextualizedQueries(unittest.TestCase):
+    SENTS = ["We use the recursive Green's function method.", "This approach scales linearly.", "Unrelated."]
+    CTX = ["«We use the recursive Green's function method.» This approach scales linearly.",
+           "We use the recursive Green's function method. «This approach scales linearly.» Unrelated.",
+           "This approach scales linearly. «Unrelated.»"]
+    PIDS = ["p_0", "p_0", "p_1"]
+
+    def test_one_call_per_paragraph_with_the_sentences_that_need_a_citation(self):
+        def fake(claims, model=None):
+            for c in claims:
+                c["search_query"] = "Q: " + c["claim"]
+        with patch("research_assistant.shared.seed_audit.contextualize_citation_queries", side_effect=fake) as ctx:
+            out = contextualized_queries(self.SENTS, self.CTX, self.PIDS, needs_cite=[True, True, False])
+        self.assertEqual(out, {0: "Q: We use the recursive Green's function method.", 1: "Q: This approach scales linearly."})
+        ctx.assert_called_once()
+        claims = ctx.call_args[0][0]
+        self.assertEqual([c["paragraph_id"] for c in claims], ["p_0", "p_0"])
+        self.assertEqual(claims[1]["context"], self.CTX[1])
+
+    def test_failure_falls_back_to_no_queries(self):
+        with patch("research_assistant.shared.seed_audit.contextualize_citation_queries", side_effect=RuntimeError("down")):
+            self.assertEqual(contextualized_queries(self.SENTS, self.CTX, self.PIDS, needs_cite=[True, True, True]), {})
+
+    def test_nothing_needing_a_citation_makes_no_call(self):
+        with patch("research_assistant.shared.seed_audit.contextualize_citation_queries") as ctx:
+            self.assertEqual(contextualized_queries(self.SENTS, self.CTX, self.PIDS, needs_cite=[False, False, False]), {})
+        ctx.assert_not_called()
+
+
+class TestRunBatchCiterPassesContextAndQuery(unittest.TestCase):
+    DRAFT = "We use the recursive Green's function method. This approach scales linearly.\n\nUnrelated paragraph here."
+
+    def _run(self, contextualize):
+        seen = []
+
+        def fake_cite(sentence, resources, key_registry, **kw):
+            seen.append((sentence, kw))
+            return CiteResult(original=sentence, cited_text=sentence, query=kw.get("query") or sentence,
+                              skip_reason="no relevant context found in database")
+
+        def fake_ctx(claims, model=None):
+            for c in claims:
+                c["search_query"] = "Q: " + c["claim"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w") as f:
+                f.write(self.DRAFT)
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_CONTEXTUALIZE", contextualize), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", return_value=_reply("1. YES\n2. YES\n3. NO")), \
+                 patch("research_assistant.agents.agent5_batch_citer.cite_sentence", side_effect=fake_cite), \
+                 patch("research_assistant.shared.seed_audit.contextualize_citation_queries", side_effect=fake_ctx):
+                run_batch_citer(draft_path, os.path.join(tmpdir, "cited.txt"))
+        return seen
+
+    def test_context_and_paragraph_always_reach_the_seam(self):
+        seen = self._run(contextualize=False)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[1][1]["context"],
+                         "We use the recursive Green's function method. «This approach scales linearly.»")
+        self.assertEqual(seen[1][1]["paragraph_id"], "p_0")
+        self.assertIsNone(seen[1][1]["query"])
+
+    def test_the_contextualized_query_reaches_the_seam_when_on(self):
+        seen = self._run(contextualize=True)
+        self.assertEqual(seen[1][1]["query"], "Q: This approach scales linearly.")
 
 
 if __name__ == "__main__":

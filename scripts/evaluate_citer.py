@@ -7,7 +7,8 @@
 --build writes research_assistant/eval/cases/citer_<stem>.jsonl from a seed's
 TEI and the download manifest. --score runs the real citer on every case —
 the batched citation-need check, then cite_sentence with the seed paper
-excluded from retrieval — and writes data/eval/citer/results/<stamp>-citer.json.
+excluded from retrieval — and writes
+data/eval/citer/results/<stamp>-judge<on|off>-query<raw|ctx>.json.
 Author citations are a floor; every report says so.
 """
 
@@ -51,7 +52,7 @@ def seed_documents(seed_stem: str, metadatas) -> set:
     return out
 
 
-def run(cases, resources, runs=1, *, judge_gate=None):
+def run(cases, resources, runs=1, *, judge_gate=None, contextualize=None):
     """The citer on every case: need check batched per seed file, as
     run_batch_citer batches a draft, then cite_sentence with the seed
     excluded. One sentence's failure is recorded, never fatal."""
@@ -73,6 +74,15 @@ def run(cases, resources, runs=1, *, judge_gate=None):
                 except Exception as exc:  # noqa: BLE001 — recorded on every case of the seed
                     need_error = f"{type(exc).__name__}: {exc}"
 
+            queries = {}
+            if contextualize:
+                needing = [c for c in seed_cases if need_by_id.get(c["id"]) and not need_error]
+                q = citer.contextualized_queries(
+                    [c["sentence"] for c in needing], [c.get("context") or "" for c in needing],
+                    [c.get("paragraph_id") or "p_0" for c in needing], [True] * len(needing),
+                )
+                queries = {needing[i]["id"]: v for i, v in q.items()}
+
             key_registry = {}
             for c in seed_cases:
                 t0 = time.perf_counter()
@@ -82,7 +92,8 @@ def run(cases, resources, runs=1, *, judge_gate=None):
                     try:
                         res = citer.cite_sentence(
                             c["sentence"], resources, key_registry,
-                            context=c.get("context"), exclude_docs=set(excluded[seed]),
+                            context=c.get("context"), query=queries.get(c["id"]),
+                            exclude_docs=set(excluded[seed]),
                             paragraph_id=c.get("paragraph_id"),
                             judge_gate=judge_gate,
                         )
@@ -99,6 +110,7 @@ def run(cases, resources, runs=1, *, judge_gate=None):
         "generated": datetime.now().isoformat(timespec="seconds"),
         "runs": runs,
         "judge_gate": judge_gate,
+        "contextualize": contextualize,
         "excluded": excluded,
         "summary": score(results),
         "results": results,
@@ -113,6 +125,8 @@ def main():
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--judge", choices=["on", "off", "config"], default="config",
                     help="force the judge acceptance test on or off; config reads CITATION_CITER_JUDGE")
+    ap.add_argument("--query", choices=["raw", "ctx", "config"], default="config",
+                    help="search with the sentence, a contextualized query, or whatever CITATION_CITER_CONTEXTUALIZE says")
     ap.add_argument("--out", default=RESULTS_DIR)
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
     args = ap.parse_args()
@@ -139,12 +153,16 @@ def main():
         if judge_gate is None:
             from research_assistant.config import CITATION_CITER_JUDGE
             judge_gate = CITATION_CITER_JUDGE
-        out = run(cases, load_search_resources(), runs=args.runs, judge_gate=judge_gate)
+        contextualize = {"ctx": True, "raw": False}.get(args.query)
+        if contextualize is None:
+            from research_assistant.config import CITATION_CITER_CONTEXTUALIZE
+            contextualize = CITATION_CITER_CONTEXTUALIZE
+        out = run(cases, load_search_resources(), runs=args.runs, judge_gate=judge_gate, contextualize=contextualize)
         print("\n" + render(out["summary"]))
         for seed, docs in out["excluded"].items():
             print(f"(excluded from search for {seed}: {docs or 'nothing — seed not in the index'})")
         os.makedirs(args.out, exist_ok=True)
-        path = os.path.join(args.out, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-judge{'on' if judge_gate else 'off'}.json")
+        path = os.path.join(args.out, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-judge{'on' if judge_gate else 'off'}-query{'ctx' if contextualize else 'raw'}.json")
         atomic_write_json(path, out)
         print(f"\nwritten {path}")
         return

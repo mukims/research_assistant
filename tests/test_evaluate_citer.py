@@ -102,3 +102,28 @@ class TestRun(unittest.TestCase):
             out = ec.run([_case("c_1")], self.RESOURCES, runs=1, judge_gate=True)
         self.assertIs(seen["judge_gate"], True)
         self.assertIs(out["judge_gate"], True)
+
+    def test_contextualize_builds_queries_per_seed_and_forwards_them(self):
+        seen = {}
+
+        def fake_cite(sentence, resources, key_registry, **kw):
+            seen[sentence] = kw
+            return CiteResult(original=sentence, cited_text=sentence, query=kw.get("query") or sentence,
+                              skip_reason="no relevant context found in database")
+
+        def fake_ctx(claims, model=None):
+            for c in claims:
+                c["search_query"] = "Q: " + c["claim"]
+
+        cases = [_case("c_1"), _case("c_2", sentence="Another claim with enough words for the check.")]
+        with patch.object(ec.citer, "_batch_needs_citation", return_value=[True, True]), \
+             patch.object(ec.citer, "cite_sentence", side_effect=fake_cite), \
+             patch("research_assistant.shared.seed_audit.contextualize_citation_queries", side_effect=fake_ctx) as ctx:
+            out = ec.run(cases, self.RESOURCES, runs=1, contextualize=True)
+        ctx.assert_called_once()
+        self.assertEqual(seen[cases[0]["sentence"]]["query"], "Q: " + cases[0]["sentence"])
+        self.assertIs(out["contextualize"], True)
+        with patch.object(ec.citer, "_batch_needs_citation", return_value=[True, True]), \
+             patch.object(ec.citer, "cite_sentence", side_effect=fake_cite):
+            ec.run(cases, self.RESOURCES, runs=1, contextualize=False)
+        self.assertIsNone(seen[cases[0]["sentence"]]["query"])

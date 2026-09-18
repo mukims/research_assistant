@@ -241,6 +241,11 @@ CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 50)
 # 13→12% (within the 1.6–4.7 pt noise floor), declined 6→25, 2 runs on 64
 # cited sentences.
 CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", True)
+# The citer searches with a query written from the sentence's paragraph —
+# pronouns and "this approach" resolved — instead of the bare sentence, the
+# way the audit already does. Off until its gate on the citer evaluation
+# passes — scripts/evaluate_citer.py, query raw against ctx.
+CITATION_CITER_CONTEXTUALIZE = _env_bool("CITATION_CITER_CONTEXTUALIZE", False)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
 
 
