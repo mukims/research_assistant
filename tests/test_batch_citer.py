@@ -478,5 +478,60 @@ class TestCiteByJudge(unittest.TestCase):
         chat.assert_not_called()
 
 
+class TestReportShowsTheJudgesAccount(unittest.TestCase):
+    """With the judge on, the citation report is the audit report's twin:
+    a cited sentence shows its verified span and how the verdict was
+    reached; a declined one shows the closest candidate and why it failed."""
+
+    # Both sentences have ≥ 4 words: shorter ones are skipped as "too short"
+    # before the need check and never reach the citer at all.
+    DRAFT = "Graphene shows ballistic transport. Nothing in the corpus supports this."
+    HIT = {"text": "Ballistic transport observed in graphene.", "chunk_index": 2, "rrf_score": 0.02,
+           "metadata": {"citation_source": "Doe 2020", "document": "doe.pdf"}}
+
+    def test_cited_and_declined_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w") as f:
+                f.write(self.DRAFT)
+            out_path = os.path.join(tmpdir, "cited.txt")
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", True), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HIT)]), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", return_value=_reply("1. YES\n2. YES")), \
+                 patch("research_assistant.agents.agent5_batch_citer.judge",
+                       side_effect=[_verdict("Supports", span="Ballistic transport observed in graphene."),
+                                    _verdict("Does not support", span_verified=False, reason="Not about this.")]):
+                run_batch_citer(draft_path, out_path)
+            with open(out_path) as f:
+                self.assertEqual(f.read(), "Graphene shows ballistic transport \\cite{cite_1}. Nothing in the corpus supports this.")
+            with open(out_path.replace(".txt", "_report.md")) as f:
+                report = f.read()
+        self.assertIn("**Verified span:**", report)
+        self.assertIn("Ballistic transport observed in graphene.", report)
+        self.assertIn("**Why this citation**", report)
+        self.assertIn("Attributed to the cited paper", report)
+        self.assertIn("**Closest candidate:** `cite_1`", report)
+        self.assertIn("Does not support", report)
+        self.assertIn("Not about this.", report)
+        self.assertNotIn("Partial support", report)
+
+    def test_partial_support_is_flagged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w") as f:
+                f.write("Graphene shows ballistic transport.")
+            out_path = os.path.join(tmpdir, "cited.txt")
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", True), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(self.HIT)]), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", return_value=_reply("1. YES")), \
+                 patch("research_assistant.agents.agent5_batch_citer.judge", return_value=_verdict("Partially supports")):
+                run_batch_citer(draft_path, out_path)
+            with open(out_path.replace(".txt", "_report.md")) as f:
+                report = f.read()
+        self.assertIn("⚠ **Partial support**", report)
+
+
 if __name__ == "__main__":
     unittest.main()

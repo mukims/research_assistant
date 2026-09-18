@@ -322,6 +322,16 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
                       skip_reason="no candidate passed the judge")
 
 
+def _verdict_steps(record: dict, sentence: str) -> list:
+    """The audit's 'Why this verdict' lines for one of the citer's judged
+    candidates. seed_audit imports this module, so it is imported here."""
+    from research_assistant.shared.seed_audit import explain_verdict_steps
+
+    item = {"outcome": "judged", "claim": sentence, "evidence_hits": 1}
+    item.update({k: v for k, v in record.items() if k not in ("key", "document", "evidence", "best", "error")})
+    return explain_verdict_steps(item)
+
+
 def _generate_report(
     file_path: str,
     report_path: str,
@@ -388,6 +398,12 @@ def _generate_report(
                 lines.append("**Model's explanation:**")
                 lines.append(f"{entry['reasoning']}\n")
 
+            best = next((v for v in entry.get("verdicts") or [] if v.get("best")), None)
+            if best:
+                lines.append(f"**Closest candidate:** `{best['key']}` — judged *{best.get('judgement')}*")
+                lines.extend(f"- *{label}:* {text}" for label, text in _verdict_steps(best, entry["original"]))
+                lines.append("")
+
             if entry.get("candidates"):
                 lines.append("**Retrieved but not used:**")
                 for src in entry["candidates"]:
@@ -402,6 +418,16 @@ def _generate_report(
             if entry.get("reasoning"):
                 lines.append("**Reasoning:**")
                 lines.append(f"{entry['reasoning']}\n")
+
+            chosen = next((v for v in entry.get("verdicts") or [] if v.get("key") in _cite_keys(entry["cited_text"])), None)
+            if chosen:
+                if entry.get("partial"):
+                    lines.append("⚠ **Partial support** — the judge found the source carries a weaker version of this sentence.\n")
+                if chosen.get("supporting_span"):
+                    lines.append(f"**Verified span:** “{chosen['supporting_span']}”\n")
+                lines.append("**Why this citation**")
+                lines.extend(f"- *{label}:* {text}" for label, text in _verdict_steps(chosen, entry["original"]))
+                lines.append("")
 
             # Separate what was actually cited from what was merely retrieved —
             # listing all three candidates as "sources used" overstates the
@@ -506,6 +532,9 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             continue
 
         cited_sentences.append(res.cited_text)
+        if res.verdicts:
+            entry["verdicts"] = res.verdicts
+            entry["partial"] = res.partial
         if res.cited:
             logger.info(" -> Cited: %s", res.cited_text[:80])
             entry["cited"] = True
