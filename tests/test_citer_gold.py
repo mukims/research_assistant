@@ -21,6 +21,8 @@ TEI = """<?xml version="1.0" encoding="UTF-8"?>
     <div><head n="3.">Discussion</head>
       <p xml:id="p_plain">This paragraph makes no citation at all and has enough words to count. Another sentence with plenty of words that also cites nothing at all here.</p>
       <p xml:id="p_short">Too short to count.</p>
+      <note place="foot"><p>0 F E B R U A R Y 2 0 1 4 | V O L 5 0 6 | N A T U R E | one two three four five six seven eight</p></note>
+      <p xml:id="p_symbols">E F 5 0 V g 5 0 G 5 0.95 G 0 T 5 4.2 K L 1,3 L 4,6.</p>
     </div>
   </body>
   <back><div type="references"><listBibl>
@@ -90,6 +92,13 @@ class TestBuild(unittest.TestCase):
         pool = cg.uncited_pool(self.tei)
         self.assertEqual({p["paragraph_id"] for p in pool}, {"p_plain"})
         self.assertEqual(len(pool), 2)
+
+    def test_page_furniture_and_symbol_soup_are_never_negatives(self):
+        pool = cg.uncited_pool(self.tei)
+        texts = [r["sentence"] for r in pool]
+        self.assertFalse(any("N A T U R E" in t for t in texts))          # <note> paragraphs are skipped
+        self.assertFalse(any(t.startswith("E F 5 0") for t in texts))      # 8 whitespace tokens, 0 words
+        self.assertNotIn("p_symbols", {r["paragraph_id"] for r in pool})
 
     def test_negatives_are_sampled_deterministically(self):
         self.assertEqual(self._build(), self._build())

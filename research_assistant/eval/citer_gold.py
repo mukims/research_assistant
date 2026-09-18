@@ -33,6 +33,7 @@ from research_assistant.shared.tei_structure import section_breadcrumb
 
 CASES_DIR = Path(__file__).parent / "cases"
 MIN_WORDS = 8
+_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 REQUIRED = ("id", "seed", "kind", "sentence", "context", "author_documents")
 
 
@@ -80,19 +81,22 @@ def cited_records(claims: list[dict], seed_name: str, manifest: dict) -> list[di
 
 
 def uncited_pool(tei_path: str) -> list[dict]:
-    """Body sentences from paragraphs that cite nothing, MIN_WORDS words or
-    more. Paragraph-level on purpose: a paragraph with no <ref type="bibr">
+    """Body sentences from paragraphs that cite nothing, MIN_WORDS alphabetic
+    words or more; footnotes and page furniture (<note>) are skipped.
+    Paragraph-level on purpose: a paragraph with no <ref type="bibr">
     has clean sentences and nothing to strip."""
     with open(tei_path, encoding="utf-8") as fh:
         soup = BeautifulSoup(fh, "xml")
     body = soup.find("body")
     pool = []
     for p_idx, p in enumerate(body.find_all("p") if body else []):
+        if p.find_parent("note") is not None:
+            continue
         if p.find_all("ref", type="bibr"):
             continue
         sents = paragraph_sentences(p)
         for s_idx, sent in enumerate(sents):
-            if len(sent.split()) < MIN_WORDS:
+            if len(_WORD_RE.findall(sent)) < MIN_WORDS:
                 continue
             pool.append({
                 "sentence": sent,
