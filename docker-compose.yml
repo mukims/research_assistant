@@ -16,7 +16,7 @@ services:
       - "8080:8080"
     environment:
       # Supplied at boot from Secret Manager via /etc/app.env.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set}
       # Compose service name, not localhost: the app talks to grobid over the
       # compose network.
       GROBID_SERVER: http://grobid:8070

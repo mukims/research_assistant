@@ -1158,8 +1158,8 @@ st.caption(
     "Or hand it a paper to audit its citations against the evidence."
 )
 
-tab_audit, tab_idea, tab_draft, tab_chat, tab_help = st.tabs(
-    ["Citation auditor", "Research idea", "Cite a draft", "Research chat",
+tab_planner, tab_audit, tab_idea, tab_draft, tab_chat, tab_help = st.tabs(
+    ["Agent task planner", "Citation auditor", "Research idea", "Cite a draft", "Research chat",
      "How to use"]
 )
 
@@ -1527,6 +1527,14 @@ def _render_recent_runs(origin: str) -> None:
             st.session_state["active_job"] = options[choice]
             st.session_state["active_job_origin"] = origin
             st.rerun()
+
+
+# ─── Tab 0: Agent task planner ─────────────────────────────────────────────
+
+with tab_planner:
+    _render_live_pipeline_status("tab_planner")
+    from research_assistant.tasks.ui import render_planner_tab
+    render_planner_tab()
 
 
 # ─── Tab 1: citation auditor ───────────────────────────────────────────────

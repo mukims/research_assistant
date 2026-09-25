@@ -65,6 +65,8 @@ VALID_STAGES = {
     "fetch",
     "ingest_refs",
     "respond",
+    "task_planning",
+    "task_execution",
 }
 
 STAGE_METADATA: dict[str, tuple[int, str]] = {
@@ -75,6 +77,8 @@ STAGE_METADATA: dict[str, tuple[int, str]] = {
     "fetch": (4, "Fetching referenced papers"),
     "ingest_refs": (5, "Ingesting and summarizing papers"),
     "respond": (5, "Synthesizing answer"),
+    "task_planning": (6, "Deconstructing paper into tasks"),
+    "task_execution": (7, "Executing agent task graph"),
 }
 
 DEFAULT_STATUS: dict[str, Any] = {

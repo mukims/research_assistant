@@ -320,6 +320,75 @@ streamlit run app.py
 - Verifier: `CITATION_JUDGEMENT_MODEL`, `CITATION_JUDGEMENT_TOP_K`, `CITATION_JUDGEMENT_ESCALATE_TOP_K`, `CITATION_JUDGEMENT_NEIGHBOUR_WINDOW`, `CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS`.
 - Misc: `UNPAYWALL_EMAIL`, `CITATION_LOG_DIR`, `CITATION_LOG_FILE=0`.
 
+## Pipeline 2: Scientific Paper-to-Agent Task Decomposition & Replication
+
+While Pipeline 1 builds literature corpora and answers research questions, **Pipeline 2** deconstructs scientific papers into structured Directed Acyclic Graphs (DAGs) of executable tasks for autonomous AI agents.
+
+```
+                    ┌────────────────────────┐
+                    │ Scientific Paper (TEI) │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ Protocol Miner / LLM   │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ TaskGraph DAG Engine   │
+                    │ - Cycle Detection (DFS)│
+                    │ - Wave Scheduling      │
+                    └───────────┬────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+┌──────────────┐        ┌──────────────┐        ┌──────────────┐
+│  DevOps &    │        │ Scientific   │        │   Model      │
+│  Environment │        │ Data Engine  │        │ Architect    │
+└───────┬──────┘        └───────┬──────┘        └───────┬──────┘
+        └───────────────────────┼───────────────────────┘
+                                │
+        ┌───────────────────────┴───────────────────────┐
+        ▼                                               ▼
+┌──────────────┐                                ┌──────────────┐
+│  Experiment  │                                │ Evaluation & │
+│  Runner      │                                │ Replication  │
+└───────┬──────┘                                └───────┬──────┘
+        └───────────────────────┬───────────────────────┘
+                                ▼
+                    ┌────────────────────────┐
+                    │ Replication Scorecard  │
+                    │ & Artifact Validation  │
+                    └────────────────────────┘
+```
+
+### Components & Architecture
+
+| Module | Location | Responsibilities |
+|---|---|---|
+| **Models & Graph Engine** | `research_assistant.tasks.models` | Strongly-typed dataclasses (`Task`, `TaskGraph`), enums (`TaskCategory`, `TaskStatus`, `AgentRole`), cycle detection via DFS, missing dependency validation, topological wave decomposition, and task readiness calculation. |
+| **Protocol Miner** | `research_assistant.tasks.extractor` | Parses TEI XML or plain text for methodology, equations, algorithms, tables, and benchmarks. Prompts LLM to deconstruct the paper into dependency-linked tasks with automatic fallback to a deterministic 5-task heuristic replication graph. |
+| **Graph Visualizer & Exporter** | `research_assistant.tasks.graph` | Color-coded Mermaid DAG flowcharts, comprehensive executive Markdown execution plans, Google Antigravity subagent invocation payloads, and atomic JSON persistence. |
+| **Agent Roles & Personas** | `research_assistant.tasks.roles` | Specialized role definitions, capabilities, tool access, and dynamic task prompt formatting for 6 personas: `devops_agent`, `data_engineer`, `model_architect`, `experiment_runner`, `evaluation_agent`, and `audit_agent`. |
+| **Task Runner & Dispatcher** | `research_assistant.tasks.runner` | Orchestrates topological wave execution, manages artifact routing between parent/child tasks, verifies acceptance criteria, tracks SHA-256 artifact hashes, and compiles final `ExecutionReport` replication scorecards. |
+| **Streamlit Interface** | `research_assistant.tasks.ui` | Tab 0 in `app.py`: interactive paper selection, instant DAG synthesis, live pan/zoom Mermaid flowcharts, expandable task cards, and single-click wave execution with downloadable plans. |
+| **CLI Orchestrator** | `orchestrate_tasks.py` | Command-line interface for planning (`plan`), running (`run`), and previewing (`show`) task graphs. |
+
+### CLI Usage
+
+```bash
+# 1. Deconstruct a paper into a task graph JSON
+python orchestrate_tasks.py plan path/to/paper.tei.xml --format json -o plan.json
+
+# 2. View the execution plan as Markdown or Mermaid diagram
+python orchestrate_tasks.py show plan.json --format markdown
+python orchestrate_tasks.py show plan.json --format mermaid
+
+# 3. Execute the planned task graph (dry-run simulation)
+python orchestrate_tasks.py run plan.json --mode simulation --report-out report.md
+```
+
 ## Development
 
 ```bash
@@ -329,7 +398,7 @@ CITATION_LOG_FILE=0 python -m pytest tests/ -v
 ```
 
 The suite exercises pure logic — citation parsing, paper naming, extractor
-filing, ingestion bookkeeping, retrieval ranking — and needs none of the heavy
+filing, ingestion bookkeeping, retrieval ranking, task decomposition, and DAG execution — and needs none of the heavy
 stack (ChromaDB, PyTorch, detectron2, an LLM backend, GROBID). CI
 (`.github/workflows/tests.yml`) runs it on Python 3.10 and 3.12 and separately
 import-sweeps every module in the package to catch a broken import that no

@@ -9,17 +9,18 @@ This system builds and searches an evidence-grounded academic literature corpus,
 ## 🧭 Interface Overview (The 5 Tabs)
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                       🤖 Marvin the Citebot                                            │
-│                                                                                                        │
-│  [Tab 1: Citation auditor]   [Tab 2: Research idea]  [Tab 3: Cite a draft]    [Tab 4: Chat]   [Tab 5]   │
-│  Audit in-text citations     Discover literature &   Batch-cite manuscript &  Interactive     Manual   │
-│  against open-access PDFs    synthesize topic gaps   Agent 8 verification     studio          & FAQ    │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                 🤖 Marvin the Citebot                                                  │
+│                                                                                                                        │
+│  [Tab 0: Task planner]   [Tab 1: Citation auditor]   [Tab 2: Idea]   [Tab 3: Cite draft]    [Tab 4: Chat]    [Tab 5]   │
+│  Deconstruct papers into Audit in-text citations     Discover &      Batch-cite & audit     Interactive      Manual    │
+│  agent replication DAGs  against open-access PDFs    synthesize gaps manuscript citations  studio           & FAQ     │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Tab | Purpose | Primary Input | Key Deliverables |
 |---|---|---|---|
+| **Tab 0: Agent task planner** | Deconstruct scientific papers into dependency DAGs for autonomous AI agents | Paper PDF, TEI XML, or plain text | Dependency DAG flowchart, topological wave schedule, Antigravity agent specs, replication scorecard |
 | **Tab 1: Citation auditor** | Upload a published paper, fetch open-access references, and audit whether citations support the claims | Single PDF, multiple PDFs, or ZIP archive | In-text citation audit, 5 metric tiles, missing paywall upload cards, per-claim evidence viewer, synthesis across collection |
 | **Tab 2: Research idea** | Discover literature from an idea, download open-access papers, and synthesize established findings & gaps | Topic query or arXiv/PDF link | Discovered seed paper, per-paper reading notes, structured 3-part synthesis, key evidence passages |
 | **Tab 3: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
@@ -50,6 +51,28 @@ The left sidebar provides persistent visibility and control over background oper
 ---
 
 ## 📑 Detailed Tab Instructions
+
+---
+
+### Tab 0 — Agent task planner (Scientific Paper-to-Agent Task Decomposition)
+
+Tab 0 deconstructs scientific papers into structured Directed Acyclic Graphs (DAGs) of executable tasks for autonomous AI agents.
+
+#### 1. Input Options
+* **Select Ingested Paper**: Pick an existing paper from your local library or TEI extraction directory.
+* **Upload New Paper**: Upload a new `.pdf`, GROBID `.tei.xml`, or plain text `.txt` methodology notes.
+
+#### 2. Configuration & Synthesis
+* **⚡ Fast Heuristic Mode**: Instantly generates an authentic 5-task replication graph without querying an external LLM (ideal for offline use and fast CI).
+* **Execution Mode**: Choose between **🧪 Dry-Run Simulation** (checks prerequisites and produces mock deliverables) or **🤖 Autonomous Agent Execution** (calls AI agents to generate code and run replication procedures).
+* Click **⚡ Deconstruct into Task Graph**.
+
+#### 3. Deliverables & Views
+* **📊 Interactive DAG Flowchart**: Dynamic pan/zoom Mermaid diagram color-coded by task category and agent role.
+* **📑 Execution Schedule & Tasks**: Tasks grouped into parallel execution waves with expandable task cards showing objectives, required input artifacts, deliverables, acceptance criteria checkboxes, and context excerpts from the paper.
+* **🤖 Antigravity Agent Specs**: Formatted subagent invocation specs ready for multi-agent delegation.
+* **🚀 Dispatch & Execution**: Single-click execution across waves with progress tracking, artifact hash calculation, and automated generation of a **Replication Scorecard** (`CERTIFIED_REPLICABLE`, `PARTIALLY_REPLICATED`, `REPLICATION_FAILED`).
+* **📥 Downloads**: Export the complete plan as JSON, Markdown, or Antigravity JSON.
 
 ---
 
