@@ -27,3 +27,11 @@ model_final.pth
 .claude/
 .agents/
 ORIGINAL_REQUEST.md
+coding.md
+GEMINI.md
+CLAUDE.md
+TEST_INFRA.md
+TEST_READY.md
+interview_prep/
+scripts/compile_interview_guide.py
+
