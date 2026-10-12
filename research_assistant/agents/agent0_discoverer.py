@@ -1360,6 +1360,17 @@ _HEADER_JUNK_RE = re.compile(
     r"published|accepted|received|issn\b|typeset|draft version)",
 )
 
+# What a title field holds when it is not a title (_clean_title). Narrower than
+# _HEADER_JUNK_RE on purpose: "Nature of the ..." and "Science and ..." are titles.
+_TITLE_ID_RE = re.compile(r"(?i)^(?:arxiv[:\s/]|https?://|doi[:\s/]|10\.\d{4,9}/)")
+_TITLE_FILE_RE = re.compile(r"(?i)^microsoft (?:word|powerpoint|excel)\b|\.(?:docx?|tex|rtf|indd|odt)$")
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")  # no spaces between words, so a word count undercounts
+_TITLE_BANNER_WORDS = frozenset({
+    "paper", "article", "letter", "letters", "research", "original", "open", "access",
+    "preprint", "press", "under", "review", "accepted", "manuscript", "version", "draft",
+    "submitted", "published", "proof",
+})
+
 
 def _decode_pdf_title(raw_str: bytes | str) -> str | None:
     """Decode PDF title string from literal bytes/str or hex string."""
@@ -1404,7 +1415,15 @@ def _clean_title(title: str | None) -> str | None:
         .replace("&#39;", "'")
     )
     t = re.sub(r"\s+", " ", t).strip()
-    if len(t) > 3 and t.lower() not in ("untitled", "default", "none", "nan", "untitled document"):
+    words = re.findall(r"[^\W\d_]{3,}", t)
+    if (
+        len(t) > 3
+        and t.lower() not in ("untitled", "default", "none", "nan", "untitled document")
+        and not _TITLE_ID_RE.match(t)
+        and not _TITLE_FILE_RE.search(t)
+        and (len(words) >= 2 or len(_CJK_RE.findall(t)) >= 4)
+        and not (words and all(w.lower() in _TITLE_BANNER_WORDS for w in words))
+    ):
         return t
     return None
 
@@ -1454,6 +1473,23 @@ def _inspect_pdf(file_path: str, raw_bytes: bytes | None = None) -> tuple[str | 
                     m_doi = re.search(r"(?i)(?:doi[:\s/]|https?://doi\.org/)(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", text)
                     if m_doi:
                         doi = _clean_doi(m_doi.group(1))
+                if not title and page_num == 0:
+                    # The title is the largest text in the top half of page 1; a wrapped
+                    # title is several lines of one size. Try the three largest sizes.
+                    page = doc[page_num]
+                    by_size = {}
+                    for block in page.get_text("dict", sort=True)["blocks"]:
+                        for pdf_line in block.get("lines", []):
+                            spans = [s for s in pdf_line["spans"] if s["text"].strip()]
+                            if spans and pdf_line["bbox"][1] < page.rect.height / 2:
+                                size = round(max(s["size"] for s in spans))
+                                by_size.setdefault(size, []).append("".join(s["text"] for s in pdf_line["spans"]).strip())
+                    for size in sorted(by_size, reverse=True)[:3]:
+                        joined = " ".join(by_size[size])
+                        cand_title = None if _HEADER_JUNK_RE.search(joined) else _clean_title(joined)
+                        if cand_title and len(cand_title) <= 300:
+                            title = cand_title
+                            break
                 if not title and page_num == 0:
                     lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 3]
                     for candidate_line in lines[:10]:

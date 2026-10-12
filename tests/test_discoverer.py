@@ -131,6 +131,19 @@ class TestDiscoverFromFile(unittest.TestCase):
         self.assertEqual(rec["title"], "majorana zero modes")
         self.assertTrue(rec["key"].startswith("file:"))
 
+    def test_discover_from_file_ignores_junk_metadata_title(self):
+        # A typesetter job string in /Title must not become the research question.
+        pdf_content = b"%PDF-1.4 mock content with /Title (ci5c03109 1..21)"
+        pdf_path = os.path.join(self.tmp.name, "mn_oxide_sensors.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_content)
+
+        dest = a0.discover_from_file("", pdf_path)
+        self.assertIsNotNone(dest)
+        seeds = a0._load_seeds()
+        self.assertNotIn("ci5c03109 1..21", seeds)
+        self.assertEqual(seeds["mn oxide sensors"]["title"], "mn oxide sensors")
+
     def test_discover_from_file_bytes_input(self):
         pdf_content = b"%PDF-1.4 uploaded from stream directly"
         dest = a0.discover_from_file("my bytes query", pdf_content, filename="direct_stream.pdf")
@@ -561,6 +574,131 @@ class TestDiscoveryTracePersistence(unittest.TestCase):
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["context_profile"]["primary_domain"], "Condensed Matter Physics")
         self.assertEqual(a0.get_discovery_trace("nonexistent"), None)
+
+
+class TestCleanTitle(unittest.TestCase):
+    """_clean_title is the one gate every title source passes through, so a junk
+    string rejected here never becomes a seed's label or its research question.
+    Every string below was found as a title in real PDFs in the maintainer's corpus.
+    """
+
+    JUNK = [
+        "PAPER • OPEN ACCESS",                   # publisher banner
+        "Preprint. Under review.",
+        "ARTICLE IN PRESS",
+        "Submitted 04/08; Published 04/08",
+        "ci5c03109 1..21",                            # typesetter job strings
+        "GEO-2020-0640 811..823",
+        "PII: S0006-291X(02)02324-0",
+        "arXiv:1105.3756v3 [cond-mat.supr-con] 24 Aug 2012",
+        "https://doi.org/10.1103/PhysRevB.99.045101",
+        "Microsoft Word - Manuscript.20240119.docx",  # word-processor export names
+        "Microsoft Word - Ahn_Text",
+        "GNR_lowT_NNano_4 with figures.doc",
+        "2024-9-4",
+        "Chapter 27",
+        "!\"#$%\"$#&'(&)*\"+,*+-(.#+)/&0&1(.#23\"/(+0'()#2)&#\"*&4(",
+    ]
+
+    REAL = [
+        "Topological Wires",
+        "Anderson transitions",
+        "The Hitch Hiker's Guide to the Galaxy",
+        "Disorder information from conductance: a quantum inverse problem",
+        "Théorie quantique des champs",
+        "量子ホール効果の理論",         # Japanese: no spaces between words
+        "量子霍尔效应的理论研究",    # Chinese
+        "양자 홀 효과 이론",                        # Korean: short syllable words
+        # Contain a banner word or start like a journal name, but are titles.
+        "aiXiv: A Next-Generation Open Access Ecosystem for Scientific Discovery",
+        "Nature of the quantum Hall plateau transition",
+        "Science and technology of graphene",
+    ]
+
+    def test_junk_titles_are_rejected(self):
+        for title in self.JUNK:
+            with self.subTest(title=title):
+                self.assertIsNone(a0._clean_title(title))
+
+    def test_real_titles_are_kept(self):
+        for title in self.REAL:
+            with self.subTest(title=title):
+                self.assertEqual(a0._clean_title(title), title)
+
+
+try:
+    import fitz
+except ImportError:  # CI installs requirements-test.txt only
+    fitz = None
+
+
+@unittest.skipIf(fitz is None, "PyMuPDF not installed")
+class TestInspectPdfTitle(unittest.TestCase):
+    """Title choice on real PDF structure: metadata first, then the largest text
+    on page 1, then the first plausible line."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _pdf(self, lines, meta_title=None):
+        """Draw (text, fontsize, y[, x]) lines on page 1 and return the file path."""
+        doc = fitz.open()
+        page = doc.new_page()
+        for text, size, y, *x in lines:
+            page.insert_text((x[0] if x else 72, y), text, fontsize=size)
+        if meta_title is not None:
+            doc.set_metadata({"title": meta_title})
+        path = os.path.join(self.tmp.name, "paper.pdf")
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_junk_metadata_title_gives_way_to_the_largest_text_on_page_one(self):
+        path = self._pdf(
+            [
+                ("PAPER - OPEN ACCESS", 24, 60),            # biggest, but a banner
+                ("Disorder information from", 18, 100),     # the title, wrapped
+                ("conductance: a quantum inverse problem", 18, 124),
+                ("We study the conductance of disordered wires.", 10, 200),
+            ],
+            meta_title="ci5c03109 1..21",
+        )
+        title, _doi, _arxiv = a0._inspect_pdf(path)
+        self.assertEqual(title, "Disorder information from conductance: a quantum inverse problem")
+
+    def test_a_sound_metadata_title_is_kept(self):
+        path = self._pdf(
+            [("Some Much Larger Heading Text", 24, 60), ("body text here", 10, 120)],
+            meta_title="Quantum Hall plateaus in graphene",
+        )
+        title, _doi, _arxiv = a0._inspect_pdf(path)
+        self.assertEqual(title, "Quantum Hall plateaus in graphene")
+
+    def test_junk_metadata_and_no_text_gives_no_title(self):
+        path = self._pdf([], meta_title="ci5c03109 1..21")
+        title, _doi, _arxiv = a0._inspect_pdf(path)
+        self.assertIsNone(title)
+
+    def test_spans_of_one_line_join_without_added_spaces(self):
+        # "MoS", a smaller subscript "2" and " nanoribbons" are three spans of one
+        # line. Joining them must not turn MoS2 into "MoS 2".
+        font = fitz.Font("helv")
+        head = "Electronic transport in disordered MoS"
+        x_sub = 72 + font.text_length(head, fontsize=18)
+        x_tail = x_sub + font.text_length("2", fontsize=12)
+        path = self._pdf([(head, 18, 100), ("2", 12, 104, x_sub), (" nanoribbons", 18, 100, x_tail)])
+        title, _doi, _arxiv = a0._inspect_pdf(path)
+        self.assertEqual(title, "Electronic transport in disordered MoS2 nanoribbons")
+
+    def test_body_text_is_never_merged_into_the_title(self):
+        # No heading stands out: every line is the same size. The largest-text
+        # step must not swallow the page; the first line wins, as before.
+        lines = [("Anderson localization in disordered wires", 11, 72)]
+        lines += [(f"Body sentence number {i} continues the argument at length.", 11, 72 + 14 * i)
+                  for i in range(1, 21)]
+        title, _doi, _arxiv = a0._inspect_pdf(self._pdf(lines))
+        self.assertEqual(title, "Anderson localization in disordered wires")
 
 
 if __name__ == "__main__":
