@@ -63,10 +63,15 @@ def chat(messages, model=None, images=None, temperature=None, options=None, back
     """
     eff_backend = (backend or LLM_BACKEND).lower()
     model = model or LLM_MODEL
+    opts = dict(options) if options is not None else {}
+    opts.setdefault("num_ctx", 4096)
+    if opts.get("num_thread", 0) > 2:
+        logger.warning("Clamping excessive num_thread %d to CPU-safe bound (1)", opts["num_thread"])
+        opts["num_thread"] = 1
     if eff_backend == "openai":
         return _openai_chat(messages, model, images, temperature)
     if eff_backend == "ollama":
-        return _ollama_chat(messages, model, images, temperature, options)
+        return _ollama_chat(messages, model, images, temperature, opts)
     raise ValueError(f"Unknown LLM_BACKEND {eff_backend!r} (expected 'ollama' or 'openai')")
 
 
@@ -78,13 +83,15 @@ def _ollama_chat(messages, model, images, temperature=None, options=None) -> Cha
         messages[-1] = {**messages[-1], "images": list(images)}
 
     # Copied, not mutated: callers pass a module-level config dict.
-    opts = dict(options) if options else {}
+    opts = dict(options) if options is not None else {}
+    opts.setdefault("num_ctx", 4096)
+    if opts.get("num_thread", 0) > 2:
+        logger.warning("Clamping excessive num_thread %d to CPU-safe bound (1)", opts["num_thread"])
+        opts["num_thread"] = 1
     if temperature is not None:
         opts["temperature"] = temperature
 
-    kwargs = {"model": model, "messages": messages, "stream": False}
-    if opts:
-        kwargs["options"] = opts
+    kwargs = {"model": model, "messages": messages, "stream": False, "options": opts}
 
     resp = ollama.chat(**kwargs)
     try:
@@ -162,24 +169,32 @@ def chat_stream(messages, model=None, options=None, temperature=None, backend=No
     """
     eff_backend = (backend or LLM_BACKEND).lower()
     model = model or CHAT_MODEL
+    opts = dict(options) if options is not None else {}
+    opts.setdefault("num_ctx", 4096)
+    if opts.get("num_thread", 0) > 2:
+        logger.warning("Clamping excessive num_thread %d to CPU-safe bound (1)", opts["num_thread"])
+        opts["num_thread"] = 1
     if eff_backend == "openai":
         return _openai_stream(messages, model, temperature=temperature)
     if eff_backend == "ollama":
-        return _ollama_stream(messages, model, options, temperature=temperature)
+        return _ollama_stream(messages, model, opts, temperature=temperature)
     raise ValueError(
         f"Unknown LLM_BACKEND {eff_backend!r} (expected 'ollama' or 'openai')"
     )
 
 
-def _ollama_stream(messages, model, options, temperature=None):
+def _ollama_stream(messages, model, options=None, temperature=None):
     import ollama
 
-    kwargs = {"model": model, "messages": messages, "stream": True}
-    opts = dict(options) if options else {}
+    opts = dict(options) if options is not None else {}
+    opts.setdefault("num_ctx", 4096)
+    if opts.get("num_thread", 0) > 2:
+        logger.warning("Clamping excessive num_thread %d to CPU-safe bound (1)", opts["num_thread"])
+        opts["num_thread"] = 1
     if temperature is not None:
         opts["temperature"] = temperature
-    if opts:
-        kwargs["options"] = opts
+
+    kwargs = {"model": model, "messages": messages, "stream": True, "options": opts}
     for chunk in ollama.chat(**kwargs):
         try:
             content = chunk.message.content
@@ -290,8 +305,10 @@ def get_embeddings(model=None):
         elif EMBED_BACKEND == "ollama":
             from langchain_ollama import OllamaEmbeddings
 
-            logger.info("Embeddings: local Ollama (%s)", model)
-            _embeddings_singleton = OllamaEmbeddings(model=model)
+            try:
+                _embeddings_singleton = OllamaEmbeddings(model=model, num_ctx=4096)
+            except TypeError:
+                _embeddings_singleton = OllamaEmbeddings(model=model)
         else:
             raise ValueError(
                 f"Unknown EMBED_BACKEND {EMBED_BACKEND!r} "

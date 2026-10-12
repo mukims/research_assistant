@@ -80,6 +80,8 @@ class PipelineState(_Inputs, total=False):
     stopped: Optional[str]   # reason the run ended early, if it did
     # v2: the run's figure-analysis switch. None → config.FIGURE_VLM.
     describe_figures: Optional[bool]
+    discovery_trace: Optional[dict]
+    context_profile: Optional[dict]
 
 
 def _banner(title: str) -> None:
@@ -135,6 +137,11 @@ def discover(state: PipelineState) -> dict:
         pipeline_status.add_event(f"✅ Found seed paper: {label[:60]}")
         pipeline_status.update_progress(current_item_name=label, detail=f"Seed paper identified: {label[:60]}")
         result = {"seed_path": path, "seed_label": label}
+        trace = agent0_discoverer.get_discovery_trace(query)
+        if trace:
+            result["discovery_trace"] = trace
+            if trace.get("context_profile"):
+                result["context_profile"] = trace["context_profile"]
         if query and query != state.get("query"):
             result["query"] = query
         return result

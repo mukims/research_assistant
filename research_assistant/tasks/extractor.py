@@ -3,28 +3,23 @@ Scientific Protocol Miner: extracts operational protocols and synthesizes Task G
 """
 
 import glob
-import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional
 
 from bs4 import BeautifulSoup
 
 from research_assistant import config
-from research_assistant.config import LLM_MODEL
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.seed_audit import find_tei_for_seed
 from research_assistant.tasks.models import (
     AgentRole,
+    ArtifactContract,
+    ArtifactType,
     Task,
     TaskCategory,
     TaskGraph,
-    TaskStatus,
-)
-from research_assistant.tasks.prompts import (
-    PROTOCOL_DECONSTRUCTION_SYSTEM,
-    PROTOCOL_DECONSTRUCTION_USER,
 )
 
 logger = get_logger("task_extractor")
@@ -728,18 +723,37 @@ def extract_paper_planning_context(tei_source: Any) -> Dict[str, Any]:
     return _extract_from_plain_text(raw_str, fallback_title="Scientific Paper")
 
 
-def _heuristic_task_graph(paper_id: str, paper_title: str, context: Dict[str, Any]) -> TaskGraph:
+def _heuristic_task_graph(
+    paper_id: str,
+    paper_title: str,
+    context: Optional[Dict[str, Any]] = None,
+    full_phases: bool = False,
+) -> TaskGraph:
     """
     Deterministic fallback task graph builder for offline testing or when LLM is unreachable.
-    Builds an authentic 5-task scientific replication DAG.
+    When full_phases is True (or context has 'full_phases': True, or TASK_GRAPH_7_PHASES=1),
+    builds an authentic 7-task DAG covering all 6 mandatory scientific phases.
+    When full_phases is False, builds the standard 5-task DAG for compatibility with existing tests.
     """
+    ctx = context or {}
+    use_7_phases = (
+        full_phases
+        or bool(ctx.get("full_phases"))
+        or bool(ctx.get("six_phases"))
+        or os.environ.get("TASK_GRAPH_7_PHASES") == "1"
+    )
+
+    if use_7_phases:
+        from research_assistant.tasks.iteration import _build_heuristic_7phase_fallback
+        return _build_heuristic_7phase_fallback(paper_id, paper_title, ctx)
+
     graph = TaskGraph(paper_id=paper_id, paper_title=paper_title)
 
-    abstract_excerpt = [context["abstract"][:300]] if context.get("abstract") else []
-    section_excerpt = (context.get("sections") or ["Dataset and preprocessing details."])[:1]
-    model_excerpt = (context.get("sections") or ["Model architecture and methodology."])[:1]
-    exp_excerpt = (context.get("sections") or ["Experimental setup and training protocol."])[:1]
-    table_excerpt = (context.get("tables") or ["Evaluation results and comparison."])[:1]
+    abstract_excerpt = [ctx["abstract"][:300]] if ctx.get("abstract") else []
+    section_excerpt = (ctx.get("sections") or ["Dataset and preprocessing details."])[:1]
+    model_excerpt = (ctx.get("sections") or ["Model architecture and methodology."])[:1]
+    exp_excerpt = (ctx.get("sections") or ["Experimental setup and training protocol."])[:1]
+    table_excerpt = (ctx.get("tables") or ["Evaluation results and comparison."])[:1]
 
     t1 = Task(
         task_id="task_01_env",
@@ -752,6 +766,13 @@ def _heuristic_task_graph(paper_id: str, paper_title: str, context: Dict[str, An
         outputs=["env_ready.lock"],
         acceptance_criteria=["Environment builds cleanly", "Key libraries import without error"],
         paper_context_excerpts=abstract_excerpt,
+        artifact_contracts=[
+            ArtifactContract(
+                path="env_ready.lock",
+                artifact_type=ArtifactType.LOCKFILE,
+                description="Environment lockfile",
+            ),
+        ],
     )
 
     t2 = Task(
@@ -765,6 +786,15 @@ def _heuristic_task_graph(paper_id: str, paper_title: str, context: Dict[str, An
         outputs=["data/processed_data.h5"],
         acceptance_criteria=["Train/Val/Test splits verified", "Zero missing values or NaN entries"],
         paper_context_excerpts=section_excerpt,
+        artifact_contracts=[
+            ArtifactContract(
+                path="data/processed_data.h5",
+                artifact_type=ArtifactType.TENSOR,
+                shape=[1000, 128],
+                dtype="float32",
+                description="Processed dataset tensor",
+            ),
+        ],
     )
 
     t3 = Task(
@@ -778,6 +808,18 @@ def _heuristic_task_graph(paper_id: str, paper_title: str, context: Dict[str, An
         outputs=["src/model.py", "src/loss.py"],
         acceptance_criteria=["Forward pass completes with correct tensor dimensions", "Loss is differentiable"],
         paper_context_excerpts=model_excerpt,
+        artifact_contracts=[
+            ArtifactContract(
+                path="src/model.py",
+                artifact_type=ArtifactType.CODE,
+                description="Model implementation",
+            ),
+            ArtifactContract(
+                path="src/loss.py",
+                artifact_type=ArtifactType.CODE,
+                description="Loss formulation",
+            ),
+        ],
     )
 
     t4 = Task(
@@ -791,6 +833,21 @@ def _heuristic_task_graph(paper_id: str, paper_title: str, context: Dict[str, An
         outputs=["checkpoints/model_best.pt", "logs/train_metrics.csv"],
         acceptance_criteria=["Loss converges over epochs", "Model weights checkpointed"],
         paper_context_excerpts=exp_excerpt,
+        artifact_contracts=[
+            ArtifactContract(
+                path="checkpoints/model_best.pt",
+                artifact_type=ArtifactType.TENSOR,
+                shape=["parameters"],
+                dtype="float32",
+                description="Model checkpoint",
+            ),
+            ArtifactContract(
+                path="logs/train_metrics.csv",
+                artifact_type=ArtifactType.TABULAR,
+                columns={"epoch": "int", "loss": "float"},
+                description="Training log",
+            ),
+        ],
     )
 
     t5 = Task(
@@ -804,6 +861,14 @@ def _heuristic_task_graph(paper_id: str, paper_title: str, context: Dict[str, An
         outputs=["results/evaluation_report.json"],
         acceptance_criteria=["Primary performance metric computed on test set", "Comparison table generated"],
         paper_context_excerpts=table_excerpt,
+        artifact_contracts=[
+            ArtifactContract(
+                path="results/evaluation_report.json",
+                artifact_type=ArtifactType.METRICS_JSON,
+                required_keys=["accuracy", "metric"],
+                description="Evaluation metrics",
+            ),
+        ],
     )
 
     for t in [t1, t2, t3, t4, t5]:
@@ -818,10 +883,12 @@ def deconstruct_paper_into_task_graph(
     paper_title: Optional[str] = None,
     model: Optional[str] = None,
     force_heuristic: bool = False,
+    full_phases: bool = False,
 ) -> TaskGraph:
     """
     Mines a scientific paper and synthesizes an executable TaskGraph DAG.
-    Uses LLM with fallback to heuristic synthesis for offline environments.
+    Retrieves grounded evidence across 4 methodological facets, and executes
+    ProposerCriticEngine refinement loop with fallback to heuristic synthesis.
     """
     if isinstance(tei_or_path, os.PathLike):
         tei_or_path = os.fspath(tei_or_path)
@@ -848,87 +915,48 @@ def deconstruct_paper_into_task_graph(
         pid = re.sub(r"[^\w\-]", "_", str(pid).lstrip(".")).strip("_")
     pid = pid or "paper"
 
+    # Wire Grounded Multi-Facet Vector Retrieval if available
+    try:
+        from research_assistant.tasks.retrieval import (
+            get_ingested_documents,
+            pdf_key,
+            retrieve_faceted_paper_context,
+        )
+        path_str = tei_or_path if isinstance(tei_or_path, (str, os.PathLike)) else getattr(tei_or_path, "name", None)
+        if path_str and isinstance(path_str, (str, os.PathLike)):
+            d_key = pdf_key(os.fspath(path_str))
+            ingested = get_ingested_documents()
+            if d_key in ingested:
+                faceted = retrieve_faceted_paper_context(d_key, query_hint=title)
+                if faceted and faceted.get("formatted_context"):
+                    context["formatted_context"] = faceted["formatted_context"]
+                    context["faceted_results"] = faceted
+            elif os.environ.get("TASK_ENABLE_AUTO_INGEST") == "1":
+                from research_assistant.tasks.retrieval import check_or_ingest_paper
+                doc_key = check_or_ingest_paper(tei_or_path, title=title)
+                if doc_key:
+                    faceted = retrieve_faceted_paper_context(doc_key, query_hint=title)
+                    if faceted and faceted.get("formatted_context"):
+                        context["formatted_context"] = faceted["formatted_context"]
+                        context["faceted_results"] = faceted
+    except Exception as exc:
+        logger.debug("Faceted retrieval skipped or failed (%s); proceeding with local context.", exc)
+
     if force_heuristic or os.environ.get("CITATION_TASK_HEURISTIC_ONLY") == "1":
         logger.info("Synthesizing task graph via heuristic mode.")
-        return _heuristic_task_graph(pid, title, context)
+        return _heuristic_task_graph(pid, title, context, full_phases=full_phases)
 
-    # Format planning prompt
-    paper_text_parts = [
-        f"Abstract:\n{context.get('abstract', 'N/A')}\n",
-        "\n".join(context.get("sections", [])),
-    ]
-    if context.get("tables"):
-        paper_text_parts.append("\nKey Figures / Tables:\n" + "\n".join(context["tables"]))
-
-    paper_text = "\n\n".join(paper_text_parts)[:10000]
-
-    prompt = PROTOCOL_DECONSTRUCTION_USER.format(
-        paper_title=title,
-        paper_text=paper_text,
-    )
-
+    # Execute ProposerCriticEngine refinement loop
     try:
-        res = chat(
-            [
-                {"role": "system", "content": PROTOCOL_DECONSTRUCTION_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            model=model or LLM_MODEL,
-            temperature=0.1,
-        )
-        raw = res.content.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-
-        parsed = json.loads(raw)
-        tasks_data = parsed.get("tasks", [])
-
-        if not tasks_data or not isinstance(tasks_data, list):
-            logger.warning("LLM returned no tasks; falling back to heuristic.")
-            return _heuristic_task_graph(pid, title, context)
-
-        graph = TaskGraph(paper_id=pid, paper_title=parsed.get("paper_title") or title)
-        for t_dict in tasks_data:
-            # Map values gracefully to enum
-            try:
-                cat_val = t_dict.get("category", "").lower()
-                category = next(
-                    (c for c in TaskCategory if c.value == cat_val),
-                    TaskCategory.MODEL_IMPLEMENTATION,
-                )
-                role_val = t_dict.get("assigned_role", "").lower()
-                role = next(
-                    (r for r in AgentRole if r.value == role_val),
-                    AgentRole.MODEL_ARCHITECT,
-                )
-
-                task = Task(
-                    task_id=t_dict.get("task_id", f"task_{len(graph.tasks)+1}"),
-                    title=t_dict.get("title", "Execution Task"),
-                    category=category,
-                    assigned_role=role,
-                    dependencies=t_dict.get("dependencies", []),
-                    description=t_dict.get("description", ""),
-                    inputs=t_dict.get("inputs", []),
-                    outputs=t_dict.get("outputs", []),
-                    acceptance_criteria=t_dict.get("acceptance_criteria", []),
-                    paper_context_excerpts=t_dict.get("paper_context_excerpts", []),
-                    tools_required=t_dict.get("tools_required", []),
-                )
-                graph.add_task(task)
-            except Exception as e:
-                logger.warning("Failed to parse task %s: %s", t_dict.get("task_id"), e)
-
-        # Validate DAG
+        from research_assistant.tasks.iteration import ProposerCriticEngine
+        engine = ProposerCriticEngine(model=model, chat_fn=chat, full_phases=full_phases)
+        graph, scorecards = engine.run_refinement_loop(pid, title, context, max_turns=3)
         errors = graph.validate()
         if errors:
             logger.warning("Synthesized graph had validation errors (%s); falling back to heuristic.", errors)
-            return _heuristic_task_graph(pid, title, context)
-
-        logger.info("Successfully synthesized TaskGraph with %d tasks via LLM.", len(graph.tasks))
+            return _heuristic_task_graph(pid, title, context, full_phases=full_phases)
+        logger.info("Successfully synthesized TaskGraph with %d tasks via ProposerCriticEngine.", len(graph.tasks))
         return graph
-
     except Exception as exc:
         logger.warning("LLM task deconstruction failed (%s); using heuristic fallback.", exc)
-        return _heuristic_task_graph(pid, title, context)
+        return _heuristic_task_graph(pid, title, context, full_phases=full_phases)

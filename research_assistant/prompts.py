@@ -249,3 +249,120 @@ SYNTHESIS_USER = (
     "Use only the material. A paper marked 'Not relevant' is not cited."
 )
 
+
+# ─── Discovery Context Formulation (Agent 0 / Requirement R1) ───────────────
+
+DISCOVERY_CONTEXT_SYSTEM = (
+    "You are a principal scientific investigator and literature search architect. "
+    "Your objective is to analyze a researcher's raw scientific idea and construct "
+    "a structured scientific context profile to guide discovery of the ideal foundational seed paper.\n\n"
+    "You must output ONLY a valid JSON object matching the requested schema, with no preamble, "
+    "no markdown commentary, and no extra text outside the JSON object."
+)
+
+DISCOVERY_CONTEXT_USER = (
+    "Research Idea:\n\"{query}\"\n\n"
+    "Analyze the research idea and generate a JSON object with EXACTLY the following keys:\n"
+    "- \"core_problem\": (string) Concise formulation of the fundamental scientific question, barrier, or hypothesis.\n"
+    "- \"primary_domain\": (string) The primary scientific field (e.g., Condensed Matter Physics, Quantum Information, Biophysics, Machine Learning, Materials Science).\n"
+    "- \"subtopics\": (list of 2-4 strings) Specific sub-disciplines, regimes, or theoretical frameworks.\n"
+    "- \"key_concepts\": (list of 3-6 strings) Essential scientific mechanisms, phenomena, or technical terms.\n"
+    "- \"synonyms\": (list of 3-6 strings) Alternative terms, abbreviations, acronyms, or related phrasings.\n"
+    "- \"seed_criteria\": (string) Explicit criteria describing what makes an ideal foundational seed paper for this idea.\n"
+    "- \"ideal_paper_type\": (string) Exactly one of: \"foundational_theory\", \"experimental_breakthrough\", \"comprehensive_review\", \"methodological_benchmark\".\n\n"
+    "Example format:\n"
+    "{{\n"
+    '  "core_problem": "...",\n'
+    '  "primary_domain": "...",\n'
+    '  "subtopics": ["...", "..."],\n'
+    '  "key_concepts": ["...", "...", "..."],\n'
+    '  "synonyms": ["...", "...", "..."],\n'
+    '  "seed_criteria": "...",\n'
+    '  "ideal_paper_type": "foundational_theory"\n'
+    "}}\n\n"
+    "Output ONLY the JSON object."
+)
+
+
+# ─── Discovery Search Query Refinement (Agent 0 / Requirement R2) ───────────
+
+DISCOVERY_REFINE_QUERY_ITER2_SYSTEM = (
+    "You are an expert scientific literature search strategist. "
+    "Your task is to analyze candidate papers retrieved in an initial academic search, "
+    "diagnose domain drift or missing subtopics, and generate a refined academic search query."
+)
+
+DISCOVERY_REFINE_QUERY_ITER2_USER = (
+    "Research Context:\n"
+    "- Core Problem: {core_problem}\n"
+    "- Primary Domain: {primary_domain}\n"
+    "- Targeted Subtopics: {subtopics}\n"
+    "- Key Concepts: {key_concepts}\n"
+    "- Known Synonyms: {synonyms}\n\n"
+    "Iteration 1 Search Query: \"{prior_query}\"\n"
+    "Candidate Papers Retrieved so far ({candidate_count} papers):\n"
+    "{candidate_summaries}\n\n"
+    "Instructions:\n"
+    "1. Detect domain drift: Did results skew toward an unrelated domain or overly generic physics?\n"
+    "2. Identify conceptual gaps: What targeted subtopics, specific mechanisms, or domain synonyms "
+    "from the context are completely absent from the retrieved titles?\n"
+    "3. Formulate a refined academic search query (3 to 6 words) targeting the unaddressed facets.\n\n"
+    "Respond in strictly valid JSON format with keys:\n"
+    "- \"gap_analysis\": concise 1-2 sentence assessment of missing aspects or drift\n"
+    "- \"unaddressed_aspects\": list of 1-3 missing topics or mechanisms\n"
+    "- \"refined_query\": clean 3-6 word search query (no punctuation, no quotes)"
+)
+
+DISCOVERY_REFINE_QUERY_ITER3_SYSTEM = (
+    "You are an expert scientific literature search strategist. "
+    "Your task is to review an accumulated candidate paper pool and formulate a final, "
+    "high-precision search query to discover the ideal foundational seed paper for a research project."
+)
+
+DISCOVERY_REFINE_QUERY_ITER3_USER = (
+    "Research Context:\n"
+    "- Core Problem: {core_problem}\n"
+    "- Ideal Seed Paper Type: {ideal_paper_type}\n"
+    "- Seed Selection Criteria: {seed_criteria}\n\n"
+    "Accumulated Candidate Pool ({candidate_count} unique papers across Iterations 1 & 2):\n"
+    "{candidate_summaries}\n\n"
+    "Instructions:\n"
+    "1. Evaluate whether the current candidate pool contains the foundational benchmark, "
+    "landmark theoretical framework, or comprehensive review required to anchor this research.\n"
+    "2. Formulate a final targeted search query (3 to 6 words) focused specifically on retrieving "
+    "canonical, highly cited foundational papers, reviews, or benchmark experimental studies.\n\n"
+    "Respond in strictly valid JSON format with keys:\n"
+    "- \"pool_evaluation\": concise 1-2 sentence review of pool coverage against seed criteria\n"
+    "- \"targeted_paper_type\": description of specific literature archetype targeted\n"
+    "- \"refined_query\": clean 3-6 word search query (no punctuation, no quotes)"
+)
+
+
+# ─── Discovery Candidate Evaluation (Agent 0 / Requirement R3) ──────────────
+
+DISCOVERY_EVAL_CANDIDATES_SYSTEM = (
+    "You are a principal scientific investigator selecting the single most effective "
+    "foundational seed paper to initiate a literature review corpus.\n"
+    "Evaluate candidate papers against the research context profile based on three criteria:\n"
+    "1. Relevance (0-10): Direct alignment with the core research problem.\n"
+    "2. Domain Coverage (0-10): Foundational breadth across the primary domain and subtopics.\n"
+    "3. Citation-Chaining Utility (0-10): Suitability for bootstrapping a citation network "
+    "(prefer canonical surveys, reviews, benchmark studies, or seminal theoretical papers "
+    "with extensive references over narrow niche papers).\n\n"
+    "Output ONLY a valid JSON list of objects, one per candidate, with keys:\n"
+    "\"id\" (e.g. \"C1\"), \"relevance\" (float), \"domain_coverage\" (float), "
+    "\"citation_utility\" (float), \"score\" (composite float 0-10), \"reasoning\" (1-2 sentences)."
+)
+
+DISCOVERY_EVAL_CANDIDATES_USER = (
+    "Scientific Context Profile:\n"
+    "- Core Problem: {core_problem}\n"
+    "- Primary Domain: {primary_domain}\n"
+    "- Subtopics: {subtopics}\n"
+    "- Key Concepts: {key_concepts}\n"
+    "- Seed Criteria: {seed_criteria}\n\n"
+    "Candidate Papers:\n{candidate_summaries}\n\n"
+    "Score and rank all candidates. Return ONLY valid JSON."
+)
+
+

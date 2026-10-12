@@ -5,7 +5,6 @@ Streamlit UI Component for Scientific Agent Task Planner & Replication DAGs.
 import json
 import os
 import re
-import tempfile
 from typing import List, Optional
 
 import streamlit as st
@@ -18,9 +17,7 @@ from research_assistant.tasks.graph import (
     render_mermaid,
 )
 from research_assistant.tasks.models import (
-    AgentRole,
     Task,
-    TaskCategory,
     TaskGraph,
     TaskStatus,
 )
@@ -204,6 +201,7 @@ def render_planner_tab():
                     paper_id=safe_pid,
                     paper_title=paper_title,
                     force_heuristic=heuristic_mode,
+                    full_phases=True,
                 )
                 st.session_state["planner_active_graph"] = graph
                 st.session_state["planner_last_report"] = None
@@ -214,6 +212,17 @@ def render_planner_tab():
     # Display Active Graph
     graph: Optional[TaskGraph] = st.session_state.get("planner_active_graph")
     if graph:
+        # Ensure any generic titles or single-role assignments from prior runs are sanitized
+        for t in graph.tasks.values():
+            if not t.title or t.title.strip() == "Execution Task":
+                from research_assistant.tasks.iteration import _resolve_title
+                t.title = _resolve_title({"title": ""}, t.category, t.description)
+        roles = {t.assigned_role for t in graph.tasks.values()}
+        if len(graph.tasks) >= 3 and len(roles) <= 1:
+            from research_assistant.tasks.iteration import _resolve_role
+            for t in graph.tasks.values():
+                t.assigned_role = _resolve_role({}, t.category, t.title, t.description)
+
         st.divider()
         st.markdown(f"### 📋 Research Plan: {graph.paper_title}")
 

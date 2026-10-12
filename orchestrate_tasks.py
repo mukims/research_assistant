@@ -23,7 +23,6 @@ from research_assistant.tasks import (
     load_task_graph,
     render_markdown_plan,
     render_mermaid,
-    save_task_graph,
 )
 
 
@@ -34,11 +33,16 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Deconstructing paper: {paper_path} (heuristic={args.heuristic})...")
-    graph = deconstruct_paper_into_task_graph(
-        tei_or_path=paper_path,
-        paper_id=args.paper_id,
-        force_heuristic=args.heuristic,
-    )
+    try:
+        graph = deconstruct_paper_into_task_graph(
+            tei_or_path=paper_path,
+            paper_id=args.paper_id,
+            force_heuristic=args.heuristic,
+            full_phases=getattr(args, "full_phases", False),
+        )
+    except Exception as exc:
+        print(f"Error: Failed to deconstruct paper '{paper_path}': {exc}", file=sys.stderr)
+        return 1
 
     fmt = args.format.lower()
     if fmt == "json":
@@ -54,10 +58,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 1
 
     if args.output:
-        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(content)
-        print(f"Plan exported successfully to: {args.output}")
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"Plan exported successfully to: {args.output}")
+        except Exception as exc:
+            print(f"Error: Failed to write plan to '{args.output}': {exc}", file=sys.stderr)
+            return 1
     else:
         print(content)
 
@@ -70,7 +78,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: Plan file '{plan_path}' not found.", file=sys.stderr)
         return 1
 
-    graph = load_task_graph(plan_path)
+    try:
+        graph = load_task_graph(plan_path)
+    except Exception as exc:
+        print(f"Error: Failed to load plan file '{plan_path}': {exc}", file=sys.stderr)
+        return 1
+
     workspace = args.workspace or os.path.join("workspace_runs", graph.paper_id)
     mode = ExecutionMode.AUTONOMOUS if args.mode == "autonomous" else ExecutionMode.SIMULATION
 
@@ -91,13 +104,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("\n" + report.render_markdown())
 
     if args.report_out:
-        os.makedirs(os.path.dirname(os.path.abspath(args.report_out)), exist_ok=True)
-        with open(args.report_out, "w", encoding="utf-8") as f:
-            if args.report_out.endswith(".json"):
-                json.dump(report.to_dict(), f, indent=2)
-            else:
-                f.write(report.render_markdown())
-        print(f"Execution report saved to: {args.report_out}")
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(args.report_out)), exist_ok=True)
+            with open(args.report_out, "w", encoding="utf-8") as f:
+                if args.report_out.endswith(".json"):
+                    json.dump(report.to_dict(), f, indent=2)
+                else:
+                    f.write(report.render_markdown())
+            print(f"Execution report saved to: {args.report_out}")
+        except Exception as exc:
+            print(f"Error: Failed to write execution report to '{args.report_out}': {exc}", file=sys.stderr)
+            return 1
 
     return 0 if report.failed_count == 0 else 1
 
@@ -108,12 +125,24 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(f"Error: Plan file '{plan_path}' not found.", file=sys.stderr)
         return 1
 
-    graph = load_task_graph(plan_path)
+    try:
+        graph = load_task_graph(plan_path)
+    except Exception as exc:
+        print(f"Error: Failed to load plan file '{plan_path}': {exc}", file=sys.stderr)
+        return 1
+
     fmt = args.format.lower()
     if fmt == "mermaid":
         print(render_mermaid(graph))
-    else:
+    elif fmt == "markdown":
         print(render_markdown_plan(graph))
+    elif fmt == "json":
+        print(json.dumps(graph.to_dict(), indent=2))
+    elif fmt == "antigravity":
+        print(json.dumps(export_antigravity_specs(graph), indent=2))
+    else:
+        print(f"Error: Unknown format '{fmt}'.", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -128,6 +157,7 @@ def main() -> int:
     p_plan.add_argument("--format", choices=["json", "markdown", "mermaid", "antigravity"], default="json")
     p_plan.add_argument("--output", "-o", help="File to write the generated plan to")
     p_plan.add_argument("--heuristic", action="store_true", help="Force fast offline heuristic mode")
+    p_plan.add_argument("--full-phases", action="store_true", help="Generate all 6 mandatory scientific replication phases")
 
     # run command
     p_run = subparsers.add_parser("run", help="Execute a planned task graph")
@@ -137,9 +167,9 @@ def main() -> int:
     p_run.add_argument("--report-out", help="Path to write execution scorecard report")
 
     # show command
-    p_show = subparsers.add_parser("show", help="Display a task graph as markdown or mermaid")
+    p_show = subparsers.add_parser("show", help="Display a task graph as markdown, mermaid, json, or antigravity")
     p_show.add_argument("plan_json", help="Path to TaskGraph JSON file")
-    p_show.add_argument("--format", choices=["markdown", "mermaid"], default="markdown")
+    p_show.add_argument("--format", choices=["markdown", "mermaid", "json", "antigravity"], default="markdown")
 
     args = parser.parse_args()
     if args.command == "plan":

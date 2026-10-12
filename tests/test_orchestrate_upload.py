@@ -116,6 +116,31 @@ class TestOrchestrateSeedFileIntegration(unittest.TestCase):
         self.assertIn("stopped", res)
         self.assertIn("could not load seed PDF", res["stopped"])
 
+    def test_discover_node_propagates_discovery_trace(self):
+        fake_trace = {
+            "query": "superconducting qubits",
+            "context_profile": {"primary_domain": "Quantum Computing"},
+            "search_trace": {"total_candidates": 3},
+        }
+        with patch.object(a0, "discover", return_value="/path/to/qubit.pdf"):
+            with patch.object(
+                a0,
+                "get_seed",
+                return_value={"title": "Superconducting Qubits", "path": "/path/to/qubit.pdf", "key": "doi:10.1234/q"},
+            ):
+                with patch.object(a0, "get_discovery_trace", return_value=fake_trace):
+                    state = {
+                        "query": "superconducting qubits",
+                        "workers": 1,
+                        "force": False,
+                        "ask": True,
+                    }
+                    res = orchestrate.discover(state)
+                    self.assertEqual(res["seed_path"], "/path/to/qubit.pdf")
+                    self.assertEqual(res["seed_label"], "Superconducting Qubits")
+                    self.assertEqual(res.get("discovery_trace"), fake_trace)
+                    self.assertEqual(res.get("context_profile"), {"primary_domain": "Quantum Computing"})
+
     def test_after_discover_routing(self):
         state_with_seed = {"seed_path": "/path/to/seed.pdf", "ask": True}
         self.assertEqual(orchestrate._after_discover(state_with_seed), "ingest_seed")
@@ -166,6 +191,64 @@ class TestAppSeedRender(unittest.TestCase):
                         # Verify markdown rendered seed paper title
                         rendered = [call.args[0] for call in mock_markdown.call_args_list if call.args]
                         self.assertTrue(any("New Uploaded Paper" in r for r in rendered))
+
+    def test_render_discovery_trace_renders_context_and_iterations(self):
+        import app
+        mock_trace = {
+            "query": "topological quantum wires",
+            "context_profile": {
+                "primary_domain": "Condensed Matter Physics",
+                "core_problem": "Majorana zero modes",
+                "subtopics": ["Nanowires", "Superconductivity"],
+                "ideal_paper_type": "foundational_theory",
+                "seed_criteria": "Foundational survey",
+                "key_concepts": ["Kitaev chain"],
+            },
+            "search_trace": {
+                "total_candidates": 5,
+                "iterations": [
+                    {
+                        "iteration": 1,
+                        "query_used": "topological quantum wires",
+                        "candidates_found": 3,
+                        "open_access_count": 2,
+                    },
+                    {
+                        "iteration": 2,
+                        "query_used": "Majorana nanowires",
+                        "candidates_found": 2,
+                        "open_access_count": 2,
+                        "gap_analysis": "Targeting superconductor junctions",
+                    },
+                ],
+            },
+            "ranked_candidates": [
+                {
+                    "title": "Majorana Zero Modes in Nanowires",
+                    "score": 9.2,
+                    "reasoning": "Seminal theoretical foundation",
+                    "eval_method": "llm",
+                }
+            ],
+        }
+
+        with patch("streamlit.expander") as mock_expander:
+            with patch("streamlit.markdown") as mock_markdown:
+                with patch("streamlit.caption"):
+                    with patch("streamlit.columns", return_value=[MagicMock(), MagicMock()]):
+                        final = {
+                            "seed_path": "/fake/seed.pdf",
+                            "seed_label": "Majorana Zero Modes in Nanowires",
+                            "discovery_trace": mock_trace,
+                        }
+                        app._render_discovery_trace("topological quantum wires", final)
+                        mock_expander.assert_called_with(
+                            "🔬 Literature Discovery Trace (Context & 3-Stage Search)", expanded=False
+                        )
+                        rendered = [c.args[0] for c in mock_markdown.call_args_list if c.args]
+                        self.assertTrue(any("Formulated Scientific Context" in r for r in rendered))
+                        self.assertTrue(any("3-Stage Iterative Search" in r for r in rendered))
+                        self.assertTrue(any("Evaluated Seed Candidates" in r for r in rendered))
 
 
 class TestUploadStaging(unittest.TestCase):

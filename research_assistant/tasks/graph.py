@@ -9,10 +9,8 @@ from typing import Any, Dict, List
 
 from research_assistant.tasks.models import (
     AgentRole,
-    Task,
     TaskCategory,
     TaskGraph,
-    TaskStatus,
 )
 
 
@@ -60,7 +58,10 @@ def render_mermaid(graph: TaskGraph) -> str:
     for t_id, task in graph.tasks.items():
         nid = _safe_id(t_id)
         icon = ROLE_ICONS.get(task.assigned_role, "📋")
-        safe_title = re.sub(r"[\r\n]+", " ", task.title).replace('"', "'")
+        display_title = (task.title or "").strip()
+        if not display_title or display_title.lower() in ("execution task", "task", "step"):
+            display_title = task.category.value.replace("_", " ").title()
+        safe_title = re.sub(r"[\r\n]+", " ", display_title).replace('"', "'")
         safe_title = safe_title.replace("[", "(").replace("]", ")")
         lines.append(f'    {nid}["{icon} {safe_title}"]')
 

@@ -7,6 +7,8 @@ Graphs (DAGs) of executable tasks for autonomous AI agents.
 
 from research_assistant.tasks.models import (
     AgentRole,
+    ArtifactContract,
+    ArtifactType,
     Task,
     TaskCategory,
     TaskGraph,
@@ -42,6 +44,8 @@ __all__ = [
     "TaskCategory",
     "TaskStatus",
     "AgentRole",
+    "ArtifactContract",
+    "ArtifactType",
     "export_antigravity_specs",
     "load_task_graph",
     "render_markdown_plan",

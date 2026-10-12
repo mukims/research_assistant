@@ -209,6 +209,12 @@ class _LoadFailure:
 
 
 def _build_detectron_model(lp, config_path, weights_path):
+    try:
+        import torch
+        if sys.platform == "darwin" or not torch.cuda.is_available():
+            torch.set_num_threads(1)
+    except Exception:
+        pass
     return lp.Detectron2LayoutModel(
         config_path=config_path,
         model_path=weights_path,
@@ -611,6 +617,41 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
 # ─── ChromaDB upsert ─────────────────────────────────────────────────────────
 
 
+def _embed_documents_safe(embeddings, texts: list[str], sub_batch_size: int = 32) -> list[list[float]]:
+    """Embed texts safely in sub-batches, with single-item fallback if a batch fails."""
+    if not texts:
+        return []
+    results = []
+    for j in range(0, len(texts), sub_batch_size):
+        sub_chunk = texts[j : j + sub_batch_size]
+        try:
+            embs = embeddings.embed_documents(sub_chunk)
+            results.extend(embs)
+        except Exception as e:
+            logger.warning(
+                "Sub-batch embedding of %d texts failed (%s); trying one by one...",
+                len(sub_chunk),
+                e,
+            )
+            for text in sub_chunk:
+                safe_text = (text or "")[:EMBED_MAX_CHARS]
+                try:
+                    embs = embeddings.embed_documents([safe_text])
+                    results.extend(embs)
+                except Exception as inner_e:
+                    logger.error(
+                        "Failed to embed single text chunk: %s. Using query fallback or zero vector.",
+                        inner_e,
+                    )
+                    try:
+                        emb = embeddings.embed_query(safe_text[:1000])
+                        results.append(emb)
+                    except Exception:
+                        dim = len(results[0]) if results else 768
+                        results.append([0.0] * dim)
+    return results
+
+
 def upsert_corpus(corpus: list[dict]):
     """
     Semantic-chunk the corpus and upsert into ChromaDB.
@@ -687,7 +728,29 @@ def upsert_corpus(corpus: list[dict]):
                     "metadata": {"chunk_index": j},
                 })
         except Exception as e:
-            logger.error("Chunker failed on page %d of %s: %s", page, doc, e)
+            logger.warning(
+                "SemanticChunker failed on page %d of %s (%s); falling back to character chunking.",
+                page, doc, e,
+            )
+            try:
+                try:
+                    from langchain_text_splitters import RecursiveCharacterTextSplitter
+                    fallback_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+                    docs = fallback_splitter.create_documents([merged])
+                    fb_texts = [d.page_content for d in docs]
+                except Exception:
+                    fb_texts = [p.strip() for p in merged.split("\n\n") if p.strip()] or [merged[:1000]]
+                for j, text_part in enumerate(fb_texts):
+                    total_corpus.append({
+                        "document": doc,
+                        "citation": cit,
+                        "page": page,
+                        "type": "text_chunk",
+                        "content": text_part,
+                        "metadata": {"chunk_index": j, "fallback": True},
+                    })
+            except Exception as fb_err:
+                logger.error("Fallback chunker also failed on page %d of %s: %s", page, doc, fb_err)
 
     chunk_time = time.perf_counter() - t0
     logger.info("Chunking completed in %.1fs (%d entries)", chunk_time, len(total_corpus))
@@ -758,8 +821,10 @@ def upsert_corpus(corpus: list[dict]):
             if pipeline_status.is_cancel_requested():
                 logger.info("Embedding stopped early by user request at chunk %d/%d", i, len(documents))
                 break
+            batch_embed_texts = embed_texts[i : i + EMBED_BATCH_SIZE]
+            batch_embs = _embed_documents_safe(embeddings, batch_embed_texts)
             collection.add(
-                embeddings=embeddings.embed_documents(embed_texts[i : i + EMBED_BATCH_SIZE]),
+                embeddings=batch_embs,
                 documents=documents[i : i + EMBED_BATCH_SIZE],
                 metadatas=metadatas[i : i + EMBED_BATCH_SIZE],
                 ids=ids[i : i + EMBED_BATCH_SIZE],

@@ -8,10 +8,11 @@ write time, and the manifest a caller like orchestrate.py reads back is
 always a valid SeedPaper shape.
 """
 
+import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import research_assistant.agents.agent0_discoverer as a0
 from research_assistant.schemas import SeedPaper
@@ -249,6 +250,317 @@ class TestDiscoverFromFile(unittest.TestCase):
             rec, q = a0.get_seed_by_path("/path/to/paper.pdf")
             self.assertEqual(q, "Second Latest Topic")
             self.assertEqual(rec["title"], "New")
+
+
+class TestContextFormulation(unittest.TestCase):
+    def test_formulate_context_valid_llm_json(self):
+        mock_response = MagicMock()
+        mock_response.content = json.dumps({
+            "core_problem": "Topological Superconductivity in Majorana Nanowires",
+            "primary_domain": "Condensed Matter Physics",
+            "subtopics": ["Majorana Zero Modes", "Topological Phase Transitions", "Quantum Wires"],
+            "key_concepts": ["Majorana fermions", "topological order", "Andreev bound states"],
+            "synonyms": ["Majorana bound states", "topological superconductor"],
+            "seed_criteria": "Foundational theoretical framework or experimental signature",
+            "ideal_paper_type": "foundational_theory",
+        })
+        with patch.object(a0, "chat", return_value=mock_response) as mock_chat:
+            profile = a0.formulate_context("majorana nanowires")
+            self.assertEqual(profile["primary_domain"], "Condensed Matter Physics")
+            self.assertEqual(profile["ideal_paper_type"], "foundational_theory")
+            self.assertEqual(len(profile["subtopics"]), 3)
+            mock_chat.assert_called_once()
+            _, kwargs = mock_chat.call_args
+            self.assertEqual(kwargs.get("options", {}).get("num_ctx"), 4096)
+
+    def test_formulate_context_code_fence_stripping(self):
+        mock_response = MagicMock()
+        mock_response.content = """Here is the scientific context profile:
+```json
+{
+    "core_problem": "Lattice Based Cryptography",
+    "primary_domain": "Quantum Information & Computing",
+    "subtopics": ["Learning With Errors", "Short Integer Solution"],
+    "key_concepts": ["LWE", "post-quantum cryptography", "ring-LWE"],
+    "synonyms": ["lattice cryptography", "quantum-resistant encryption"],
+    "seed_criteria": "Canonical complexity reductions and cryptographic schemes",
+    "ideal_paper_type": "foundational_theory"
+}
+```
+Hope this helps!"""
+        with patch.object(a0, "chat", return_value=mock_response):
+            profile = a0.formulate_context("lattice cryptography")
+            self.assertEqual(profile["primary_domain"], "Quantum Information & Computing")
+            self.assertIn("LWE", profile["key_concepts"])
+
+    def test_formulate_context_partial_fields_merged_with_heuristic(self):
+        mock_response = MagicMock()
+        mock_response.content = json.dumps({
+            "core_problem": "CRISPR-Cas9 Gene Editing",
+            "subtopics": ["Base Editing", "Prime Editing"],
+        })
+        with patch.object(a0, "chat", return_value=mock_response):
+            profile = a0.formulate_context("CRISPR-Cas9 Gene Editing")
+            self.assertEqual(profile["core_problem"], "CRISPR-Cas9 Gene Editing")
+            self.assertIn("Base Editing", profile["subtopics"])
+            self.assertEqual(profile["primary_domain"], "Biophysics & Molecular Biology")
+            self.assertTrue(profile["ideal_paper_type"])
+            self.assertTrue(profile["seed_criteria"])
+
+    def test_formulate_context_offline_exception_fallback(self):
+        with patch.object(a0, "chat", side_effect=RuntimeError("Ollama offline")):
+            profile = a0.formulate_context("neural network diffusion models")
+            self.assertEqual(profile["primary_domain"], "Machine Learning & Artificial Intelligence")
+            self.assertEqual(profile["core_problem"], "neural network diffusion models")
+            self.assertTrue(len(profile["key_concepts"]) >= 3)
+            self.assertTrue(len(profile["subtopics"]) >= 2)
+
+    def test_formulate_context_domain_classification(self):
+        cases = [
+            ("superconducting qubit quantum error correction", "Quantum Information & Computing"),
+            ("cryo-em structure of ribosome protein folding", "Biophysics & Molecular Biology"),
+            ("fourier neural operators for extreme weather prediction", "Machine Learning & Artificial Intelligence"),
+            ("dark matter neutrino cosmological inflation", "High Energy Physics & Cosmology"),
+        ]
+        with patch.object(a0, "chat", side_effect=Exception("offline")):
+            for query, expected_domain in cases:
+                profile = a0.formulate_context(query)
+                self.assertEqual(profile["primary_domain"], expected_domain, f"Failed for query: {query}")
+
+
+class TestCandidatePoolDeduplication(unittest.TestCase):
+    def test_deduplicate_by_doi(self):
+        pool = a0.CandidatePool()
+        cand1 = {
+            "title": "Majorana bound states in semiconductor nanowires",
+            "doi": "10.1103/PhysRevLett.105.077001",
+            "arxiv_id": "1003.1145",
+            "pdf_url": "https://arxiv.org/pdf/1003.1145.pdf",
+        }
+        cand2 = {
+            "title": "Majorana Bound States in Semiconductor Nanowires",
+            "doi": "10.1103/physrevlett.105.077001",
+            "arxiv_id": None,
+            "pdf_url": "https://journals.aps.org/prl/pdf/10.1103/PhysRevLett.105.077001",
+        }
+        self.assertTrue(pool.add(cand1, provider="openalex", iteration=1))
+        self.assertFalse(pool.add(cand2, provider="semanticscholar", iteration=2))
+        candidates = pool.to_list()
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["hit_count"], 2)
+        self.assertIn("openalex", candidates[0]["providers_seen"])
+        self.assertIn("semanticscholar", candidates[0]["providers_seen"])
+
+    def test_deduplicate_by_arxiv_id_stripping_version(self):
+        pool = a0.CandidatePool()
+        cand1 = {
+            "title": "Quantum Supremacy Using a Programmable Superconducting Processor",
+            "arxiv_id": "1910.11333v1",
+            "pdf_url": "https://arxiv.org/pdf/1910.11333v1.pdf",
+        }
+        cand2 = {
+            "title": "Quantum Supremacy Using a Programmable Superconducting Processor",
+            "arxiv_id": "1910.11333v2",
+            "pdf_url": "https://arxiv.org/pdf/1910.11333.pdf",
+        }
+        self.assertTrue(pool.add(cand1, provider="arxiv", iteration=1))
+        self.assertFalse(pool.add(cand2, provider="arxiv", iteration=2))
+        candidates = pool.to_list()
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["hit_count"], 2)
+
+    def test_deduplicate_by_title_hash_when_no_id(self):
+        pool = a0.CandidatePool()
+        cand1 = {
+            "title": "Introduction to Quantum Error Correction and Fault-Tolerant Quantum Memory",
+            "authors": ["Daniel Gottesman"],
+            "year": "2010",
+            "pdf_url": "https://example.com/gottesman.pdf",
+        }
+        cand2 = {
+            "title": "Introduction to quantum error correction and fault-tolerant quantum memory.",
+            "authors": ["D. Gottesman"],
+            "year": "2010",
+            "pdf_url": "https://example.com/gottesman2.pdf",
+        }
+        self.assertTrue(pool.add(cand1, provider="openalex", iteration=1))
+        self.assertFalse(pool.add(cand2, provider="openalex", iteration=2))
+        self.assertEqual(len(pool.to_list()), 1)
+
+    def test_metadata_enrichment_across_iterations(self):
+        pool = a0.CandidatePool()
+        c1 = {"title": "Equivariant Diffusion", "arxiv_id": "2203.17003", "pdf_url": None}
+        c2 = {
+            "title": "Equivariant Diffusion for Molecule Generation",
+            "arxiv_id": "2203.17003",
+            "doi": "10.48550/arXiv.2203.17003",
+            "pdf_url": "https://arxiv.org/pdf/2203.17003.pdf",
+            "authors": ["Emiel Hoogeboom", "Victor Garcia Satorras"],
+            "year": "2022",
+        }
+        pool.add(c1, provider="openalex", iteration=1)
+        pool.add(c2, provider="arxiv", iteration=2)
+        res = pool.to_list()[0]
+        self.assertEqual(res["doi"], "10.48550/arXiv.2203.17003")
+        self.assertEqual(res["pdf_url"], "https://arxiv.org/pdf/2203.17003.pdf")
+        self.assertEqual(len(res["authors"]), 2)
+        self.assertEqual(res["year"], "2022")
+
+
+class TestIterativeSearch(unittest.TestCase):
+    def test_iterative_search_three_iterations_accumulated(self):
+        context = {
+            "core_problem": "Topological quantum computation",
+            "primary_domain": "Condensed Matter Physics",
+            "subtopics": ["Braiding", "Majorana modes"],
+            "key_concepts": ["non-abelian anyons", "topological qubit"],
+            "synonyms": ["fault-tolerant quantum memory"],
+            "ideal_paper_type": "comprehensive_review",
+            "seed_criteria": "Foundational review paper",
+        }
+        mock_p1 = MagicMock(return_value=[
+            {"title": "Paper 1", "arxiv_id": "2101.00001", "pdf_url": "https://arxiv.org/pdf/2101.00001.pdf"},
+        ])
+        mock_p2 = MagicMock(return_value=[
+            {"title": "Paper 2", "arxiv_id": "2101.00002", "pdf_url": "https://arxiv.org/pdf/2101.00002.pdf"},
+        ])
+
+        with patch.dict(a0._PROVIDERS, {"openalex": mock_p1, "arxiv": mock_p2}), \
+             patch.object(a0, "chat", side_effect=Exception("no llm")):
+            candidates, trace = a0.iterative_search(context, providers=["openalex", "arxiv"], limit=2)
+            self.assertEqual(len(trace["iterations"]), 3)
+            self.assertEqual(trace["summary"]["total_iterations"], 3)
+            self.assertTrue(len(candidates) >= 2)
+
+    def test_iterative_search_provider_fault_tolerance(self):
+        context = {
+            "core_problem": "Deep learning architectures",
+            "primary_domain": "Machine Learning & Artificial Intelligence",
+            "subtopics": ["Transformers"],
+            "key_concepts": ["attention"],
+            "synonyms": ["self-attention"],
+            "ideal_paper_type": "foundational_theory",
+            "seed_criteria": "Attention is all you need paper",
+        }
+        failing_provider = MagicMock(side_effect=Exception("HTTP 500 Internal Error"))
+        succeeding_provider = MagicMock(return_value=[
+            {"title": "Attention Is All You Need", "arxiv_id": "1706.03762", "pdf_url": "https://arxiv.org/pdf/1706.03762.pdf"}
+        ])
+
+        with patch.dict(a0._PROVIDERS, {"openalex": failing_provider, "arxiv": succeeding_provider}), \
+             patch.object(a0, "chat", side_effect=Exception("offline")):
+            candidates, trace = a0.iterative_search(context, providers=["openalex", "arxiv"], limit=1)
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["arxiv_id"], "1706.03762")
+            self.assertTrue(any("openalex" in err for err in trace["summary"]["errors_encountered"]))
+
+
+class TestCandidateEvaluation(unittest.TestCase):
+    def test_evaluate_candidates_llm_scoring(self):
+        context = {
+            "core_problem": "Quantum key distribution protocols",
+            "primary_domain": "Quantum Information & Computing",
+            "subtopics": ["BB84 Protocol"],
+            "key_concepts": ["quantum cryptography", "photon polarization"],
+            "seed_criteria": "Foundational QKD protocol paper",
+        }
+        candidates = [
+            {"title": "Weak QKD implementation", "arxiv_id": "2001.00001", "pdf_url": "https://arxiv.org/pdf/2001.00001.pdf"},
+            {"title": "Quantum Cryptography: Public Key Distribution and Coin Tossing", "arxiv_id": "2001.00002", "pdf_url": "https://arxiv.org/pdf/2001.00002.pdf"},
+        ]
+        mock_reply = MagicMock()
+        mock_reply.content = json.dumps([
+            {"index": 0, "score": 9.8, "reasoning": "Seminal foundation paper"},
+            {"index": 1, "score": 6.5, "reasoning": "Practical but narrow"},
+        ])
+        with patch.object(a0, "chat", return_value=mock_reply):
+            ranked = a0.evaluate_candidates(candidates, context)
+            self.assertEqual(len(ranked), 2)
+            self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+            self.assertEqual(ranked[0]["score"], 9.8)
+            self.assertEqual(ranked[0]["eval_method"], "llm")
+            self.assertEqual(ranked[1]["score"], 6.5)
+
+    def test_evaluate_candidates_heuristic_fallback(self):
+        context = {
+            "core_problem": "Topological quantum computing with Majorana nanowires",
+            "primary_domain": "Condensed Matter Physics",
+            "subtopics": ["Majorana Zero Modes"],
+            "key_concepts": ["topological superconductivity", "Majorana nanowires"],
+            "synonyms": ["Majorana bound states review"],
+            "seed_criteria": "Canonical survey paper",
+        }
+        candidates = [
+            {"title": "Arbitrary un-related paper", "year": "2015", "pdf_url": "https://example.com/p1.pdf"},
+            {"title": "A Survey of Majorana Nanowires and Topological Superconductivity", "year": "2024", "arxiv_id": "2401.00001", "pdf_url": "https://arxiv.org/pdf/2401.00001.pdf"},
+        ]
+        with patch.object(a0, "chat", side_effect=Exception("LLM unavailable")):
+            ranked = a0.evaluate_candidates(candidates, context)
+            self.assertEqual(ranked[0]["arxiv_id"], "2401.00001")
+            self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+            self.assertEqual(ranked[0]["eval_method"], "heuristic_fallback")
+
+
+class TestDownloadSeedCascade(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.raw_patch = patch.object(a0, "RAW_DIR", self.tmp.name)
+        self.raw_patch.start()
+        self.addCleanup(self.raw_patch.stop)
+
+    def test_download_seed_cascade_cascades_on_failure(self):
+        ranked = [
+            {"title": "Paper 1 (broken)", "arxiv_id": "2001.00001", "pdf_url": "https://example.com/404.pdf"},
+            {"title": "Paper 2 (working)", "arxiv_id": "2001.00002", "pdf_url": "https://example.com/valid.pdf"},
+        ]
+
+        def fake_download(url, dest):
+            if "2001.00001" in url or "404.pdf" in url:
+                return False, "HTTP 404 Not Found"
+            with open(dest, "wb") as f:
+                f.write(b"%PDF-1.5 valid content")
+            return True, None
+
+        with patch.object(a0, "download_pdf", side_effect=fake_download):
+            cand, key, dest = a0.download_seed_cascade(ranked)
+            self.assertIsNotNone(dest)
+            self.assertEqual(cand["arxiv_id"], "2001.00002")
+            self.assertTrue(os.path.exists(dest))
+
+    def test_download_seed_cascade_all_fail_returns_none(self):
+        ranked = [
+            {"title": "Paper 1", "arxiv_id": "2001.00001", "pdf_url": "https://example.com/fail1.pdf"},
+            {"title": "Paper 2", "arxiv_id": "2001.00002", "pdf_url": "https://example.com/fail2.pdf"},
+        ]
+        with patch.object(a0, "download_pdf", return_value=(False, "Connection timeout")):
+            cand, key, dest = a0.download_seed_cascade(ranked)
+            self.assertIsNone(cand)
+            self.assertIsNone(key)
+            self.assertIsNone(dest)
+
+
+class TestDiscoveryTracePersistence(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.trace_patch = patch.object(
+            a0, "DISCOVERY_TRACES_PATH", os.path.join(self.tmp.name, "discovery_traces.json")
+        )
+        self.trace_patch.start()
+        self.addCleanup(self.trace_patch.stop)
+
+    def test_save_and_get_discovery_trace(self):
+        trace_data = {
+            "query": "topological quantum computing",
+            "context_profile": {"primary_domain": "Condensed Matter Physics"},
+            "ranked_candidates": [{"title": "Paper 1", "score": 9.5}],
+        }
+        a0._save_discovery_trace("topological quantum computing", trace_data)
+        loaded = a0.get_discovery_trace("topological quantum computing")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["context_profile"]["primary_domain"], "Condensed Matter Physics")
+        self.assertEqual(a0.get_discovery_trace("nonexistent"), None)
 
 
 if __name__ == "__main__":

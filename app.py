@@ -8,7 +8,6 @@ runs Agent 5 (batch citer) over a whole draft. Tab 4 is Agent 7's multi-turn
 research chat. Tab 5 renders HOW_TO_USE.md.
 """
 
-import hashlib
 import json
 import os
 import re
@@ -308,20 +307,6 @@ def _render_passages(passages, label="Retrieved context"):
                 st.divider()
 
 
-def _render_suggestion(result):
-    with st.container(border=True):
-        st.markdown("###### Suggested text")
-        st.markdown(result["suggestion"])
-
-    cits = result.get("citations") or []
-    if cits:
-        st.markdown("**Grounded in**")
-        for c in cits:
-            st.markdown(f"- {c}")
-
-    _render_passages(result.get("passages") or [])
-
-
 def _stage_upload(uploaded_file) -> str:
     """Write an uploaded PDF somewhere the pipeline can seed from, and return it.
 
@@ -336,6 +321,66 @@ def _stage_upload(uploaded_file) -> str:
     with os.fdopen(fd, "wb") as fh:
         fh.write(uploaded_file.getbuffer())
     return path
+
+
+def _render_discovery_trace(query, final):
+    from research_assistant.agents import agent0_discoverer
+    trace = final.get("discovery_trace")
+    if not trace and query:
+        trace = agent0_discoverer.get_discovery_trace(query)
+    if not trace:
+        return
+
+    with st.expander("🔬 Literature Discovery Trace (Context & 3-Stage Search)", expanded=False):
+        context = trace.get("context_profile") or final.get("context_profile")
+        if context:
+            st.markdown("##### 🧠 Formulated Scientific Context")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.markdown(f"**Primary Domain:** {context.get('primary_domain', 'N/A')}")
+                st.markdown(f"**Core Problem:** {context.get('core_problem', 'N/A')}")
+                subtopics = context.get("subtopics") or []
+                if subtopics:
+                    st.markdown(f"**Subtopics:** {', '.join(subtopics)}")
+            with c2:
+                ideal_type = str(context.get("ideal_paper_type") or "N/A").replace("_", " ").title()
+                st.markdown(f"**Target Paper Type:** `{ideal_type}`")
+                st.markdown(f"**Seed Criteria:** {context.get('seed_criteria', 'N/A')}")
+                concepts = context.get("key_concepts") or []
+                if concepts:
+                    st.markdown(f"**Key Concepts:** {', '.join(concepts)}")
+
+        search_trace = trace.get("search_trace") or {}
+        iters = search_trace.get("iterations") or []
+        if iters:
+            st.markdown("---")
+            total_cand = search_trace.get("total_candidates", len(iters))
+            st.markdown(f"##### 🔍 3-Stage Iterative Search ({total_cand} candidates pooled)")
+            for it in iters:
+                it_num = it.get("iteration", 1)
+                q_used = it.get("query_used", "")
+                cands = it.get("candidates_found", 0)
+                oa_cnt = it.get("open_access_count", 0)
+                st.markdown(f"**Iteration {it_num}:** `\"{q_used}\"` — *{cands} candidates found ({oa_cnt} open-access)*")
+                if it.get("gap_analysis"):
+                    st.caption(f"↳ Gap Analysis: {it['gap_analysis']}")
+                if it.get("pool_evaluation"):
+                    st.caption(f"↳ Pool Evaluation: {it['pool_evaluation']}")
+
+        ranked = trace.get("ranked_candidates") or []
+        if ranked:
+            st.markdown("---")
+            st.markdown(f"##### 🏆 Evaluated Seed Candidates ({len(ranked)} scored)")
+            for idx, cand in enumerate(ranked[:5], 1):
+                score = cand.get("score")
+                score_str = f"Score: {score:.1f}/10" if isinstance(score, (int, float)) else ""
+                title = cand.get("title") or "Unknown Candidate"
+                reasoning = cand.get("reasoning") or ""
+                eval_method = cand.get("eval_method", "heuristic")
+                badge = "🥇 Best Match" if idx == 1 else f"#{idx}"
+                st.markdown(f"- **{badge}** {title} {f'· `{score_str}`' if score_str else ''}")
+                if reasoning:
+                    st.caption(f"↳ Reasoning ({eval_method}): {reasoning}")
 
 
 def _render_seed_and_downloads(query, final):
@@ -374,6 +419,8 @@ def _render_seed_and_downloads(query, final):
                 bits.append(f"`{seed['key']}`")
             if bits:
                 st.caption(" · ".join(bits))
+
+        _render_discovery_trace(query, final)
 
     if final.get("seed_path") and (final.get("extraction") or final.get("references_ok") or final.get("answer")):
         from research_assistant.agents.agent2_fetcher import source_key
@@ -1479,8 +1526,6 @@ def _handle_job_state(origin: str) -> bool:
     URL (the page was refreshed, or opened elsewhere). Returns True when a
     running job was rendered and the tab should show nothing else.
     """
-    from research_assistant.shared import run_jobs
-
     job_id = st.session_state.get("active_job") or st.query_params.get("job")
     if not job_id:
         return False

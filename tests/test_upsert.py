@@ -236,6 +236,37 @@ class TestPrechunkedEntries(UpsertTestCase):
             ing.upsert_corpus([self._entry("a.pdf", "Para one.\n\nPara two.")])
         self.assertEqual(self.collection.chunks_for("a.pdf"), ["Para one.", "Para two."])
 
+    def test_embed_documents_safe_normal(self):
+        emb_mock = types.SimpleNamespace(
+            embed_documents=lambda texts: [[float(len(t))] for t in texts],
+            embed_query=lambda text: [float(len(text))],
+        )
+        texts = ["text1", "text2", "text3"]
+        res = ing._embed_documents_safe(emb_mock, texts, sub_batch_size=2)
+        self.assertEqual(len(res), 3)
+        self.assertEqual(res, [[5.0], [5.0], [5.0]])
+
+    def test_embed_documents_safe_sub_batch_fallback(self):
+        calls = []
+
+        def failing_embed(texts):
+            calls.append(texts)
+            if len(texts) > 1:
+                raise RuntimeError("Batch too large for runner")
+            return [[1.0] for _ in texts]
+
+        emb_mock = types.SimpleNamespace(
+            embed_documents=failing_embed,
+            embed_query=lambda text: [1.0],
+        )
+        texts = ["a", "b", "c"]
+        res = ing._embed_documents_safe(emb_mock, texts, sub_batch_size=2)
+        self.assertEqual(len(res), 3)
+        self.assertEqual(res, [[1.0], [1.0], [1.0]])
+        # First tried batch of 2 (failed), then 1-by-1
+        self.assertTrue(any(len(c) == 1 for c in calls))
+
 
 if __name__ == "__main__":
     unittest.main()
+

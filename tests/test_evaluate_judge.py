@@ -3,9 +3,14 @@ kept out of the headline, per-run results, verifier-mode draft shape."""
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+_scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, os.path.dirname(_scripts_dir))
 
 from scripts import evaluate_judge as ej
 from research_assistant.judgement.evalset import CASES_DIR, validate_case

@@ -4,6 +4,12 @@ need, and one sentence's failure is recorded rather than fatal."""
 
 import unittest
 from unittest.mock import patch
+import os
+import sys
+
+_scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, os.path.dirname(_scripts_dir))
 
 from research_assistant.agents.agent5_batch_citer import CiteResult
 from scripts import evaluate_citer as ec

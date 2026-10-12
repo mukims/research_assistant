@@ -55,6 +55,15 @@ class TestChatStreamOllama(unittest.TestCase):
                                  options={"num_ctx": 4096}))
         self.assertEqual(fake.chat.call_args.kwargs["options"], {"num_ctx": 4096})
 
+    def test_default_options_num_ctx_when_omitted(self):
+        """chat_stream() defaults options to num_ctx=4096 when omitted."""
+        fake = MagicMock()
+        fake.chat.return_value = iter([_ollama_chunk("x")])
+        with patch.dict("sys.modules", {"ollama": fake}), \
+             patch.object(llm, "LLM_BACKEND", "ollama"):
+            list(llm.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(fake.chat.call_args.kwargs["options"], {"num_ctx": 4096})
+
 
 class TestChatStreamOpenAI(unittest.TestCase):
     def test_yields_content_deltas_and_skips_role_only_frames(self):
@@ -137,10 +146,11 @@ class TestChatTemperatureOllama(unittest.TestCase):
         return fake.chat.call_args.kwargs
 
     def test_options_absent_when_not_given(self):
-        self.assertNotIn("options", self._run())
+        """When options are omitted, ollama receives default options with num_ctx=4096."""
+        self.assertEqual(self._run()["options"], {"num_ctx": 4096})
 
     def test_temperature_lands_inside_options(self):
-        self.assertEqual(self._run(temperature=0.0)["options"], {"temperature": 0.0})
+        self.assertEqual(self._run(temperature=0.0)["options"], {"num_ctx": 4096, "temperature": 0.0})
 
     def test_options_and_temperature_merge(self):
         merged = self._run(temperature=0.0, options={"num_ctx": 8192})["options"]

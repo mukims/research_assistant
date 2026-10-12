@@ -3,8 +3,10 @@ Unit tests for TaskRunner wave execution and replication scorecards.
 """
 
 import os
-import pytest
-from unittest.mock import patch, MagicMock
+import shutil
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
 
 from research_assistant.tasks.models import (
     AgentRole,
@@ -59,114 +61,123 @@ def _sample_graph() -> TaskGraph:
     return graph
 
 
-def test_task_runner_simulation(tmp_path):
-    graph = _sample_graph()
-    workspace = tmp_path / "run_sim"
+class TestTaskRunner(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
 
-    updates = []
-    def on_update(task, status):
-        updates.append((task.task_id, status))
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    runner = TaskRunner(
-        graph=graph,
-        workspace_dir=str(workspace),
-        mode=ExecutionMode.SIMULATION,
-        on_task_update=on_update,
-    )
-    report = runner.execute()
+    def test_task_runner_simulation(self):
+        graph = _sample_graph()
+        workspace = os.path.join(self.tmp_dir, "run_sim")
 
-    assert report.total_tasks == 4
-    assert report.completed_count == 4
-    assert report.failed_count == 0
-    assert report.blocked_count == 0
-    assert report.scorecard["rating"] == "CERTIFIED_REPLICABLE"
-    assert report.scorecard["replication_rate"] == 1.0
+        updates = []
+        def on_update(task, status):
+            updates.append((task.task_id, status))
 
-    # Verify physical output files were created in workspace
-    assert (workspace / "env.lock").exists()
-    assert (workspace / "data" / "processed.h5").exists()
-    assert (workspace / "model.py").exists()
-    assert (workspace / "metrics.json").exists()
-
-    # Check updates list has events
-    assert len(updates) > 0
-
-    # Markdown rendering check
-    md = report.render_markdown()
-    assert "# Replication Scorecard: Quantum AI" in md
-    assert "CERTIFIED_REPLICABLE" in md
-    assert "| `t1` | ✅ completed |" in md
-
-
-def test_task_runner_blocked_downstream(tmp_path):
-    graph = _sample_graph()
-    workspace = tmp_path / "run_blocked"
-
-    runner = TaskRunner(
-        graph=graph,
-        workspace_dir=str(workspace),
-        mode=ExecutionMode.SIMULATION,
-    )
-
-    # Force t1 to simulate failure by patching _simulate_task
-    def mock_simulate(task, t_start):
-        if task.task_id == "t1":
-            return TaskExecutionResult(
-                task_id="t1",
-                status=TaskStatus.FAILED,
-                duration_seconds=0.1,
-                error_message="Environment build error",
-            )
-        return TaskExecutionResult(task_id=task.task_id, status=TaskStatus.COMPLETED, duration_seconds=0.1)
-
-    with patch.object(runner, "_simulate_task", side_effect=mock_simulate):
+        runner = TaskRunner(
+            graph=graph,
+            workspace_dir=workspace,
+            mode=ExecutionMode.SIMULATION,
+            on_task_update=on_update,
+        )
         report = runner.execute()
 
-    assert report.completed_count == 0
-    assert report.failed_count == 1
-    assert report.blocked_count == 3  # t2, t3, t4 are blocked
-    assert report.scorecard["rating"] == "REPLICATION_FAILED"
-    assert report.results["t1"].status == TaskStatus.FAILED
-    assert report.results["t2"].status == TaskStatus.BLOCKED
-    assert report.results["t3"].status == TaskStatus.BLOCKED
-    assert report.results["t4"].status == TaskStatus.BLOCKED
+        self.assertEqual(report.total_tasks, 4)
+        self.assertEqual(report.completed_count, 4)
+        self.assertEqual(report.failed_count, 0)
+        self.assertEqual(report.blocked_count, 0)
+        self.assertEqual(report.scorecard["rating"], "CERTIFIED_REPLICABLE")
+        self.assertEqual(report.scorecard["replication_rate"], 1.0)
+
+        # Verify physical output files were created in workspace
+        self.assertTrue(os.path.exists(os.path.join(workspace, "env.lock")))
+        self.assertTrue(os.path.exists(os.path.join(workspace, "data", "processed.h5")))
+        self.assertTrue(os.path.exists(os.path.join(workspace, "model.py")))
+        self.assertTrue(os.path.exists(os.path.join(workspace, "metrics.json")))
+
+        # Check updates list has events
+        self.assertGreater(len(updates), 0)
+
+        # Markdown rendering check
+        md = report.render_markdown()
+        self.assertIn("# Replication Scorecard: Quantum AI", md)
+        self.assertIn("CERTIFIED_REPLICABLE", md)
+        self.assertIn("| `t1` | ✅ completed |", md)
+
+    def test_task_runner_blocked_downstream(self):
+        graph = _sample_graph()
+        workspace = os.path.join(self.tmp_dir, "run_blocked")
+
+        runner = TaskRunner(
+            graph=graph,
+            workspace_dir=workspace,
+            mode=ExecutionMode.SIMULATION,
+        )
+
+        def mock_simulate(task, t_start):
+            if task.task_id == "t1":
+                return TaskExecutionResult(
+                    task_id="t1",
+                    status=TaskStatus.FAILED,
+                    duration_seconds=0.1,
+                    error_message="Environment build error",
+                )
+            return TaskExecutionResult(task_id=task.task_id, status=TaskStatus.COMPLETED, duration_seconds=0.1)
+
+        with patch.object(runner, "_simulate_task", side_effect=mock_simulate):
+            report = runner.execute()
+
+        self.assertEqual(report.completed_count, 0)
+        self.assertEqual(report.failed_count, 1)
+        self.assertEqual(report.blocked_count, 3)  # t2, t3, t4 are blocked
+        self.assertEqual(report.scorecard["rating"], "REPLICATION_FAILED")
+        self.assertEqual(report.results["t1"].status, TaskStatus.FAILED)
+        self.assertEqual(report.results["t2"].status, TaskStatus.BLOCKED)
+        self.assertEqual(report.results["t3"].status, TaskStatus.BLOCKED)
+        self.assertEqual(report.results["t4"].status, TaskStatus.BLOCKED)
+
+    def test_task_runner_invalid_graph(self):
+        graph = TaskGraph(paper_id="bad", paper_title="Bad Graph")
+        t1 = Task(task_id="t1", title="T1", dependencies=["non_existent"])
+        graph.add_task(t1)
+
+        runner = TaskRunner(graph=graph, workspace_dir=self.tmp_dir)
+        with self.assertRaises(ValueError):
+            runner.execute()
+
+    @patch("research_assistant.shared.llm.chat")
+    def test_task_runner_autonomous(self, mock_chat):
+        mock_res = MagicMock()
+        mock_res.content = "def train(): print('Model synthesized successfully')\n"
+        mock_chat.return_value = mock_res
+
+        graph = TaskGraph(paper_id="auto_test", paper_title="Auto Test")
+        t1 = Task(
+            task_id="t1",
+            title="Generate Model",
+            category=TaskCategory.MODEL_IMPLEMENTATION,
+            assigned_role=AgentRole.MODEL_ARCHITECT,
+            outputs=["src/model.py"],
+        )
+        graph.add_task(t1)
+
+        workspace = os.path.join(self.tmp_dir, "run_auto")
+        runner = TaskRunner(
+            graph=graph,
+            workspace_dir=workspace,
+            mode=ExecutionMode.AUTONOMOUS,
+        )
+        report = runner.execute()
+
+        self.assertEqual(report.completed_count, 1)
+        out_path = os.path.join(workspace, "src", "model.py")
+        self.assertTrue(os.path.exists(out_path))
+        with open(out_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("def train()", content)
 
 
-def test_task_runner_invalid_graph(tmp_path):
-    graph = TaskGraph(paper_id="bad", paper_title="Bad Graph")
-    t1 = Task(task_id="t1", title="T1", dependencies=["non_existent"])
-    graph.add_task(t1)
-
-    runner = TaskRunner(graph=graph, workspace_dir=str(tmp_path))
-    with pytest.raises(ValueError, match="Cannot execute invalid TaskGraph"):
-        runner.execute()
-
-
-@patch("research_assistant.shared.llm.chat")
-def test_task_runner_autonomous(mock_chat, tmp_path):
-    mock_res = MagicMock()
-    mock_res.content = "def train(): print('Model synthesized successfully')"
-    mock_chat.return_value = mock_res
-
-    graph = TaskGraph(paper_id="auto_test", paper_title="Auto Test")
-    t1 = Task(
-        task_id="t1",
-        title="Generate Model",
-        category=TaskCategory.MODEL_IMPLEMENTATION,
-        assigned_role=AgentRole.MODEL_ARCHITECT,
-        outputs=["src/model.py"],
-    )
-    graph.add_task(t1)
-
-    workspace = tmp_path / "run_auto"
-    runner = TaskRunner(
-        graph=graph,
-        workspace_dir=str(workspace),
-        mode=ExecutionMode.AUTONOMOUS,
-    )
-    report = runner.execute()
-
-    assert report.completed_count == 1
-    assert (workspace / "src" / "model.py").exists()
-    content = (workspace / "src" / "model.py").read_text(encoding="utf-8")
-    assert "def train()" in content
+if __name__ == "__main__":
+    unittest.main()

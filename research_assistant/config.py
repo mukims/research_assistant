@@ -14,6 +14,20 @@ try:
 except Exception:
     pass
 
+# ─── Hardware CPU Guardrails ─────────────────────────────────────────────────
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("TORCH_NUM_THREADS", "1")
+
+try:
+    import torch
+    torch.set_num_threads(1)
+except Exception:
+    pass
+
 # ─── Roots ───────────────────────────────────────────────────────────────────
 # config.py now lives inside the package, so the project root is two levels up.
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -99,6 +113,7 @@ EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
 CHAT_OLLAMA_OPTIONS = {
     "num_ctx": 4096,           # Context window
 }
+TASK_OLLAMA_OPTIONS = {"num_ctx": 4096}
 CHAT_WINDOW_TOKENS          = _env_int(
     "CITATION_CHAT_WINDOW_TOKENS",
     32768 if LLM_BACKEND == "openai" else CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096),
@@ -175,7 +190,7 @@ DETECTRON_SCORE_THRESH = 0.5
 
 # ─── Ingestion Tunables ───────────────────────────────────────────────────────
 CHUNK_MIN_LENGTH         = 10       # Discard text chunks shorter than this
-EMBED_BATCH_SIZE         = 1000     # ChromaDB upsert batch size
+EMBED_BATCH_SIZE         = _env_int("CITATION_EMBED_BATCH_SIZE", 64)     # ChromaDB upsert batch size (64 safe for Ollama runner)
 EMBED_MAX_CHARS          = 4000     # Truncate documents to this length before embedding
 SEMANTIC_CHUNKER_TYPE    = "percentile"
 SEMANTIC_CHUNKER_AMOUNT  = 90       # 90th percentile breakpoint
@@ -276,7 +291,7 @@ GATE_BATCHED     = _env_bool("CITATION_GATE_BATCHED", True)
 SYNTHESIS_MODE                = os.environ.get("CITATION_SYNTHESIS_MODE", "map_reduce").lower()
 SYNTHESIS_PER_PAPER_CHUNKS    = _env_int("CITATION_SYNTHESIS_PER_PAPER_CHUNKS", 4)
 SYNTHESIS_PER_PAPER_MAX_CHARS = _env_int("CITATION_SYNTHESIS_PER_PAPER_MAX_CHARS", 5000)
-SYNTHESIS_TEMPERATURE         = float(os.environ.get("CITATION_SYNTHESIS_TEMPERATURE", "0.2"))
+SYNTHESIS_TEMPERATURE         = float(os.environ.get("CITATION_SYNTHESIS_TEMPERATURE", "0.1"))
 SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": 4096}
 
 

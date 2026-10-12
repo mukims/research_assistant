@@ -12,7 +12,6 @@ the pipeline re-parse an entire corpus — never reaches disk.
 """
 
 import json
-import os
 import time
 from typing import Iterable
 

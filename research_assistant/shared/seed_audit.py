@@ -14,7 +14,6 @@ from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from research_assistant.agents.agent5_batch_citer import split_into_sentences
 from research_assistant.shared.claim_text import (
     CITE_TOKEN_RE,
     SKIP_ROLES,
@@ -1198,8 +1197,6 @@ def audit_seed_citations(
 
             search_resources = load_search_resources()
         collection, bm25, texts, metadatas = search_resources
-
-        from research_assistant.judgement.judge import DERIVED_FIELDS, REQUIRED_FIELDS, JudgementParseError
 
         escalate_k = JUDGEMENT_ESCALATE_TOP_K if JUDGEMENT_ESCALATE_TOP_K > top_k else 0
         consecutive_failures = 0

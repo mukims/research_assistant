@@ -155,20 +155,68 @@ def get_all_roles() -> List[RoleSpec]:
     return list(ROLE_SPECS.values())
 
 
-def format_agent_prompt(
+def format_subagent_prompt(
     task: Task,
     role_spec: Optional[RoleSpec] = None,
     workspace_dir: str = ".",
     context_notes: Optional[str] = None,
+    upstream_artifacts: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Constructs an execution prompt for a subagent assigned to a specific task.
+    Constructs an execution prompt for a subagent assigned to a specific task,
+    embedding formal artifact contracts, schemas, and executable test harness instructions.
     """
+    from research_assistant.tasks.harness import generate_task_test_script
+
     spec = role_spec or get_role_spec(task.assigned_role)
     inputs_str = ", ".join(task.inputs) if task.inputs else "None (Initial task)"
     outputs_str = ", ".join(task.outputs) if task.outputs else "Standard execution artifacts"
     criteria_str = "\n".join(f"- {c}" for c in task.acceptance_criteria) if task.acceptance_criteria else "- Task finishes with returncode 0"
     paper_ctx = "\n".join(f"> {p}" for p in task.paper_context_excerpts) if task.paper_context_excerpts else "N/A"
+
+    # 1. Format formal artifact contracts & schemas
+    contracts_section = ""
+    if getattr(task, "artifact_contracts", None):
+        c_lines = ["## Formal Deliverable Artifact Contracts & Schemas"]
+        for c in task.artifact_contracts:
+            c_type = c.artifact_type.value if hasattr(c.artifact_type, "value") else str(c.artifact_type)
+            details = [f"type: `{c_type}`"]
+            if c.shape:
+                details.append(f"shape: `{c.shape}`")
+            if c.dtype:
+                details.append(f"dtype: `{c.dtype}`")
+            if c.required_keys:
+                details.append(f"required_keys: `{c.required_keys}`")
+            if c.columns:
+                details.append(f"columns: `{dict(c.columns)}`")
+            if c.cli_args:
+                details.append(f"cli_args: `{c.cli_args}`")
+            desc = f" — {c.description}" if c.description else ""
+            c_lines.append(f"- **`{c.path}`** ({', '.join(details)}){desc}")
+        contracts_section = "\n".join(c_lines) + "\n\n"
+
+    # 2. Format verified upstream deliverables
+    upstream_section = ""
+    if upstream_artifacts:
+        u_lines = ["## Verified Upstream Deliverables on Disk"]
+        for path, info in upstream_artifacts.items():
+            u_lines.append(f"- `{path}`: {info}")
+        upstream_section = "\n".join(u_lines) + "\n\n"
+
+    # 3. Format executable test harness
+    harness_code = getattr(task, "test_harness_script", None)
+    if not harness_code:
+        harness_code = generate_task_test_script(task, workspace_dir)
+
+    test_filename = f"test_{task.task_id}.py"
+    harness_section = (
+        f"## Automated Acceptance Test Harness\n"
+        f"Your deliverables will be tested deterministically with the following acceptance test:\n"
+        f"```python\n{harness_code}\n```\n\n"
+        f"**Verification Command**:\n"
+        f"Execute this test from `{workspace_dir}` to verify acceptance:\n"
+        f"`python -m unittest {test_filename}`\n\n"
+    )
 
     return f"""# Scientific Replication Task: {task.title}
 **Task ID**: `{task.task_id}`
@@ -185,16 +233,18 @@ def format_agent_prompt(
 ## Prerequisites & Input Artifacts
 {inputs_str}
 
-## Required Deliverables
+{upstream_section}## Required Deliverables
 {outputs_str}
 
-## Acceptance Criteria
+{contracts_section}## Acceptance Criteria
 {criteria_str}
 
-{f"## Additional Notes\n{context_notes}" if context_notes else ""}
-## Execution Instructions
-1. Inspect the workspace and verify all input artifacts are present.
-2. Execute the required procedures to produce the deliverables.
-3. Validate that each deliverable satisfies every acceptance criterion above.
-4. Report completion status and output artifact locations upon conclusion.
+{harness_section}{f"## Additional Notes\n{context_notes}\n\n" if context_notes else ""}## Execution Instructions
+1. Inspect the workspace and confirm all input prerequisites exist.
+2. Produce all required deliverables strictly conforming to the schemas in Formal Artifact Contracts.
+3. Verify that your implementation satisfies every acceptance criterion above.
+4. Run the Automated Acceptance Test Harness before marking completion; exit code must be 0.
 """
+
+
+format_agent_prompt = format_subagent_prompt

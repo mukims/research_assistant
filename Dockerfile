@@ -8,7 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user (also matches Hugging Face Spaces' uid 1000).
-RUN useradd -m -u 1000 user
+RUN useradd -m -u 1000 user && \
+    mkdir -p /home/user/app /home/user/data && \
+    chown -R user:user /home/user
 USER user
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH

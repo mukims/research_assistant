@@ -24,6 +24,10 @@ gcloud compute ssh "$VM_NAME" --zone "$ZONE" --project "$PROJECT" --command "
   sudo sed -i 's|^APP_IMAGE=.*|APP_IMAGE=$IMAGE|' /etc/app.env
   sudo gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
   cd /opt/research-assistant
+  if sudo docker ps -a --format '{{.Names}}' | grep -qx 'research-assistant'; then
+    echo '--> Removing conflicting legacy standalone research-assistant container'
+    sudo docker rm -f research-assistant || true
+  fi
   sudo docker compose --env-file /etc/app.env pull
   sudo docker compose --env-file /etc/app.env up -d
   sudo docker compose --env-file /etc/app.env ps

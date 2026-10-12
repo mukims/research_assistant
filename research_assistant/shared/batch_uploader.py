@@ -10,12 +10,11 @@ import os
 import re
 import hashlib
 import zipfile
-from typing import BinaryIO, Any
+from typing import Any
 
 from research_assistant.agents.agent0_discoverer import (
     _inspect_pdf,
     _is_pdf_content,
-    _clean_title,
 )
 from research_assistant.shared.source_key import normalise_doi
 from research_assistant.shared.fetch import filename_for
