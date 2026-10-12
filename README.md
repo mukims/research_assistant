@@ -32,6 +32,12 @@ the heart of him: hand him an idea and he tells you what's already been done
 on it, then argues about the rest in the chat tab. The citing came later, once
 he'd read everything anyway and had opinions about your draft.
 
+He has a side job too. Hand him a paper and he reads its method as a recipe:
+a dependency graph of replication tasks — environment, data, model, training,
+evaluation, audit — each assigned to a specialised coding-agent role. He
+considers this beneath him, and does it anyway. See the **Agent task planner**
+tab below.
+
 ## A note on his health
 
 Marvin is alive at **https://marvin-the-citebot.duckdns.org** for as long as
@@ -39,10 +45,11 @@ Google Cloud and my wallet allow. Neither is infinite.
 
 He lives on a single Compute Engine VM with GROBID for company and his corpus
 on a persistent disk. The firewall admits allow-listed IPs only, so ask before
-you knock. He runs `gemma4:e2b` and `nomic-embed-text` through Ollama on CPU,
-and `deploy/auto_shutdown_idle.sh` switches him off after 45 minutes of nobody
-talking to him, which he considers the best part of his day. How the VM is
-built, updated and stopped is in [deploy/README.md](deploy/README.md).
+you knock; if `APP_PASSWORD` is set he will also ask for an access code at the
+door. By default he runs `gemma4:e2b` and `nomic-embed-text` through Ollama on
+CPU, and `deploy/auto_shutdown_idle.sh` switches him off after 45 minutes of
+nobody talking to him, which he considers the best part of his day. How the VM
+is built, updated and stopped is in [deploy/README.md](deploy/README.md).
 
 He's happiest running on your own machine with local models, where he can be
 miserable for free, forever. See [Running him at home](#running-him-at-home).
@@ -51,16 +58,21 @@ miserable for free, forever. See [Running him at home](#running-him-at-home).
 
 ## What he does
 
-Five tabs. Marvin is in four of them. The fifth is the instructions, which
-nobody reads, which he has noticed.
+Six tabs. The sixth is the instructions, which nobody reads, which he has
+noticed.
 
 | Tab | You give him | He gives you |
 |-----|--------------|--------------|
-| **Research a topic** | a research idea — or PDFs / a ZIP of them | a corpus built from the literature, and a synthesis of what's already been done on your idea |
-| **Cite a draft** | one sentence | the sentence rewritten with `\cite{key}`, the source, and why that source supports the claim |
-| **Cite a whole draft** | a `.txt` draft | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
+| **Agent task planner** | a paper — a PDF from your library, an upload, GROBID TEI XML, or plain-text methods notes | a dependency graph of replication tasks, grouped into parallel waves and assigned to six agent roles; a Mermaid flowchart, a Markdown plan and Antigravity agent specs to download; and a replication scorecard if you run it (a dry run, or autonomously, with the model writing each task's deliverables) |
+| **Citation auditor** | a published paper — one PDF, several, or a ZIP | he parses its in-text citations with GROBID, fetches the open-access references, and checks each citation against the cited paper's text: a verdict, the passage behind it, and an upload card for every paywalled reference he couldn't reach. Optionally a related-work synthesis across them |
+| **Research idea** | a research idea, and optionally a seed-paper link (arXiv or a direct PDF URL) | a corpus built from the literature, and a synthesis of what's already been done on your idea |
+| **Cite a draft** | a `.txt` draft, uploaded or pasted | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
 | **Research chat** | questions | streamed answers grounded in the corpus, with the sources he used |
 | **How to use** | nothing | [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide |
+
+Cite a draft and Research chat need a corpus, so build one in Citation auditor
+or Research idea first. Citing a single sentence is not a tab; it is Agent 4
+on the command line (see [PIPELINE.md](PIPELINE.md)).
 
 ## How he works
 
@@ -84,16 +96,46 @@ PDF / ZIP ─────┴─► Agent 0  find a seed paper           arXiv �
         Agent 6  ingests PDFs you drop in by hand — the paywalled ones Agent 2 couldn't reach
 ```
 
+Agent 4 is the command-line way to cite one sentence. The app's **Citation
+auditor** tab runs the same chain on a published paper and points Agent 8 at the
+paper's *own* citations.
+
+The **Agent task planner** is a second pipeline (`research_assistant/tasks/`,
+[PIPELINE.md](PIPELINE.md) calls it Pipeline 2). It reads the paper's methods
+(GROBID TEI, or PyMuPDF text for a bare PDF). If the paper is already in the
+corpus it retrieves evidence for four facets — data, architecture,
+hyperparameters, evaluation — from it (`TASK_ENABLE_AUTO_INGEST=1` ingests the
+paper first). Then a proposer–critic loop of at most three turns rewrites the
+task graph until the critic finds no blocking flaw, and any flaw still left is
+repaired deterministically. If the model fails or the graph won't validate,
+or you pass `--heuristic`, it falls back to a fixed five-task graph
+(`--full-phases` gives all six phases). The result is checked as a DAG (no
+cycles, no dangling dependencies), scheduled into topological waves, and run
+either as a dry run or autonomously. Read the scorecard for what it is: the
+rating (`CERTIFIED_REPLICABLE` at 99%+, `PARTIALLY_REPLICATED` from 70%) is the
+share of tasks whose acceptance check passed. It does not say the paper's
+numbers were reproduced, and a dry run, which fills in placeholder data, can
+earn the top rating.
+
 Retrieval is two-stage so he stays fast as the corpus grows: match the query
 against the one-paragraph **paper summaries** first, let the model drop the
 off-topic papers, then run the detailed hybrid (vector + keyword) chunk search
 only over what survives.
 
 Agent 8 is the one that keeps him honest. For every `\cite{}` Agent 5
-inserted, it pulls the best-matching passage back out of that paper and puts
+inserted — or, in the Citation auditor, every in-text citation in the paper you
+uploaded — it pulls the best-matching passage back out of that paper and puts
 the claim through a rubric — finding, scope, strength — before deciding
-whether the evidence supports it. It reports; it doesn't gate. A bad citation
-stays in your draft, flagged, with the passage that failed to back it up.
+whether the evidence supports it. As an auditor it reports; it doesn't gate. A
+bad citation stays in your draft, flagged, with the passage that failed to back
+it up.
+
+The same judge also stands at Agent 5's door (`CITATION_CITER_JUDGE`, on by
+default): a candidate source is only inserted if the judge would pass it, and
+a sentence nothing passes is left uncited. That costs up to three judge calls
+per sentence instead of one rewrite — cheap on a hosted API, slow on a CPU
+model, and the run logs a warning once when the backend is Ollama.
+`CITATION_CITER_JUDGE=0` restores the rewrite path.
 
 Every agent, every file he writes and every knob is in
 [PIPELINE.md](PIPELINE.md). The reasoning behind each design choice is in
@@ -111,10 +153,13 @@ the code:
   field's foundational work is in there only if the seed paper happened to
   cite it.
 - **He reads through a keyhole.** The default model is `gemma4:e2b` — two
-  billion parameters on a CPU, with a 4,096-token window. Every summary is one
-  paragraph. Every verdict Agent 8 hands down is made from a single retrieved
-  passage (`CITATION_JUDGEMENT_TOP_K=1`). He is fast and cheap, and he knows
-  exactly what that costs.
+  billion parameters on a CPU, with a 4,096-token window for chat and task
+  planning (the judge gets 12,288). Every summary is one paragraph. Every
+  verdict Agent 8 hands down starts from a single retrieved passage and its
+  neighbours (`CITATION_JUDGEMENT_TOP_K=1`), and is re-judged on the top three
+  only when the first read admits it saw too little. He is fast and cheap, and
+  he knows exactly what that costs. Set `GEMINI_API_KEY` and chat, synthesis
+  and judging move to a hosted model; the keyhole widens, the bill does too.
 - **He used to answer short by design.** The synthesis now reads every paper
   it shortlists and is asked for the argument — what's established, where the
   papers disagree, the gap — rather than a headline list. Whether the gap it
@@ -150,8 +195,12 @@ streamlit run app.py
 ```
 
 - **Models** run locally through [Ollama](https://ollama.com) by default. Set
-  `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` / `OPENAI_API_KEY`) for any
-  OpenAI-compatible endpoint instead.
+  `GEMINI_API_KEY` to use Gemini (`gemini-3.5-flash-lite`) for chat, synthesis
+  and judging, or `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` /
+  `OPENAI_API_KEY`) for any OpenAI-compatible endpoint. Embeddings stay on
+  Ollama (`nomic-embed-text`) with Gemini, so an existing index keeps working.
+- **Access code.** Set `APP_PASSWORD` and the app asks for it before anything
+  else. Unset, it is open.
 - **GROBID** is how Agent 1 reads reference lists. Without it Marvin still
   runs, but falls back to regex extraction — no DOIs, no authors, and
   noticeably fewer downloads. Setup and troubleshooting:
@@ -166,18 +215,39 @@ Without the UI, one research idea end to end:
 python orchestrate.py --query "topological protection in disordered quantum wires" --ask
 ```
 
+`--seed-url` or `--seed-file` seeds from a paper you already have instead of
+searching, and `--audit-citations` also audits that paper's own citations.
+
+The task planner has its own command line: `plan` turns a paper (PDF, TEI XML
+or text) into a task graph, `show` renders it, `run` executes it.
+
+```bash
+python orchestrate_tasks.py plan paper.pdf --format json -o plan.json     # add --heuristic to skip the model
+python orchestrate_tasks.py show plan.json --format mermaid
+python orchestrate_tasks.py run plan.json --mode simulation --report-out report.md
+```
+
+`--mode simulation` only validates the graph and writes placeholder
+deliverables. `--mode autonomous` has the model write each task's deliverables
+into the workspace, runs a generated acceptance test over them in a subprocess,
+and gives a failing task one reflection retry. Give it a scratch `--workspace`;
+the runner refuses to point at the persistent data directory.
+
 ### Docker
 
 Two images, for two situations:
 
 - [`Dockerfile`](Dockerfile) + [`docker-compose.yml`](docker-compose.yml) — the
   app pointed at OpenAI (`gpt-4.1-mini`, `text-embedding-3-small`) with GROBID
-  as a second service. This is what `deploy/deploy.sh` ships to the VM.
-  Needs `OPENAI_API_KEY` in the environment: `docker compose up`.
+  as a second service. This is what `deploy/deploy.sh` builds and pushes to
+  Artifact Registry. Needs `OPENAI_API_KEY` in the environment:
+  `docker compose up`.
 - [`Dockerfile.standalone`](Dockerfile.standalone) — everything in one image:
   Ollama with `gemma4:e2b` and `nomic-embed-text` baked in, GROBID, and the
-  app. It expects a pre-pulled `models/` directory and an `entrypoint.sh`
-  beside it, neither of which is committed.
+  app. **This is the one that serves the live instance**, built on the VM
+  itself. It expects a pre-pulled `models/` directory beside it, which is not
+  committed; `deploy/entrypoint.sh` is. [deploy/README.md](deploy/README.md)
+  has the details.
 
 ## Things he has written down
 
@@ -200,8 +270,8 @@ CITATION_LOG_FILE=0 python -m pytest tests/ -v
 ```
 
 The suite covers the pure logic — reference parsing, source naming, extractor
-filing, ingestion bookkeeping, retrieval ranking, the claim–evidence rubric —
-and needs none of the heavy stack: no ChromaDB, no PyTorch, no model backend,
+filing, ingestion bookkeeping, retrieval ranking, the claim–evidence rubric,
+task-graph construction and execution — and needs none of the heavy stack: no ChromaDB, no PyTorch, no model backend,
 no GROBID. CI runs it on Python 3.10 and 3.12 and import-sweeps every module
 in the package to catch a broken import no test happens to cover.
 
