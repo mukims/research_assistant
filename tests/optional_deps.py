@@ -13,6 +13,8 @@ scratch directory skips the tests that would otherwise open the real store.
 
 import importlib.util
 import os
+import pathlib
+import sqlite3
 import unittest
 
 from research_assistant import config
@@ -22,14 +24,27 @@ def available(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
 
-def store_file_present(vectordb_path: str) -> bool:
-    return os.path.isfile(os.path.join(vectordb_path, "chroma.sqlite3"))
+def store_has_data(vectordb_path: str) -> bool:
+    """True only for a chroma store that holds embeddings. A file is not enough: with chromadb
+    installed, importing app.py creates an empty store at config.VECTORDB_PATH as a side effect.
+    Read-only sqlite, never a chroma client, so checking cannot create or migrate anything."""
+    database = os.path.join(vectordb_path, "chroma.sqlite3")
+    if not os.path.isfile(database):
+        return False
+    try:
+        connection = sqlite3.connect(f"{pathlib.Path(database).as_uri()}?mode=ro", uri=True)
+        try:
+            return connection.execute("select count(*) from embeddings").fetchone()[0] > 0
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return False
 
 
 requires_torch = unittest.skipUnless(
     available("torch"), "torch is not installed (CI installs requirements-test.txt only)"
 )
 requires_real_store = unittest.skipUnless(
-    available("chromadb") and store_file_present(config.VECTORDB_PATH),
+    available("chromadb") and store_has_data(config.VECTORDB_PATH),
     "needs the maintainer's chromadb corpus at config.VECTORDB_PATH",
 )
