@@ -218,6 +218,9 @@ def format_subagent_prompt(
         f"`python -m unittest {test_filename}`\n\n"
     )
 
+    # 4. Format optional notes (a nested f-string with "\n" is a SyntaxError before Python 3.12)
+    notes_section = f"## Additional Notes\n{context_notes}\n\n" if context_notes else ""
+
     return f"""# Scientific Replication Task: {task.title}
 **Task ID**: `{task.task_id}`
 **Category**: `{task.category.value}`
@@ -239,7 +242,7 @@ def format_subagent_prompt(
 {contracts_section}## Acceptance Criteria
 {criteria_str}
 
-{harness_section}{f"## Additional Notes\n{context_notes}\n\n" if context_notes else ""}## Execution Instructions
+{harness_section}{notes_section}## Execution Instructions
 1. Inspect the workspace and confirm all input prerequisites exist.
 2. Produce all required deliverables strictly conforming to the schemas in Formal Artifact Contracts.
 3. Verify that your implementation satisfies every acceptance criterion above.

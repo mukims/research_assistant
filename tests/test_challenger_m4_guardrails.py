@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import research_assistant.config as config
 import research_assistant.shared.llm as llm
+from tests.optional_deps import requires_real_store, requires_torch
 
 
 def _ollama_reply(text="ok"):
@@ -156,6 +157,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     # 3. Torch and OMP Thread Limits
     # ─────────────────────────────────────────────────────────────────────────
 
+    @requires_torch
     def test_torch_get_num_threads_is_one(self):
         """torch.get_num_threads() must be clamped to 1 to prevent CPU starvation."""
         import torch
@@ -219,6 +221,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     # 5. Persistent ChromaDB Storage Invariant (75,039 chunks)
     # ─────────────────────────────────────────────────────────────────────────
 
+    @requires_real_store
     def test_chromadb_chunk_count_is_75039(self):
         """ChromaDB collection physics_papers must contain exactly 75,039 chunks intact."""
         import chromadb

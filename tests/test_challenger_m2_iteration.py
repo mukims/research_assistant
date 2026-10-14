@@ -20,7 +20,12 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import chromadb
+try:
+    import chromadb
+except ImportError:  # CI installs requirements-test.txt only
+    chromadb = None
+
+from tests.optional_deps import requires_real_store
 
 from research_assistant.config import (
     COLLECTION_NAME,
@@ -667,6 +672,7 @@ class TestProposerCriticRobustnessAndFallbacks(unittest.TestCase):
         self.assertGreaterEqual(scorecard.overall_score, 90.0)
 
 
+@requires_real_store
 class TestPersistentStorageChunkCountInvariant(unittest.TestCase):
     """Empirically verify ChromaDB persistent storage chunk count is intact."""
 

@@ -33,10 +33,19 @@ import shutil
 import tempfile
 import unittest
 
-import chromadb
+try:
+    import chromadb
+except ImportError:  # CI installs requirements-test.txt only
+    chromadb = None
+
+from tests.optional_deps import requires_real_store, requires_torch
 import numpy as np
 import pandas as pd
-import torch
+
+try:
+    import torch
+except ImportError:  # CI installs requirements-test.txt only
+    torch = None
 
 from research_assistant.config import (
     COLLECTION_NAME,
@@ -99,6 +108,7 @@ class TestChallengerValidArtifactsPassing(unittest.TestCase):
         ok, stdout, stderr = run_task_test_script(script, self.tmp_dir, timeout_seconds=SUBPROCESS_TIMEOUT)
         self.assertTrue(ok, f"Valid numpy tensor failed verification: {stderr}")
 
+    @requires_torch
     def test_valid_torch_tensor_passes(self):
         """Verifies valid .pt PyTorch tensor matching expected shape and dtype passes."""
         tensor = torch.randn(16, 32, dtype=torch.float32)
@@ -290,6 +300,7 @@ class TestChallengerInvalidArtifactsFailing(unittest.TestCase):
         self.assertFalse(ok, "Mismatched tensor shape should have failed verification")
         self.assertIn("Tensor dim 1 mismatch", stderr)
 
+    @requires_torch
     def test_tensor_rank_mismatch_fails(self):
         """Asserts tensor rank mismatch (expected 3D [10, 64, 4] got 2D [10, 64]) fails."""
         tensor = torch.zeros(10, 64, dtype=torch.float32)
@@ -340,6 +351,7 @@ class TestChallengerInvalidArtifactsFailing(unittest.TestCase):
         self.assertFalse(ok, "Mismatched tensor dtype should have failed verification")
         self.assertIn("Tensor dtype mismatch", stderr)
 
+    @requires_torch
     def test_tensor_torch_dtype_mismatch_fails(self):
         """Asserts PyTorch tensor dtype mismatch (expected float32 got int32) fails."""
         tensor = torch.ones(8, 16, dtype=torch.int32)
@@ -686,6 +698,7 @@ class TestChallengerRolesPromptFormatting(unittest.TestCase):
         self.assertIn("None (Initial task)", prompt)
 
 
+@requires_real_store
 class TestChallengerChromaDBPersistentStorageInvariant(unittest.TestCase):
     """Stress-tests ChromaDB persistent storage invariant."""
 

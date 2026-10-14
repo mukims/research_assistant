@@ -41,6 +41,11 @@ lxml==4.9.4
 # pinned in requirements.txt.
 langgraph==0.4.7
 streamlit==1.53.1
+#
+# PyMuPDF backs the task planner's PDF extraction (tasks/extractor.py) and the
+# PDF-structure tests in test_task_extractor.py and test_discoverer.py. It is a
+# binary wheel but not part of the heavy stack above; same pin as requirements.txt.
+PyMuPDF==1.26.7
 pytest~=9.1
 numpy~=2.2.6
 requests~=2.32

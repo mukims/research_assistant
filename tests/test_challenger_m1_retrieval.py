@@ -13,7 +13,12 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import chromadb
+try:
+    import chromadb
+except ImportError:  # CI installs requirements-test.txt only
+    chromadb = None
+
+from tests.optional_deps import requires_real_store
 
 from research_assistant.config import (
     COLLECTION_NAME,
@@ -29,6 +34,7 @@ from research_assistant.tasks.retrieval import (
 )
 
 
+@requires_real_store
 class TestM1PersistentStorageIntegrity(unittest.TestCase):
     """Verify persistent vector storage integrity invariant."""
 
@@ -186,6 +192,7 @@ class TestM1FourFacetsAndCorpusFallback(unittest.TestCase):
         self.assertEqual(len(search_calls), 4)
         self.assertEqual(result["corpus_fallback"], [])
 
+    @requires_real_store
     def test_real_bm25_search_resources_integration(self):
         """Empirically test retrieval against real 75,039-chunk BM25 index with dummy dense embedder."""
         # Load the real persistent index from disk

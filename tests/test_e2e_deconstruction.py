@@ -36,6 +36,7 @@ from research_assistant.config import (
     VECTORDB_PATH,
 )
 from research_assistant.shared.llm import ChatResult
+from tests.optional_deps import requires_real_store
 from research_assistant.tasks import extractor, graph, roles, runner
 from research_assistant.tasks.models import (
     AgentRole,
@@ -233,6 +234,7 @@ class TestTier1FeatureCoverage(BaseE2ETestCase):
         key = retrieval.pdf_key("My New Paper (2026).PDF")
         self.assertEqual(key, "my_new_paper_(2026).pdf")
 
+    @requires_real_store
     def test_f1_grounding_preserves_collection_integrity(self):
         """F1.4: Grounding checks are strictly read-only and never wipe persistent collections."""
         # Check that persistent DATA_DIR exists and contains physics_vectordb
@@ -359,6 +361,7 @@ class TestTier1FeatureCoverage(BaseE2ETestCase):
             res = retrieval.retrieve_faceted_paper_context("target.pdf", enable_corpus_fallback=True)
             self.assertIn("corpus_fallback", res)
 
+    @requires_real_store
     def test_f4_corpus_fallback_queries_full_collection(self):
         """F4.2: Fallback query omits doc_filter or sets it to None to search entire corpus."""
         if retrieval is None or not hasattr(retrieval, "retrieve_faceted_paper_context"):
@@ -380,6 +383,7 @@ class TestTier1FeatureCoverage(BaseE2ETestCase):
             if fallback:
                 self.assertIn("citation", fallback[0])
 
+    @requires_real_store
     def test_f4_corpus_fallback_top_k_bounds(self):
         """F4.4: Fallback retrieval honors top_k limit to preserve context budget."""
         if retrieval is None or not hasattr(retrieval, "retrieve_faceted_paper_context"):
@@ -1295,6 +1299,7 @@ class TestTier3CrossFeatureCombinations(BaseE2ETestCase):
         self.assertEqual(report.completed_count, 7)
         self.assertEqual(report.failed_count, 0)
 
+    @requires_real_store
     def test_c10_storage_invariance_during_retrieval(self):
         """C10: ChromaDB chunk count remains intact throughout faceted retrieval queries."""
         import chromadb

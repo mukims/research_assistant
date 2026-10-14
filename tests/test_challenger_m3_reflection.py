@@ -29,7 +29,12 @@ import time
 import unittest
 from unittest.mock import MagicMock, call, patch
 
-import chromadb
+try:
+    import chromadb
+except ImportError:  # CI installs requirements-test.txt only
+    chromadb = None
+
+from tests.optional_deps import requires_real_store
 
 from research_assistant.config import (
     COLLECTION_NAME,
@@ -648,6 +653,7 @@ class TestChallengerSubprocessTimeoutGuardrail(unittest.TestCase):
                 self.assertIn("Cycle 2 Acceptance Harness: PASSED on retest", task.execution_log)
 
 
+@requires_real_store
 class TestChallengerChromaDBPersistentStorageInvariant(unittest.TestCase):
     """
     Stress-test Requirement 7: ChromaDB Persistent Storage Invariant.

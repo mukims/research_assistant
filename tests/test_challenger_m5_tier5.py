@@ -32,7 +32,12 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import chromadb
+try:
+    import chromadb
+except ImportError:  # CI installs requirements-test.txt only
+    chromadb = None
+
+from tests.optional_deps import requires_real_store
 import numpy as np
 
 from research_assistant.config import (
@@ -1263,6 +1268,7 @@ class TestTier5GroundedRetrievalHelpers(unittest.TestCase):
         self.assertIn("formatted_context", res)
 
 
+@requires_real_store
 class TestTier5PersistentChromaDBInvariant(unittest.TestCase):
     """Storage volume protection invariant: persistent ChromaDB holds exactly 75,039 chunks."""
 

@@ -27,7 +27,12 @@ import shutil
 import tempfile
 import unittest
 
-import chromadb
+try:
+    import chromadb
+except ImportError:  # CI installs requirements-test.txt only
+    chromadb = None
+
+from tests.optional_deps import requires_real_store
 
 from research_assistant.config import (
     COLLECTION_NAME,
@@ -137,6 +142,7 @@ class TestChallengerStorageGuardrails(unittest.TestCase):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+@requires_real_store
 class TestChallengerChromaDBIntegrity(unittest.TestCase):
     """
     Empirically verifies the persistent ChromaDB collection state.

@@ -21,6 +21,7 @@ from research_assistant.tasks.models import (
     Task,
     TaskCategory,
 )
+from tests.optional_deps import requires_torch
 
 
 class TestTaskHarness(unittest.TestCase):
@@ -205,6 +206,7 @@ class TestTaskHarness(unittest.TestCase):
         self.assertFalse(ok_bad)
         self.assertIn("Tensor dim 1 mismatch", stderr_bad)
 
+    @requires_torch
     def test_harness_validates_torch_tensor(self):
         """Verifies PyTorch tensor loading, rank, dimension, and dtype checking."""
         import torch

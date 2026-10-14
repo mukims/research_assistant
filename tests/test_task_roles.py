@@ -66,6 +66,15 @@ class TestTaskRoles(unittest.TestCase):
         self.assertIn("KL loss term matches eq 4", prompt)
         self.assertIn("Section 3: Variational Autoencoder formulation.", prompt)
 
+    def test_context_notes_get_their_own_section_before_the_instructions(self):
+        prompt = format_agent_prompt(Task(task_id="t1", title="T"), context_notes="Use seed 7.")
+        self.assertIn("## Additional Notes\nUse seed 7.\n\n## Execution Instructions", prompt)
+
+    def test_no_context_notes_means_no_notes_section(self):
+        prompt = format_agent_prompt(Task(task_id="t1", title="T"))
+        self.assertNotIn("Additional Notes", prompt)
+        self.assertIn("`python -m unittest test_t1.py`\n\n## Execution Instructions", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
