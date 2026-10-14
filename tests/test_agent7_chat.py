@@ -200,5 +200,45 @@ class TestClearAndExport(ChatTestCase):
         self.assertEqual(len(json_export["turns"]), 1)
 
 
+class TestSearchResourcesRefresh(ChatTestCase):
+    """A chat session outlives index rebuilds. The agent has to be able to pick up
+    the newer corpus without losing the conversation."""
+
+    @staticmethod
+    def _rebuilt():
+        # What load_search_resources() returns after a rebuild: new objects throughout.
+        return (object(), object(), ["a newly ingested chunk"], [{"document": "new.pdf"}])
+
+    def test_newer_resources_are_adopted_and_the_next_turn_searches_them(self):
+        fresh = self._rebuilt()
+        self.assertTrue(self.agent.use_search_resources(fresh))
+
+        seen = []
+        recorded = a7.hybrid_search  # the fake installed by setUp
+
+        def spy(query, collection, bm25, texts, metadatas, *args, **kwargs):
+            seen.append((collection, bm25, texts, metadatas))
+            return recorded(query, collection, bm25, texts, metadatas, *args, **kwargs)
+
+        with patch.object(a7, "hybrid_search", side_effect=spy):
+            self._turn("q")
+        self.assertTrue(seen)
+        for searched in seen:
+            self.assertTrue(all(got is want for got, want in zip(searched, fresh)))
+
+    def test_resources_already_in_use_are_left_alone(self):
+        fresh = self._rebuilt()
+        self.agent.use_search_resources(fresh)
+        self.assertFalse(self.agent.use_search_resources(fresh))
+
+    def test_the_conversation_survives_a_swap(self):
+        self._turn("What does the MoS2 paper say?")
+        kept = lambda: (list(self.agent.history), list(self.agent.turns), self.agent.memory,
+                        set(self.agent.focus_documents), self.agent.turn_count)
+        before = kept()
+        self.assertTrue(self.agent.use_search_resources(self._rebuilt()))
+        self.assertEqual(kept(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

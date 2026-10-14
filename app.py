@@ -2079,6 +2079,14 @@ with tab_chat:
             except Exception as e:
                 st.warning(f"Could not load search index: {e}")
                 st.session_state["chat_agent"] = None
+        else:
+            # A session outlives index rebuilds: pick up the current corpus on every rerun.
+            try:
+                st.session_state["chat_agent"].use_search_resources(
+                    get_cached_search_resources(_get_resources_mtime())
+                )
+            except Exception as e:
+                st.warning(f"Could not refresh search index: {e}")
 
         agent = st.session_state.get("chat_agent")
         if agent is None:

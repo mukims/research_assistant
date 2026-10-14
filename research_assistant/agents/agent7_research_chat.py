@@ -115,6 +115,15 @@ class ResearchChat:
             self.collection, self.bm25, self.texts, self.metadatas = load_search_resources()
         logger.info("Ready. %d chunks in database.", len(self.texts))
 
+    def use_search_resources(self, resources: tuple) -> bool:
+        """Adopt a newer (collection, bm25, texts, metadatas), e.g. after an index
+        rebuild. Returns whether anything changed; the conversation is untouched."""
+        if resources[1] is self.bm25 and resources[2] is self.texts:
+            return False
+        self.collection, self.bm25, self.texts, self.metadatas = resources
+        logger.info("Search resources refreshed. %d chunks in database.", len(self.texts))
+        return True
+
     # ── Retrieval ────────────────────────────────────────────────────────
 
     @staticmethod
