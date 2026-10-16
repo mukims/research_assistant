@@ -660,8 +660,8 @@ class TestStreamlitUIStress(unittest.TestCase):
         mock_file.size = 204800
         mock_file.read.return_value = b"%PDF-1.4 simulated pdf bytes"
 
-        # Provide uploaded file for the uploader key
-        uploader_key = "upload_ref_seed_b42"
+        # Provide uploaded file for the uploader key (namespaced by the tab drawing the report; the default is "audit")
+        uploader_key = "audit_upload_ref_seed_b42"
         self.mock_st.file_uploader_return_values[uploader_key] = mock_file
 
         with patch("research_assistant.shared.seed_audit.save_and_register_reference_pdf") as mock_save:

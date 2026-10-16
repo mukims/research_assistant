@@ -195,7 +195,7 @@ def _render_synthesis(answer, heading):
         st.caption(f"{answer.get('mode', '')}: gate {t['gate']}s · notes {t['map']}s · synthesis {t['reduce']}s · total {t['total']}s")
 
 
-def _render_build(final, query):
+def _render_build(final, query, origin="audit"):
     if final.get("batch_uploaded"):
         staged = final["batch_uploaded"]
         with st.container(border=True):
@@ -223,7 +223,7 @@ def _render_build(final, query):
                 "Corpus updated with uploaded papers. Switch to **Research chat** or **Cite a draft** to query them.",
                 icon="✍️",
             )
-        _render_seed_citation_audit(final)
+        _render_seed_citation_audit(final, origin)
         return
 
     # Show whatever the run produced — seed, downloads — even if it stopped early.
@@ -259,4 +259,4 @@ def _render_build(final, query):
             "Corpus updated. Switch to **Cite a draft** to query it.", icon="✍️"
         )
 
-    _render_seed_citation_audit(final)
+    _render_seed_citation_audit(final, origin)

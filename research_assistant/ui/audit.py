@@ -43,7 +43,13 @@ def _audit_item_badge(item: dict) -> str:
     return _NOT_ASSESSED_BADGES.get(outcome or "", f"⏸ Not Assessed ({outcome or 'unknown'})")
 
 
-def _render_seed_citation_audit(final):
+def _render_seed_citation_audit(final, origin="audit"):
+    """The audit report for a run. `origin` is the tab drawing it ("audit" or "idea").
+
+    Both tabs are rendered on every run, so a session with a result in each draws this
+    twice: widget keys carry the origin so they stay unique, and a button here starts a
+    job for the tab it is in, so the result comes back to that tab.
+    """
 
     audit = final.get("citation_audit")
     seed_path = final.get("seed_path") or (audit.get("seed_path") if audit else None)
@@ -61,7 +67,7 @@ def _render_seed_citation_audit(final):
                 )
                 if st.button(
                     "Audit Seed Paper Citations",
-                    key="btn_run_seed_audit",
+                    key=f"{origin}_btn_run_seed_audit",
                     type="secondary",
                 ):
                     label = (
@@ -69,7 +75,7 @@ def _render_seed_citation_audit(final):
                         or final.get("query")
                         or (os.path.splitext(os.path.basename(seed_path))[0] if seed_path else "seed_paper")
                     )
-                    if _start_audit_job(seed_path, label=label, origin="audit", force=True, existing_final=final):
+                    if _start_audit_job(seed_path, label=label, origin=origin, force=True, existing_final=final):
                         st.rerun()
 
     if not audit:
@@ -128,7 +134,7 @@ def _render_seed_citation_audit(final):
                 data=md_report,
                 file_name=f"{stem}_citation_verification_report.md",
                 mime="text/markdown",
-                key="btn_dl_seed_audit_md",
+                key=f"{origin}_btn_dl_seed_audit_md",
                 help="Download complete, detailed verification report in Markdown with all citations, slots, and reasoning.",
             )
         with c_dl2:
@@ -137,7 +143,7 @@ def _render_seed_citation_audit(final):
                 data=json.dumps(audit, indent=2, ensure_ascii=False),
                 file_name=f"{stem}_citation_audit.json",
                 mime="application/json",
-                key="btn_dl_seed_audit_json",
+                key=f"{origin}_btn_dl_seed_audit_json",
                 help="Download raw structured JSON audit data.",
             )
 
@@ -450,7 +456,7 @@ def _render_seed_citation_audit(final):
                                 else:
                                     st.caption("No dependent statements recorded.")
 
-                            uploader_key = f"upload_ref_{stem}_{xid}"
+                            uploader_key = f"{origin}_upload_ref_{stem}_{xid}"
                             uploaded_file = st.file_uploader(
                                 f"Upload PDF for {ref_title[:45]}…",
                                 type=["pdf"],
@@ -491,7 +497,7 @@ def _render_seed_citation_audit(final):
                 if seed_path and os.path.exists(seed_path):
                     if st.button(
                         "⚡ Re-run Audit with Uploaded Papers",
-                        key="btn_rerun_audit_uploaded",
+                        key=f"{origin}_btn_rerun_audit_uploaded",
                         type="primary",
                     ):
                         label = (
@@ -499,7 +505,7 @@ def _render_seed_citation_audit(final):
                             or final.get("query")
                             or stem
                         )
-                        if _start_audit_job(seed_path, label=label, origin="audit", force=True, existing_final=final):
+                        if _start_audit_job(seed_path, label=label, origin=origin, force=True, existing_final=final):
                             st.rerun()
 
         with tab_all:
@@ -507,13 +513,13 @@ def _render_seed_citation_audit(final):
                 _render_claim_item(it)
 
         if seed_path and os.path.exists(seed_path):
-            if st.button("🔄 Re-run Seed Citation Audit", key="btn_rerun_seed_audit"):
+            if st.button("🔄 Re-run Seed Citation Audit", key=f"{origin}_btn_rerun_seed_audit"):
                 label = (
                     final.get("seed_label")
                     or final.get("query")
                     or stem
                 )
-                if _start_audit_job(seed_path, label=label, origin="audit", force=True, existing_final=final):
+                if _start_audit_job(seed_path, label=label, origin=origin, force=True, existing_final=final):
                     st.rerun()
 
 
@@ -562,7 +568,9 @@ def _start_audit_job(
             icon="⏳",
         )
         return None
-    for key in ("audit_result", "audit_query", "build_result", "build_query"):
+    # Clear the stale result of the tab this job belongs to, and only that tab's.
+    stale = ("idea_result", "idea_query") if origin == "idea" else ("audit_result", "audit_query", "build_result", "build_query")
+    for key in stale:
         st.session_state.pop(key, None)
     st.query_params["job"] = job_id
     st.session_state["active_job"] = job_id

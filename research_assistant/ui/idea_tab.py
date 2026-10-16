@@ -63,7 +63,7 @@ def render_idea_tab():
     elif st.session_state.get("idea_result"):
         idea_res = st.session_state["idea_result"]
         _corpus_stats.clear()
-        _render_build(idea_res, st.session_state.get("idea_query", ""))
+        _render_build(idea_res, st.session_state.get("idea_query", ""), origin="idea")
     else:
         _render_recent_runs("idea")
         st.markdown("---")
