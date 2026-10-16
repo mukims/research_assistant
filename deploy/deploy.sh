@@ -18,6 +18,11 @@ gcloud compute scp "$ROOT/docker-compose.yml" \
   --zone "$ZONE" --project "$PROJECT"
 
 echo "==> Rolling out"
+# The compose stack and the hand-started standalone container both want port
+# 8080. This script used to `docker rm -f` the standalone one to make room,
+# which took the live site down; it now refuses instead. Compose's own
+# container is named research-assistant-app-1, so the exact-name match below
+# cannot catch it.
 gcloud compute ssh "$VM_NAME" --zone "$ZONE" --project "$PROJECT" --command "
   set -e
   echo '$IMAGE' | sudo tee /etc/app-image >/dev/null
@@ -25,8 +30,10 @@ gcloud compute ssh "$VM_NAME" --zone "$ZONE" --project "$PROJECT" --command "
   sudo gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
   cd /opt/research-assistant
   if sudo docker ps -a --format '{{.Names}}' | grep -qx 'research-assistant'; then
-    echo '--> Removing conflicting legacy standalone research-assistant container'
-    sudo docker rm -f research-assistant || true
+    echo 'ERROR: a container named research-assistant already exists on this VM.' >&2
+    echo 'It is the hand-started standalone image that serves the live site, and its code and corpus are not part of this compose stack.' >&2
+    echo 'Not touching it. Update it with deploy/patch-standalone.sh, or stop it yourself first if you mean to replace it.' >&2
+    exit 3
   fi
   sudo docker compose --env-file /etc/app.env pull
   sudo docker compose --env-file /etc/app.env up -d

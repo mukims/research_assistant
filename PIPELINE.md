@@ -166,7 +166,7 @@ research_assistant/                the checkout root
 │   ├── judge_harvest.py  judge_label.py  judge_bench.py
 │   ├── index_stats.py              chunk-length distribution of the active index
 │   └── synth_compare.py            research_answer in both synthesis modes, side by side
-├── deploy/                         GCE deployment: VM + disk + firewall scripts, deploy.sh, entrypoint.sh
+├── deploy/                         local.sh (run on this machine, loopback only); GCE deployment: VM + disk + firewall scripts, deploy.sh, entrypoint.sh
 ├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
 ├── .github/workflows/tests.yml
 ├── notimportant/superpowers/       design specs, implementation plans and findings, by date

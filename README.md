@@ -194,6 +194,10 @@ docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
 streamlit run app.py
 ```
 
+- **One command instead of the last two.** `deploy/local.sh up` starts GROBID if it is not
+  answering, then the app, listening on `127.0.0.1` only (a bare `streamlit run app.py`
+  listens on every network interface). `status` and `down` do what they say.
+  See [deploy/README.md](deploy/README.md).
 - **Models** run locally through [Ollama](https://ollama.com) by default. Set
   `GEMINI_API_KEY` to use Gemini (`gemini-3.5-flash-lite`) for chat, synthesis
   and judging, or `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` /
