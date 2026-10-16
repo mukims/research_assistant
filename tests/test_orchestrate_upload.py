@@ -162,19 +162,19 @@ class TestOrchestrateSeedFileIntegration(unittest.TestCase):
 
 class TestAppSeedRender(unittest.TestCase):
     def test_render_seed_and_downloads_skips_when_failed(self):
-        import app
+        from research_assistant.ui import results as ui_results
         # Mock streamlit container and markdown calls
-        with patch.object(app, "_manifest", return_value={"old query": {"title": "Old Paper", "path": "/p.pdf"}}):
+        with patch.object(ui_results, "_manifest", return_value={"old query": {"title": "Old Paper", "path": "/p.pdf"}}):
             with patch("streamlit.container") as mock_container:
                 # When run stopped before finding seed
                 final = {"seed_path": None, "stopped": "could not load seed PDF"}
-                app._render_seed_and_downloads("", final)
+                ui_results._render_seed_and_downloads("", final)
                 mock_container.assert_not_called()
 
     def test_render_seed_and_downloads_shows_seed_when_successful(self):
-        import app
+        from research_assistant.ui import results as ui_results
         with patch.object(
-            app,
+            ui_results,
             "_manifest",
             side_effect=[
                 {"uploaded": {"title": "New Uploaded Paper", "path": "/path/raw/paper.pdf", "source": "upload"}},
@@ -186,14 +186,14 @@ class TestAppSeedRender(unittest.TestCase):
                 with patch("streamlit.markdown") as mock_markdown:
                     with patch("streamlit.caption"):
                         final = {"seed_path": "/path/raw/paper.pdf", "seed_label": "New Uploaded Paper"}
-                        app._render_seed_and_downloads("uploaded", final)
+                        ui_results._render_seed_and_downloads("uploaded", final)
                         mock_container.assert_called()
                         # Verify markdown rendered seed paper title
                         rendered = [call.args[0] for call in mock_markdown.call_args_list if call.args]
                         self.assertTrue(any("New Uploaded Paper" in r for r in rendered))
 
     def test_render_discovery_trace_renders_context_and_iterations(self):
-        import app
+        from research_assistant.ui import results as ui_results
         mock_trace = {
             "query": "topological quantum wires",
             "context_profile": {
@@ -241,7 +241,7 @@ class TestAppSeedRender(unittest.TestCase):
                             "seed_label": "Majorana Zero Modes in Nanowires",
                             "discovery_trace": mock_trace,
                         }
-                        app._render_discovery_trace("topological quantum wires", final)
+                        ui_results._render_discovery_trace("topological quantum wires", final)
                         mock_expander.assert_called_with(
                             "🔬 Literature Discovery Trace (Context & 3-Stage Search)", expanded=False
                         )
@@ -269,9 +269,9 @@ class TestUploadStaging(unittest.TestCase):
         return uploaded
 
     def _stage(self, uploaded):
-        import app
+        from research_assistant.ui import common as ui_common
 
-        path = app._stage_upload(uploaded)
+        path = ui_common._stage_upload(uploaded)
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
         return path
 

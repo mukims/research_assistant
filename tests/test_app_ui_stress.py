@@ -1,5 +1,5 @@
 """
-Empirical stress-testing suite for Streamlit UI components in app.py.
+Empirical stress-testing suite for the Streamlit UI components in research_assistant/ui/.
 Specifically verifies:
 1. Rendering _render_seed_citation_audit with 0 deferred citations.
 2. Rendering _render_seed_citation_audit with multiple deferred citations across multiple missing papers.
@@ -14,7 +14,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, call, patch
 
-import app
+from research_assistant.ui import audit as ui_audit
 
 
 class MockUIContextManager:
@@ -139,19 +139,19 @@ class MockStreamlitSession:
 
 
 class TestStreamlitUIStress(unittest.TestCase):
-    """Empirical stress tests for app.py Streamlit UI rendering."""
+    """Empirical stress tests for the audit report's Streamlit rendering."""
 
     def _reset_mock(self):
         self.mock_st = MockStreamlitSession()
-        app.st = self.mock_st
+        ui_audit.st = self.mock_st
 
     def setUp(self):
-        self._orig_st = getattr(app, "st", None)
+        self._orig_st = getattr(ui_audit, "st", None)
         self._reset_mock()
 
     def tearDown(self):
         if self._orig_st is not None:
-            app.st = self._orig_st
+            ui_audit.st = self._orig_st
 
     def test_render_audit_zero_deferred_citations(self):
         """Verify _render_seed_citation_audit when audit has 0 deferred citations."""
@@ -232,7 +232,7 @@ class TestStreamlitUIStress(unittest.TestCase):
         }
 
         final = {"citation_audit": audit, "seed_path": "/fake/seed_paper.pdf"}
-        app._render_seed_citation_audit(final)
+        ui_audit._render_seed_citation_audit(final)
 
         # 1. Check metric row
         metric_col_group = [c for c in self.mock_st.columns_calls if c["spec"] == 6]
@@ -353,7 +353,7 @@ class TestStreamlitUIStress(unittest.TestCase):
         }
 
         final = {"citation_audit": audit, "seed_path": "/workspace/seeds/quantum_seed.pdf"}
-        app._render_seed_citation_audit(final)
+        ui_audit._render_seed_citation_audit(final)
 
         # 1. Metrics check
         metric_col_group = [c for c in self.mock_st.columns_calls if c["spec"] == 6]
@@ -453,7 +453,7 @@ class TestStreamlitUIStress(unittest.TestCase):
 
                 # Must not raise KeyError or TypeError
                 try:
-                    app._render_seed_citation_audit(final)
+                    ui_audit._render_seed_citation_audit(final)
                 except Exception as exc:
                     self.fail(f"_render_seed_citation_audit crashed with totals={totals}: {exc}")
 
@@ -618,7 +618,7 @@ class TestStreamlitUIStress(unittest.TestCase):
                 final = {"citation_audit": audit}
 
                 try:
-                    app._render_seed_citation_audit(final)
+                    ui_audit._render_seed_citation_audit(final)
                 except Exception as exc:
                     self.fail(f"_render_claim_item crashed for {tc['name']}: {exc}")
 
@@ -669,7 +669,7 @@ class TestStreamlitUIStress(unittest.TestCase):
 
             # First run: file is uploaded, should register
             final = {"citation_audit": audit, "seed_path": "/path/to/seed.pdf"}
-            app._render_seed_citation_audit(final)
+            ui_audit._render_seed_citation_audit(final)
 
             self.assertEqual(mock_save.call_count, 1)
             called_bytes, called_ref = mock_save.call_args[0]
@@ -694,7 +694,7 @@ class TestStreamlitUIStress(unittest.TestCase):
             # Second run: file is still in uploader, but already processed; should NOT register again
             mock_save.reset_mock()
             self.mock_st.toast_calls.clear()
-            app._render_seed_citation_audit(final)
+            ui_audit._render_seed_citation_audit(final)
 
             self.assertEqual(mock_save.call_count, 0, "Deduplication must prevent re-registering identical upload")
             self.assertEqual(len(self.mock_st.toast_calls), 0)
@@ -771,7 +771,7 @@ class TestStreamlitUIStress(unittest.TestCase):
 
         # Running audit must not raise unhandled exceptions
         try:
-            app._render_seed_citation_audit(final)
+            ui_audit._render_seed_citation_audit(final)
         except Exception as exc:
             self.fail(f"_render_seed_citation_audit crashed on adversarial payloads: {exc}")
 

@@ -89,9 +89,9 @@ plain HTTP. Access control is an IP allow-list plus an optional `APP_PASSWORD`.
 Ingestion runs synchronously under one lock, so the tool is single-user.
 
 **Code health.**
-`app.py` is ~2,300 lines, `shared/seed_audit.py` ~2,000 and
-`agents/agent0_discoverer.py` ~1,800. Pipeline driving and audit rendering sit
-inline in the UI file.
+`shared/seed_audit.py` is ~2,000 lines and `agents/agent0_discoverer.py` ~1,800.
+`app.py` is a ~90-line page layout; the UI is `research_assistant/ui/`, one
+module per tab and per concern, the largest (`ui/audit.py`) ~570 lines.
 
 ## Directions
 
@@ -147,8 +147,8 @@ or repository.
    the way a corpus gets built.
 2. Mark the planner experimental in the UI and docs until its scorecard
    measures reproduction, or move it out.
-3. Before widening anything: real source metadata for the reliability layer, a
-   reproducible deployment, and moving audit logic out of `app.py`.
+3. Before widening anything: real source metadata for the reliability layer,
+   and a reproducible deployment.
 
 ## Non-goals, for now
 

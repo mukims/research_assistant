@@ -447,7 +447,7 @@ class TestPipelineStatus(unittest.TestCase):
     def test_app_sidebar_widget_rendering(self):
         temp_status_file = self.temp_status_file
         monkeypatch = self.monkeypatch
-        import app
+        from research_assistant.ui import status as ui_status
 
         # Test idle rendering
         pipeline_status.clear_status()
@@ -462,13 +462,13 @@ class TestPipelineStatus(unittest.TestCase):
         info_calls = []
         progress_calls = []
 
-        monkeypatch.setattr(app.st, "markdown", lambda text: markdown_calls.append(text))
-        monkeypatch.setattr(app.st, "caption", lambda text: caption_calls.append(text))
-        monkeypatch.setattr(app.st, "info", lambda text: info_calls.append(text))
-        monkeypatch.setattr(app.st, "progress", lambda pct, text="": progress_calls.append((pct, text)))
+        monkeypatch.setattr(ui_status.st, "markdown", lambda text: markdown_calls.append(text))
+        monkeypatch.setattr(ui_status.st, "caption", lambda text: caption_calls.append(text))
+        monkeypatch.setattr(ui_status.st, "info", lambda text: info_calls.append(text))
+        monkeypatch.setattr(ui_status.st, "progress", lambda pct, text="": progress_calls.append((pct, text)))
 
         # Call the fragment function directly
-        render_fn = getattr(app._render_sidebar_pipeline_status, "__wrapped__", app._render_sidebar_pipeline_status)
+        render_fn = getattr(ui_status._render_sidebar_pipeline_status, "__wrapped__", ui_status._render_sidebar_pipeline_status)
         render_fn()
 
         assert any("🟢 **Pipeline: Idle**" in m for m in markdown_calls)
@@ -540,7 +540,7 @@ class TestPipelineStatus(unittest.TestCase):
     def test_sidebar_and_tab1_widget_corrupt_data(self):
         temp_status_file = self.temp_status_file
         monkeypatch = self.monkeypatch
-        import app
+        from research_assistant.ui import status as ui_status
 
         pipeline_status.set_status(
             active=True,
@@ -553,13 +553,13 @@ class TestPipelineStatus(unittest.TestCase):
 
         markdown_calls = []
         progress_calls = []
-        monkeypatch.setattr(app.st, "markdown", lambda text: markdown_calls.append(text))
-        monkeypatch.setattr(app.st, "caption", lambda text: None)
-        monkeypatch.setattr(app.st, "info", lambda text, **kw: None)
-        monkeypatch.setattr(app.st, "progress", lambda pct, text="": progress_calls.append((pct, text)))
+        monkeypatch.setattr(ui_status.st, "markdown", lambda text: markdown_calls.append(text))
+        monkeypatch.setattr(ui_status.st, "caption", lambda text: None)
+        monkeypatch.setattr(ui_status.st, "info", lambda text, **kw: None)
+        monkeypatch.setattr(ui_status.st, "progress", lambda pct, text="": progress_calls.append((pct, text)))
 
-        render_sidebar = getattr(app._render_sidebar_pipeline_status, "__wrapped__", app._render_sidebar_pipeline_status)
-        render_tab1 = getattr(app._render_tab1_live_status, "__wrapped__", app._render_tab1_live_status)
+        render_sidebar = getattr(ui_status._render_sidebar_pipeline_status, "__wrapped__", ui_status._render_sidebar_pipeline_status)
+        render_tab1 = getattr(ui_status._render_tab1_live_status, "__wrapped__", ui_status._render_tab1_live_status)
 
         render_sidebar()
         render_tab1()
@@ -858,7 +858,7 @@ class TestPipelineStatus(unittest.TestCase):
         """Verify that last_summary with preexisting parentheses is not double-wrapped."""
         temp_status_file = self.temp_status_file
         monkeypatch = self.monkeypatch
-        import app
+        from research_assistant.ui import status as ui_status
 
         pipeline_status.clear_status()
         pipeline_status.set_status(
@@ -868,11 +868,11 @@ class TestPipelineStatus(unittest.TestCase):
         )
 
         caption_calls = []
-        monkeypatch.setattr(app.st, "markdown", lambda text: None)
-        monkeypatch.setattr(app.st, "caption", lambda text: caption_calls.append(text))
-        monkeypatch.setattr(app.st, "info", lambda text: None)
+        monkeypatch.setattr(ui_status.st, "markdown", lambda text: None)
+        monkeypatch.setattr(ui_status.st, "caption", lambda text: caption_calls.append(text))
+        monkeypatch.setattr(ui_status.st, "info", lambda text: None)
 
-        render_fn = getattr(app._render_sidebar_pipeline_status, "__wrapped__", app._render_sidebar_pipeline_status)
+        render_fn = getattr(ui_status._render_sidebar_pipeline_status, "__wrapped__", ui_status._render_sidebar_pipeline_status)
         render_fn()
 
         assert any("Last run completed: 10:00 UTC (+111 papers indexed)" in c for c in caption_calls)
@@ -945,7 +945,6 @@ class TestPipelineStatus(unittest.TestCase):
     def test_app_does_not_unlink_raw_dir(self):
         monkeypatch = self.monkeypatch
         tmp_path = self.tmp_path
-        import app
         from research_assistant import config
 
         raw_paper = os.path.join(config.RAW_DIR, "test_preserve.pdf")

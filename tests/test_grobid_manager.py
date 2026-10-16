@@ -391,7 +391,7 @@ class TestGrobidManager(unittest.TestCase):
 
     def test_ui_render_running_state(self):
         import streamlit as st
-        import app
+        from research_assistant.ui import grobid as ui_grobid
         st.session_state.clear()
         st.session_state["grobid_feedback"] = ("success", "GROBID started successfully!")
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
@@ -402,12 +402,12 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            app._render_grobid_controls()
+            ui_grobid._render_grobid_controls()
             self.assertEqual(st.session_state.get("grobid_server_state"), "RUNNING")
 
     def test_ui_render_stopped_state(self):
         import streamlit as st
-        import app
+        from research_assistant.ui import grobid as ui_grobid
         st.session_state.clear()
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
             is_alive=False,
@@ -417,12 +417,12 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            app._render_grobid_controls()
+            ui_grobid._render_grobid_controls()
             self.assertEqual(st.session_state.get("grobid_server_state"), "STOPPED")
 
     def test_ui_render_starting_state(self):
         import streamlit as st
-        import app
+        from research_assistant.ui import grobid as ui_grobid
         st.session_state.clear()
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
             is_alive=False,
@@ -432,14 +432,14 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            app._render_grobid_controls()
+            ui_grobid._render_grobid_controls()
             self.assertEqual(st.session_state.get("grobid_server_state"), "STARTING")
 
     def test_grobid_ok_cache_function(self):
-        import app
+        from research_assistant.ui import grobid as ui_grobid
         with patch.object(GrobidManager, "is_alive", return_value=True):
-            app._clear_grobid_cache()
-            self.assertTrue(app._grobid_ok())
+            ui_grobid._clear_grobid_cache()
+            self.assertTrue(ui_grobid._grobid_ok())
 
     # ─── Robustness & Edge Cases ──────────────────────────────────────────────
 
@@ -536,7 +536,7 @@ class TestGrobidManager(unittest.TestCase):
 
     def test_ui_render_error_state(self):
         import streamlit as st
-        import app
+        from research_assistant.ui import grobid as ui_grobid
         st.session_state.clear()
         with patch.object(GrobidManager, "check_status", return_value=GrobidStatus(
             is_alive=False,
@@ -547,7 +547,7 @@ class TestGrobidManager(unittest.TestCase):
             docker_available=True,
             container_name="test-grobid",
         )):
-            app._render_grobid_controls()
+            ui_grobid._render_grobid_controls()
             self.assertEqual(st.session_state.get("grobid_server_state"), "ERROR")
 
 

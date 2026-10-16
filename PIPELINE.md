@@ -107,7 +107,7 @@ research_assistant/                the checkout root
 ├── publaynet_config.yaml
 ├── model_final.pth                Detectron2 / PubLayNet checkpoint (optional, gitignored)
 │
-├── app.py                         Streamlit UI (also the container entry point)
+├── app.py                         Streamlit page layout: sidebar, six tabs (also the container entry point)
 ├── orchestrate.py                 LangGraph — one research idea, end to end
 ├── watch.py                       watchdog daemon — directory-driven
 │
@@ -138,6 +138,13 @@ research_assistant/                the checkout root
 │   │   ├── evalset.py  metrics.py  harvest.py  labeling.py  transforms.py
 │   │   │                       the judge evaluation harness (pure; scripts/ do the I/O)
 │   │   └── cases/              labelled examples: cases.jsonl (in-prompt), human.jsonl, transforms.jsonl
+│   ├── ui/                     the Streamlit UI that app.py lays out, one module per concern
+│   │   ├── audit_tab.py  idea_tab.py  draft_tab.py  chat_tab.py  help_tab.py   one render_*_tab() each
+│   │   ├── common.py       auth, the cached search index, helpers every tab shares
+│   │   ├── results.py      one finished run: trace, seed, shortlist, notes, synthesis
+│   │   ├── audit.py        the citation-audit report and the job that produces it
+│   │   ├── jobs.py         background runs: start, resolve, adopt, show progress
+│   │   └── status.py  grobid.py   the sidebar widgets (the planner tab is tasks/ui.py)
 │   └── shared/
 │       ├── llm.py              backend-agnostic chat / chat_stream / embeddings
 │       ├── ingestion.py        process → upsert → mark → index

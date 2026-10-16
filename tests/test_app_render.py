@@ -1,37 +1,40 @@
 # tests/test_app_render.py
-"""The one pure piece of Tab 1's synthesis rendering: which warnings the
-reader sees. Everything else in app.py is Streamlit calls."""
+"""The pure pieces of the Streamlit front-end: which synthesis warnings the
+reader sees, how an audit item is badged, how a run is found again. Everything
+else in research_assistant/ui/ is Streamlit calls."""
 
 import unittest
 
-import app
+from research_assistant.ui import audit as ui_audit
+from research_assistant.ui import jobs as ui_jobs
+from research_assistant.ui import results as ui_results
 
 
 class TestSynthesisWarnings(unittest.TestCase):
     def test_clean_answer_has_no_warnings(self):
-        self.assertEqual(app._synthesis_warnings({"unverified_citations": [], "irrelevant_cited": []}), [])
+        self.assertEqual(ui_results._synthesis_warnings({"unverified_citations": [], "irrelevant_cited": []}), [])
 
     def test_unverified_and_irrelevant_keys_are_named(self):
-        w = app._synthesis_warnings({"unverified_citations": ["P7"], "irrelevant_cited": ["P2"], "keys": {"P2": "Paper 2"}})
+        w = ui_results._synthesis_warnings({"unverified_citations": ["P7"], "irrelevant_cited": ["P2"], "keys": {"P2": "Paper 2"}})
         self.assertEqual(len(w), 2)
         self.assertIn("P7", w[0]); self.assertIn("P2", w[1]); self.assertIn("Paper 2", w[1])
 
     def test_old_answers_without_the_fields_are_fine(self):
-        self.assertEqual(app._synthesis_warnings({"suggestion": "x"}), [])
+        self.assertEqual(ui_results._synthesis_warnings({"suggestion": "x"}), [])
 
 
 class TestAuditItemBadge(unittest.TestCase):
     def test_badges_follow_outcome_before_judgement(self):
-        self.assertEqual(app._audit_item_badge({"outcome": "judged", "judgement": "Supports"}), "🟢 Supports")
-        self.assertEqual(app._audit_item_badge({"outcome": "judged", "judgement": "Does not support"}), "🟠 Does Not Support")
-        self.assertEqual(app._audit_item_badge({"outcome": "judged", "judgement": "Unclear / insufficient evidence"}), "⚪ Unclear / Insufficient Evidence")
-        self.assertEqual(app._audit_item_badge({"outcome": "cap_exceeded", "judgement": None}), "⏸ Not Assessed (budget)")
-        self.assertEqual(app._audit_item_badge({"outcome": "not_attempted", "judgement": None}), "⏸ Not Assessed (backend down)")
-        self.assertEqual(app._audit_item_badge({"outcome": "not_a_claim", "judgement": None, "role": "software"}), "🔧 Not a Claim (software)")
-        self.assertEqual(app._audit_item_badge({"outcome": "deferred_paywalled", "judgement": None}), "⏳ Deferred (Pending Evidence)")
-        self.assertEqual(app._audit_item_badge({"outcome": "not_downloaded", "judgement": None}), "🔒 Paywalled / Not In Corpus")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "judged", "judgement": "Supports"}), "🟢 Supports")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "judged", "judgement": "Does not support"}), "🟠 Does Not Support")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "judged", "judgement": "Unclear / insufficient evidence"}), "⚪ Unclear / Insufficient Evidence")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "cap_exceeded", "judgement": None}), "⏸ Not Assessed (budget)")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "not_attempted", "judgement": None}), "⏸ Not Assessed (backend down)")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "not_a_claim", "judgement": None, "role": "software"}), "🔧 Not a Claim (software)")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "deferred_paywalled", "judgement": None}), "⏳ Deferred (Pending Evidence)")
+        self.assertEqual(ui_audit._audit_item_badge({"outcome": "not_downloaded", "judgement": None}), "🔒 Paywalled / Not In Corpus")
         # No outcome ever falls through to a verdict-looking label.
-        self.assertNotIn("Unclear", app._audit_item_badge({"outcome": "retrieval_failed", "judgement": None}))
+        self.assertNotIn("Unclear", ui_audit._audit_item_badge({"outcome": "retrieval_failed", "judgement": None}))
 
 
 class TestJobResolution(unittest.TestCase):
@@ -48,24 +51,24 @@ class TestJobResolution(unittest.TestCase):
         self.run_jobs = run_jobs
 
     def test_unknown_job_id(self):
-        self.assertEqual(app._resolve_job("nope"), (None, None, None, None))
+        self.assertEqual(ui_jobs._resolve_job("nope"), (None, None, None, None))
 
     def test_running_and_finished_jobs_come_from_the_registry(self):
         import threading, time
         gate = threading.Event()
         job = self.run_jobs.start_job("j", "p.pdf", lambda: (gate.wait(5), {"seed_path": "p.pdf"})[1], origin="audit")
-        self.assertEqual(app._resolve_job("j")[0], "running")
+        self.assertEqual(ui_jobs._resolve_job("j")[0], "running")
         gate.set()
         deadline = time.time() + 5
         while job.state == "running" and time.time() < deadline:
             time.sleep(0.01)
-        state, final, error, origin = app._resolve_job("j")
+        state, final, error, origin = ui_jobs._resolve_job("j")
         self.assertEqual((state, final["seed_path"], error, origin), ("done", "p.pdf", None, "audit"))
 
     def test_a_finished_run_survives_a_server_restart_via_disk(self):
         self.run_jobs.save_run("k", {"seed_path": "q.pdf", "citation_audit": {"totals": {}}}, label="q.pdf", origin="idea")
         self.run_jobs._reset_registry_for_tests()
-        state, final, error, origin = app._resolve_job("k")
+        state, final, error, origin = ui_jobs._resolve_job("k")
         self.assertEqual((state, final["seed_path"], origin), ("done", "q.pdf", "idea"))
 
     def test_failed_job_reports_its_error(self):
@@ -74,7 +77,7 @@ class TestJobResolution(unittest.TestCase):
         deadline = time.time() + 5
         while job.state == "running" and time.time() < deadline:
             time.sleep(0.01)
-        state, _, error, _ = app._resolve_job("f")
+        state, _, error, _ = ui_jobs._resolve_job("f")
         self.assertEqual(state, "failed"); self.assertIn("boom", error)
 
     def test_start_audit_job_registers_and_clears_stale_state(self):
@@ -85,7 +88,7 @@ class TestJobResolution(unittest.TestCase):
         st.session_state["build_result"] = {"stale": True}
         with patch("research_assistant.shared.seed_audit.audit_seed_citations") as mock_audit:
             mock_audit.return_value = {"totals": {"total": 1}, "results": []}
-            job_id = app._start_audit_job("p.pdf", "p.pdf", origin="audit", force=True, existing_final={"answer": "saved"})
+            job_id = ui_audit._start_audit_job("p.pdf", "p.pdf", origin="audit", force=True, existing_final={"answer": "saved"})
             self.assertIsNotNone(job_id)
             self.assertNotIn("audit_result", st.session_state)
             self.assertNotIn("build_result", st.session_state)
@@ -108,5 +111,5 @@ class TestPipelineExecutionIsStreamlitFree(unittest.TestCase):
         from there — the old progress callback — is exactly what a browser
         refresh used to kill the run through."""
         import inspect, re
-        src = inspect.getsource(app._execute_pipeline)
+        src = inspect.getsource(ui_jobs._execute_pipeline)
         self.assertIsNone(re.search(r"\bst\.", src), src)

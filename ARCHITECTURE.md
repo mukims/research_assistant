@@ -906,7 +906,7 @@ cached alongside successful models and re-raised without retrying.
 
 ## 12. Streamlit Application UI Architecture
 
-The interactive user interface (`app.py`) is structured into five distinct, specialized workspaces:
+The interactive user interface is structured into five distinct, specialized workspaces. `app.py` only lays out the page (sidebar, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` and the pieces they share are the other modules in `research_assistant/ui/`:
 
 1. **⚖️ Tab 1: Citation Auditor (`tab_audit`)**:
    - The primary research verification tool. Accepts an uploaded seed PDF or searches the literature via arXiv.

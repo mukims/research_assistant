@@ -363,7 +363,7 @@ class TestGrobidController(unittest.TestCase):
     # ─── App UI Integration ───────────────────────────────────────────────────
 
     def test_render_grobid_controls_in_app(self):
-        import app
+        from research_assistant.ui import grobid as ui_grobid
         import streamlit as st
         st.session_state.clear()
         # Call _render_grobid_controls directly to ensure it does not raise
@@ -375,7 +375,7 @@ class TestGrobidController(unittest.TestCase):
             docker_available=True,
             container_name="grobid",
         )):
-            app._render_grobid_controls()
+            ui_grobid._render_grobid_controls()
             self.assertEqual(st.session_state.get("grobid_server_state"), "STOPPED")
 
 
