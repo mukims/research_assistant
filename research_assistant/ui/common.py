@@ -108,17 +108,6 @@ def _manifest(path):
         return {}
 
 
-STEPS = {
-    "discover":    ("🔍", "Finding a seed paper"),
-    "ingest_seed": ("📥", "Indexing the seed paper"),
-    "extract":     ("📖", "Extracting the reference list"),
-    "fetch":       ("🌐", "Fetching referenced papers"),
-    "ingest_refs": ("🧩", "Ingesting reference PDFs"),
-    "respond":     ("✍️", "Answering your query"),
-    "fallback":    ("💭", "No paper found — answering from general knowledge"),
-}
-
-
 def _render_passages(passages, label="Retrieved context"):
     """The retrieved-chunk expander, shared by every tab that shows one."""
     if not passages:
