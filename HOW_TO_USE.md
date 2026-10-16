@@ -318,7 +318,7 @@ In Ingestion v2, the Vision-Language Model generates natural-language descriptio
 4. Drop the PDF into the corresponding uploader card and click **⚡ Re-run Audit with Uploaded Papers**.
 
 ### 4. How do I clear or reset the corpus?
-Your indexed data lives in the `data/` directory (or `/mnt/disks/data` on cloud deployments). 
+Your indexed data lives in the `data/` directory. 
 - To start a new project while keeping the app clean, you can point `CITATION_DATA_DIR` to a different directory.
 - Never manually delete vector database files while the application or ingestion daemon is running.
 

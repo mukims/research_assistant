@@ -1,12 +1,10 @@
-"""deploy/local.sh and the rollout guard in deploy/deploy.sh.
+"""deploy/local.sh.
 
-Both scripts are run for real, under bash, with `docker`, `curl`, `gcloud`,
-`sudo` and the Python interpreter replaced by stubs that record what they were
-asked to do. Nothing is started, pulled or removed. What the tests pin:
-
-  * deploy.sh never removes a container that is serving the live site;
-  * local.sh binds the app to 127.0.0.1, reuses the container name the app's own
-    GROBID buttons use, and never touches any other container.
+The script is run for real, under bash, with `docker`, `curl` and the Python
+interpreter replaced by stubs that record what they were asked to do. Nothing is
+started, pulled or removed. What the tests pin: local.sh binds the app to 127.0.0.1,
+reuses the container name the app's own GROBID buttons use, and never touches any
+other container.
 """
 
 import os
@@ -56,28 +54,6 @@ STUBS = {
         [ "$1" = "-c" ] && [ -e "$STATE/no_streamlit" ] && exit 1
         exit 0
     ''',
-    # deploy.sh drives the VM through `gcloud compute ssh --command`. Run that
-    # command here, with `sudo` and `cd` neutralised so it cannot touch this machine.
-    "gcloud": r'''
-        echo "gcloud $*" >> "$CALLS"
-        case "$1 $2" in
-          "config get-value") echo test-project ;;
-          "compute ssh")
-            prev=""; cmd=""
-            for a in "$@"; do [ "$prev" = "--command" ] && cmd="$a"; prev="$a"; done
-            bash -c "cd() { :; }; $cmd"; exit $? ;;   # a failing remote command fails the ssh, as with the real gcloud
-          "compute instances") echo 203.0.113.7 ;;
-        esac
-        exit 0
-    ''',
-    "sudo": r'''
-        echo "sudo $*" >> "$CALLS"
-        case "$1" in
-          docker|gcloud) c="$1"; shift; exec "$c" "$@" ;;
-          tee)           cat > /dev/null ;;
-        esac
-        exit 0
-    ''',
 }
 
 
@@ -115,35 +91,6 @@ class ScriptHarness(unittest.TestCase):
 
     def calls_starting(self, prefix):
         return [line for line in self.log() if line.startswith(prefix)]
-
-    def executed(self, command):
-        """Remote commands that actually ran (sudo's own log line). The gcloud stub also logs the whole
-        --command text, whose indented lines must not be mistaken for execution."""
-        return [line for line in self.log() if line.startswith((f"sudo {command}", command))]
-
-
-class TestDeployRolloutGuard(ScriptHarness):
-    def run_deploy(self):
-        return self.run_script(DEPLOY / "deploy.sh")
-
-    def test_a_container_named_research_assistant_is_never_removed(self):
-        self.flag("containers", "research-assistant\n")
-        result = self.run_deploy()
-        self.assertNotEqual(result.returncode, 0, "the rollout must stop, not carry on")
-        self.assertEqual(self.executed("docker rm"), [])
-        self.assertEqual(self.executed("docker stop"), [])
-        self.assertEqual(self.executed("docker compose"), [], "it must not pull or bring the stack up either")
-        self.assertIn("research-assistant", result.stderr)
-        self.assertNotIn("Deployed", result.stdout)
-
-    def test_the_rollout_proceeds_when_no_such_container_exists(self):
-        # Compose's own container is research-assistant-app-1: an exact-name match must not mistake it for the legacy one.
-        self.flag("containers", "research-assistant-app-1\nresearch-assistant-grobid-1\nsomething-else\n")
-        result = self.run_deploy()
-        self.assertEqual(result.returncode, 0, result.stderr[-600:])
-        self.assertEqual(self.executed("docker rm"), [])
-        self.assertTrue(any(" up -d" in c for c in self.executed("docker compose")), self.log())
-        self.assertIn("Deployed", result.stdout)
 
 
 class TestLocalScript(ScriptHarness):

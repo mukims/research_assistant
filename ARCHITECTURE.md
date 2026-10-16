@@ -231,7 +231,7 @@ two parses of one paper.
 
 ### 4.1 Layout detection is optional; text-only is the fallback
 
-`CITATION_LAYOUT_DETECTION` (default on locally, **off** on the deployment).
+`CITATION_LAYOUT_DETECTION` (default on).
 With it off, `process_pdf` extracts text blocks with PyMuPDF and skips figures
 entirely.
 
@@ -503,7 +503,7 @@ the deployment configures everything through env vars without touching code.
 
 `GROBID_SERVER` defaults to `http://localhost:8070` — a local server is the
 expectation, not a convenience fallback. Point it at a hosted instance (a
-public Space, or the GCE deployment's own GROBID service) by setting the
+public Space, say) by setting the
 env var instead. Running one locally via Docker is the standard route, and is
 walked through step by step in
 [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
@@ -530,66 +530,38 @@ per-file in the batch result.
 
 ## 8. Deployment
 
-### 8.1 One container image, env-configured per target
+### 8.1 One machine, one user, loopback only
 
-`Dockerfile` builds a single image (Streamlit app, honours `$PORT`). Local test
-runs it with Ollama env vars; the GCE deployment runs the same image with hosted-API env
-vars.
+The tool runs where its user sits. `deploy/local.sh up` starts GROBID if it is not
+answering and the app on `127.0.0.1`; it starts, stops and removes nothing else.
 
-**Why.** "Test what you deploy." A green local run of the image means the image
-is good; only the backend wiring differs, and that is just environment.
+**Why.** It is a single-user tool: ingestion runs under one lock, there is no auth
+beyond an optional `APP_PASSWORD`, and the app spends the user's model API keys.
+Streamlit's own default is to listen on every network interface (checked: the LAN
+address answers), which would expose the corpus, and the effect of the keys, to the
+local network, so the launcher binds `127.0.0.1` explicitly. A domain, a certificate
+and a firewall in front of it would be a multi-user service, which this is not.
 
-### 8.2 A GCE VM, not Cloud Run
+**Trade-off.** No sharing. A collaborator clones the repository and runs their own
+copy on their own corpus.
 
-The initial target was a Hugging Face Space, then Cloud Run. Neither survived
-contact with the corpus.
+### 8.2 The corpus needs a real filesystem
 
-- The free CPU Space tier was withdrawn, and new Spaces default to ZeroGPU
-  hardware, which only supports the Gradio SDK.
-- **Cloud Run cannot hold this corpus.** It has no persistent disk; the only
-  durable option is a GCS FUSE mount, and the corpus is `chroma.sqlite3` plus
-  mmap'd HNSW `.bin` files. GCS FUSE has no POSIX file locking and turns small
-  random writes into whole-object rewrites. SQLite and a memory-mapped vector
-  index on that substrate is corruption, not slowness.
+Should hosting ever be revisited: the corpus is `chroma.sqlite3` plus memory-mapped
+HNSW `.bin` files, with the BM25 pickle and the ingestion lock beside them.
 
-A GCE VM with a persistent disk is an ordinary filesystem, so ChromaDB, the
-BM25 pickle and the ingestion lock all work untouched — **no application code
-changes are needed for persistence**. `e2-custom-4-12288` (4 vCPU, 12 GB):
-GROBID takes two cores during extraction at `GROBID_BATCH_CONCURRENCY = 2`, and
-four cores keep the UI responsive while it does.
+- **Object-store mounts cannot hold it.** Serverless platforms have no persistent disk;
+  the only durable option is a FUSE-mounted bucket, which has no POSIX file locking and
+  turns small random writes into whole-object rewrites. SQLite and a memory-mapped
+  vector index on that substrate is corruption, not slowness.
+- A machine with a persistent disk is an ordinary filesystem, and nothing in the
+  application changes for persistence.
 
-**Trade-off.** Always-on cost (≈$95/mo) instead of scale-to-zero, and a machine
-to patch. Accepted: a scale-to-zero design that corrupts its corpus is not
-cheaper, it is broken.
+**Rejected.** A managed NFS share gives real locking but costs far more than a
+single-user tool warrants. A managed Postgres with pgvector removes Chroma but rewrites
+`db.py`, `retrieve.py` and `ingestion.py`, and leaves the BM25 pickle homeless.
 
-**Rejected.** Filestore gives real NFS locking but starts at 1 TiB ≈ $200/mo.
-Cloud SQL + pgvector removes Chroma but rewrites `db.py`, `retrieve.py` and
-`ingestion.py`, and leaves the BM25 pickle homeless.
-
-### 8.3 Access: one firewall rule, not IAP
-
-`tcp:8080` from a single `/32`. IAP and Google-managed certificates both require
-a domain, which is not available. An unauthenticated app nobody can route to is
-not an exposed app — and the app spends an OpenAI key, so this is a billing
-control as much as a privacy one.
-
-**Why this needs a script.** Pinning to one IP means presenting from an
-unfamiliar network silently locks you out: the app is up, healthy, and
-unreachable. `deploy/allow-ip.sh` takes no arguments and repoints the rule at
-your current address.
-
-**Trade-off.** Plain HTTP: the firewall protects the key's effects, but the
-session is unencrypted in transit. Acceptable for one user on one address. With
-a domain, the upgrade is IAP + a managed cert on an HTTPS load balancer
-(~$18/mo) and nothing else changes.
-
-### 8.4 File logging off in the container
-
-`CITATION_LOG_FILE=0` in the image.
-
-**Why.** Container stdout is captured by Docker and the platform's logging — an internal log file adds nothing and clutters the volume.
-
-### 8.5 Streamlit, not Gradio or a custom frontend
+### 8.3 Streamlit, not Gradio or a custom frontend
 
 **Why.** The app is form-in / structured-result-out with a long-running job that
 needs progress streaming. `st.form` submits inputs atomically, `st.status`
@@ -758,8 +730,8 @@ Auditing a paper's full bibliography from scratch takes 10–15 minutes on CPU V
 
 - **No database migrations.** Schema changes (adding the summaries collection)
   mean re-ingesting. Acceptable for a research tool with rebuildable corpora.
-- **No auth / multi-tenant.** Single-user tool. The VM is firewalled to
-  the operator's single /32 IP address.
+- **No auth / multi-tenant.** Single-user tool. `deploy/local.sh` binds the app to
+  127.0.0.1; `APP_PASSWORD` is optional.
 - **No async / job queue.** Ingestion runs synchronously in the request. Fine
   for one user; a shared deployment would need a queue.
 - **`model_final.pth` (the layout checkpoint) is gitignored.** layoutparser

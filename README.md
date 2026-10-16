@@ -38,21 +38,16 @@ evaluation, audit — each assigned to a specialised coding-agent role. He
 considers this beneath him, and does it anyway. See the **Agent task planner**
 tab below.
 
-## A note on his health
+## A note on where he lives
 
-Marvin is alive at **https://marvin-the-citebot.duckdns.org** for as long as
-Google Cloud and my wallet allow. Neither is infinite.
+Marvin lives on your machine and nowhere else. `deploy/local.sh up` starts him on
+`127.0.0.1` with GROBID for company, and nothing outside the room can knock. There
+is no hosted instance and no firewall to ask about; if `APP_PASSWORD` is set he will
+still ask for an access code at the door. How `local.sh` works is in
+[deploy/README.md](deploy/README.md).
 
-He lives on a single Compute Engine VM with GROBID for company and his corpus
-on a persistent disk. The firewall admits allow-listed IPs only, so ask before
-you knock; if `APP_PASSWORD` is set he will also ask for an access code at the
-door. By default he runs `gemma4:e2b` and `nomic-embed-text` through Ollama on
-CPU, and `deploy/auto_shutdown_idle.sh` switches him off after 45 minutes of
-nobody talking to him, which he considers the best part of his day. How the VM
-is built, updated and stopped is in [deploy/README.md](deploy/README.md).
-
-He's happiest running on your own machine with local models, where he can be
-miserable for free, forever. See [Running him at home](#running-him-at-home).
+With local models he can be miserable for free, forever. See
+[Running him at home](#running-him-at-home).
 
 > Marvin introduces himself consistently across the application, user guide, and pipeline.
 
@@ -237,22 +232,6 @@ into the workspace, runs a generated acceptance test over them in a subprocess,
 and gives a failing task one reflection retry. Give it a scratch `--workspace`;
 the runner refuses to point at the persistent data directory.
 
-### Docker
-
-Two images, for two situations:
-
-- [`Dockerfile`](Dockerfile) + [`docker-compose.yml`](docker-compose.yml) — the
-  app pointed at OpenAI (`gpt-4.1-mini`, `text-embedding-3-small`) with GROBID
-  as a second service. This is what `deploy/deploy.sh` builds and pushes to
-  Artifact Registry. Needs `OPENAI_API_KEY` in the environment:
-  `docker compose up`.
-- [`Dockerfile.standalone`](Dockerfile.standalone) — everything in one image:
-  Ollama with `gemma4:e2b` and `nomic-embed-text` baked in, GROBID, and the
-  app. **This is the one that serves the live instance**, built on the VM
-  itself. It expects a pre-pulled `models/` directory beside it, which is not
-  committed; `deploy/entrypoint.sh` is. [deploy/README.md](deploy/README.md)
-  has the details.
-
 ## Things he has written down
 
 | Read this | When |
@@ -261,7 +240,7 @@ Two images, for two situations:
 | [PIPELINE.md](PIPELINE.md) | you want the full technical reference: agents, on-disk state, every environment variable, the repo layout |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | you want to know *why* — each design decision, what was rejected, the trade-off accepted |
 | [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md) | GROBID won't start, or you've never installed Docker |
-| [deploy/README.md](deploy/README.md) | you're putting him on a VM, or paying for one |
+| [deploy/README.md](deploy/README.md) | you want to run him on this machine: `local.sh`, GROBID, low memory |
 
 ## Development
 

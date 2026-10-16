@@ -25,13 +25,12 @@ Design rationale for every major choice is in
 
 Models run locally through [Ollama](https://ollama.com) by default, or against
 any OpenAI-compatible API (`LLM_BACKEND=openai`). A Streamlit UI
-([app.py](app.py)) and a [Dockerfile](Dockerfile) are included. The
+([app.py](app.py)) is included. The
 bibliographic lookups (Agent 0: arXiv / OpenAlex / Semantic Scholar; Agent 2:
 Crossref, Unpaywall, Europe PMC, arXiv) always go out to those services.
 
-Deploying to Google Cloud is scripted in [deploy/](deploy/) — one VM running the
-app and GROBID under Compose, with the corpus on a persistent disk. See
-[deploy/README.md](deploy/README.md).
+It runs on one machine, for one user: [deploy/local.sh](deploy/local.sh) starts GROBID
+and the app on `127.0.0.1`. See [deploy/README.md](deploy/README.md).
 
 ## Pipeline
 
@@ -101,9 +100,7 @@ research_assistant/                the checkout root
 ├── requirements.txt               core (UI, orchestration, text-only ingestion)
 ├── requirements-layout.txt        optional: detectron2 + torch layout stack
 ├── requirements-test.txt          the light packages CI installs
-├── Dockerfile                     registry image (deploy/deploy.sh → Artifact Registry; OpenAI backend)
-├── Dockerfile.standalone          all-in-one image the GCE VM runs: Ollama + GROBID + app (see deploy/README.md)
-├── docker-compose.yml  .dockerignore  .gcloudignore  .gitignore  .env.example
+├── .gitignore  .env.example
 ├── publaynet_config.yaml
 ├── model_final.pth                Detectron2 / PubLayNet checkpoint (optional, gitignored)
 │
@@ -173,7 +170,7 @@ research_assistant/                the checkout root
 │   ├── judge_harvest.py  judge_label.py  judge_bench.py
 │   ├── index_stats.py              chunk-length distribution of the active index
 │   └── synth_compare.py            research_answer in both synthesis modes, side by side
-├── deploy/                         local.sh (run on this machine, loopback only); GCE deployment: VM + disk + firewall scripts, deploy.sh, entrypoint.sh
+├── deploy/                         local.sh: run the app on this machine, loopback only (and its README)
 ├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
 ├── .github/workflows/tests.yml
 ├── notimportant/superpowers/       design specs, implementation plans and findings, by date

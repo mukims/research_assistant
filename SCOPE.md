@@ -34,8 +34,8 @@ products that share a core.
 | **C. Paper-to-agent replication planner** | Paper → dependency graph of replication tasks, assigned to agent roles, schedulable and runnable | Tab *Agent task planner*; `research_assistant/tasks/`; `orchestrate_tasks.py` | Newest. Weakest evidence. Largely independent of A and B |
 
 Around them: a LangGraph orchestrator (`orchestrate.py`), a directory watcher
-(`watch.py`), a Streamlit UI (`app.py`), and a single-VM GCP deployment
-([deploy/README.md](deploy/README.md)).
+(`watch.py`), a Streamlit UI (`app.py`, laid out in `research_assistant/ui/`), and a
+local launcher ([deploy/README.md](deploy/README.md)).
 
 ## How well it works
 
@@ -82,10 +82,8 @@ ML-style replication (PyTorch, tensors, training runs), which fits the physics
 and materials corpus poorly.
 
 **Operations.**
-The live container was started by hand and updated with `docker cp`
-([deploy/README.md](deploy/README.md)). HTTPS for the public URL is not defined
-anywhere in the repo, and [ARCHITECTURE.md](ARCHITECTURE.md) §8.3 still says
-plain HTTP. Access control is an IP allow-list plus an optional `APP_PASSWORD`.
+The tool runs on one machine for one user: `deploy/local.sh` binds the app to
+127.0.0.1 and manages GROBID. Access control is an optional `APP_PASSWORD`.
 Ingestion runs synchronously under one lock, so the tool is single-user.
 
 **Code health.**
@@ -147,8 +145,7 @@ or repository.
    the way a corpus gets built.
 2. Mark the planner experimental in the UI and docs until its scorecard
    measures reproduction, or move it out.
-3. Before widening anything: real source metadata for the reliability layer,
-   and a reproducible deployment.
+3. Before widening anything: real source metadata for the reliability layer.
 
 ## Non-goals, for now
 
