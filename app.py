@@ -20,6 +20,9 @@ from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
+from research_assistant.shared.log import get_logger
+
+logger = get_logger("app")
 
 st.set_page_config(page_title="Marvin the Citebot", page_icon="🤖", layout="wide")
 os.makedirs(config.DATA_DIR, exist_ok=True)
