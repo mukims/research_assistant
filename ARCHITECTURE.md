@@ -43,7 +43,7 @@ crashed on — once that batch's chunks are committed, so a crash partway throug
 re-parses the batch instead of recording work that never landed.
 
 **Why.** Fetching 60 references takes minutes and hits flaky external servers;
-ingestion runs layout detection and embedding per page. A process killed at 80%
+ingestion runs GROBID and embedding per paper. A process killed at 80%
 must resume at 80%, not 0%. Processing is by far the most expensive step, so a
 PDF that is processed but not marked would be re-processed on every subsequent
 run forever.
@@ -229,37 +229,22 @@ two parses of one paper.
 
 ## 4. Ingestion (Agent 3)
 
-### 4.1 Layout detection is optional; text-only is the fallback
+### 4.1–4.3 Retired: the v1 ingest (Detectron2 layout, figure VLM, semantic chunking)
 
-`CITATION_LAYOUT_DETECTION` (default on).
-With it off, `process_pdf` extracts text blocks with PyMuPDF and skips figures
-entirely.
+Index v1 found figures with Detectron2 layout detection, optionally had a VLM
+describe each crop, and split text with LangChain's `SemanticChunker`, batched
+per page. All three are gone from the code. v1's data stays on disk, read-only,
+under the unsuffixed collection names (`CITATION_INDEX_VERSION=1` with
+`CITATION_EMBED_MODEL=nomic-embed-text` reads it).
 
-**Why.** Detectron2 is not on PyPI, must be built from source against a specific
-torch/CUDA build, and needs ~4 GB RAM for the model. That is a poor fit for a
-container that should start fast and cheap. Text is 90% of what retrieval needs.
-The layout stack's imports are deliberately kept inside the functions that use
-them so the module (and its tests) import fine without them.
-
-### 4.2 Figure VLM is opt-in; the caption is the default text
-
-With layout on, every figure/table is still cropped and its **caption** kept as
-the searchable text. A VLM description of each crop only happens if
-`CITATION_FIGURE_VLM=1`.
-
-**Why.** A VLM call per figure is the single most expensive thing in ingestion —
-dozens of calls per paper, most of them describing plots that no query will ask
-about. The caption already says what the figure *is*. The crop is saved with its
-path in metadata, so a description can be generated on demand at query time for
-the few figures that actually surface.
-
-### 4.3 Semantic chunking, batched per page
-
-Text on a page is concatenated and chunked in one `SemanticChunker` call rather
-than one call per text block.
-
-**Why.** `SemanticChunker` embeds every sentence to find breakpoints. Per-block
-calls multiply that cost; per-page batching cuts embedding calls by ~10×.
+**Why they went.** Detectron2 is not on PyPI and needs a matching torch build;
+GROBID already gives a figure's box and caption (§4.9), so the layout model was a
+second, worse source for the same fact. A VLM description of a plot is a model's
+paraphrase of something the judge cannot read and that placed peaks at ±0.5
+where the axis read ±1.0; the embedder now takes the image directly (§4.9).
+`SemanticChunker` embedded every sentence to find breakpoints and produced the
+median 242-character chunk that §4.7 describes; the sentence-window chunker
+replaced it.
 
 ### 4.4 Chunk id encodes position
 
@@ -306,9 +291,9 @@ Comparing the full in-memory text against that stored prefix never matches for a
 long chunk, so every chunk over the limit was re-inserted on each run and the
 corpus grew a fresh copy of it every time.
 
-### 4.7 v2: GROBID full text, then sentence windows
+### 4.7 GROBID full text, then sentence windows (index v2 and v3)
 
-Under `CITATION_INDEX_VERSION=2` every PDF goes through GROBID's
+Every PDF goes through GROBID's
 `processFulltextDocument` (TEI cached in `raw/grobid_output/`), and the
 chunker packs `pysbd` sentences into ~1,200-character windows within a
 section, with one sentence of overlap. PyMuPDF is the fallback, recorded per
@@ -330,26 +315,52 @@ garbage under both paths and is dropped by the alphabetic-ratio filter.
 ### 4.8 What is embedded is not what is stored
 
 The stored chunk is the window verbatim — quoted, cited, verified. The
-embedded text is `search_document: Title: … Section: … <window>`: nomic's
-task prefix plus a contextual header. Queries get `search_query:`. Prefixes
-apply to the v2 index only; v1's vectors were made without them and mixing
-is worse than neither.
+embedded text is a contextual header (`Title: … Section: …`) plus the window,
+and each embedder has its own task prefixes. For embeddinggemma-2 a document is
+sent as `title: none | text: …` and a query as `task: search result | query: …`
+(without them it retrieves measurably worse: MRR −0.034, 95% CI +0.012 to
++0.059 for the prefixes, on 334 abstract sentences over 2,556 chunks). Index v2
+used nomic's `search_document:` / `search_query:` instead.
 
-### 4.9 Figures: GROBID captions, coordinate crops, descriptions as a run's choice
+**Why the embedder is recorded.** A query embedded by one model against vectors
+from another returns plausible but wrong neighbours and no error. A new
+collection records `embedder` in its metadata, and `db.check_embedder()` refuses
+to open one under a different `CITATION_EMBED_MODEL`. A collection that predates
+the record (v1, v2) is not checked. Swapping the embedder means a new index
+version — never a config change on an existing one.
 
-Captions come from GROBID's `<figDesc>` for figures *and* tables (v1's
-`find_caption` had no table branch — all 548 tables were placeholders — and
-attached body text to 30% of figures). Crops are PyMuPDF renders of GROBID's
-`<graphic coords>` box; no Detectron2. Whether every figure is then described
-by the model is one switch per run (`--describe-figures`, the Tab 1 toggle,
-default `CITATION_FIGURE_VLM`) — never a per-image choice — and the
-description is a separate `figure_description` chunk whose text opens with
-"Auto-generated description of … verify values against the figure".
+### 4.9 Figures: GROBID captions, coordinate crops, the image itself embedded
 
-**Why the marker and the exclusion.** In testing, the model placed a plot's
-peaks at ±0.5 where the axis read ±1.0. Descriptions are retrievable for
-synthesis and chat; Agent 8 excludes them as evidence (`exclude_types`), so
-a citation verdict rests on the paper's text.
+Captions come from GROBID's `<figDesc>` for figures *and* tables. Crops are
+PyMuPDF renders of GROBID's `<graphic coords>` box at `CITATION_FIGURE_CROP_DPI`
+(90). Each crop with a box becomes two entries: a `caption` chunk (text,
+embedded as text) and a `figure_image` chunk whose stored text is `Image of
+<label>: <caption>` and whose vector is the **image itself**, embedded by
+embeddinggemma-2, which puts text and images in one space. A text query can
+therefore find a figure with no model describing it.
+
+On 61 figures from 37 papers, a text query ranked the right figure first
+64–80% of the time and in the top 10 for 92–98% (chance 2% and 16%), and picked
+the right figure over its sibling in the same paper 73–91% of the time. Caption
+text alone already retrieves a figure about as well, so the image vector matters
+most where a caption is sparse. The numbers are in
+`~/Downloads/marvin-workbench/gemma-spike/FINDINGS.md`; the sample is small and
+leaves out vector plots.
+
+**Why figure images are never evidence.** `figure_image` (and `figure_description`,
+the old VLM text still present in index v2) are listed in
+`config.EXCLUDED_FROM_EVIDENCE`, which every evidence search passes as
+`exclude_types`, and `expand_neighbours` skips them as context. A citation verdict
+rests on the paper's text.
+
+**Why the crops are now data.** A future embedder re-embeds the image from its
+crop, so `data/images/` is no longer a debugging artefact to delete between
+runs. Chunk text and metadata are in Chroma, so a swap needs no GROBID run.
+
+**Ollama detail.** Images are embedded only through `/api/embed` with
+`input=[{"text": "", "image": <base64>}]`. The `images=` field and
+`/api/embeddings` answer 200 with a text-only vector and ignore the image; the
+embedder checks the prompt-token count and raises if the image did not arrive.
 
 ### 4.10 Ingestion v2: Deliberate scope boundaries and accepted losses
 
@@ -477,7 +488,7 @@ router for chat but `huggingface_hub.InferenceClient` feature-extraction for
 embeddings.
 
 **The embeddings object implements the LangChain `Embeddings` interface**
-(`embed_documents` / `embed_query`) so it drops straight into `SemanticChunker`.
+(`embed_documents` / `embed_query`). The embeddinggemma-2 object adds `embed_image`.
 
 ### 6.2 Embedding model must stay fixed per corpus
 
@@ -734,10 +745,8 @@ Auditing a paper's full bibliography from scratch takes 10–15 minutes on CPU V
   127.0.0.1; `APP_PASSWORD` is optional.
 - **No async / job queue.** Ingestion runs synchronously in the request. Fine
   for one user; a shared deployment would need a queue.
-- **`model_final.pth` (the layout checkpoint) is gitignored.** layoutparser
-  downloads the PubLayNet weights on first use when the file is absent. In
-  this checkout it is a symlink to the copy already sitting in `tech_ireland`,
-  not a duplicated 830 MB file.
+- **`model_final.pth` is a leftover.** It was the v1 layout checkpoint (gitignored,
+  ~830 MB). Nothing reads it any more and it can be deleted.
 - **No Ragas evaluation harness yet.** `evaluate_rag.py` and
   `requirements-eval.txt` were deferred out of this merge (§11 below), not
   rejected — the prompts it would share with Agent 4 already live in
@@ -793,7 +802,7 @@ living *inside* the ChromaDB directory (no deduplication, growing without
 bound), and a full paginated scan of every metadata record in the collection,
 5000 rows at a time.
 
-**Why that was a problem.** Parsing a PDF — layout detection, chunking,
+**Why that was a problem.** Parsing a PDF — GROBID, chunking,
 embedding, the per-paper LLM summary — is by a wide margin the most expensive
 thing Agent 3 does. The already-ingested check exists specifically to avoid
 redoing it. But the check itself ran on *every* ingest, for *every* candidate
@@ -849,30 +858,25 @@ until they diverge.
 
 ### 11.4 Ingestion reports how it extracted, for the same reason Agent 1 does
 
-Layout detection is the most install-fragile part of the system, and
-`process_pdf()` is deliberately forgiving of it — any failure degrades to
-text-only extraction rather than aborting the run. That forgiveness has a cost:
-the fallback is per-PDF and only logs a warning, so an entire corpus can come
-out with no figures or tables and nothing in the return value says so.
+GROBID is the most fragile external dependency, and `process_pdf()` is
+deliberately forgiving of it: if GROBID is down the PDF falls back to PyMuPDF
+text. That forgiveness has a cost: the fallback is per-PDF and only logs a
+warning, so an entire corpus can come out with no sections, captions or figures
+and nothing in the return value says so.
 
 That is the same shape of problem §11.1 solved for Agent 1, and it gets the
-same answer. `process_pdf()` tags every entry with the mode that produced it
-(`layout` or `text_only`) at the single point where the choice is made, and
-`ingest_pdfs()` returns `{"extraction": {"layout": n, "text_only": n}}` counted
-per document — mirroring the `"extraction"` block Agent 1 already writes into
-`extracted_citations.json`. An unexpected fallback also logs one batch-level
-summary, instead of leaving the evidence scattered across per-PDF warnings.
+same answer. Every entry carries the mode that produced it (`grobid` or
+`pymupdf`), and `ingest_pdfs()` returns `{"extraction": {"grobid": n,
+"pymupdf": n}}` counted per document, mirroring the `"extraction"` block Agent 1
+already writes into `extracted_citations.json`. A fallback also logs one
+batch-level summary instead of leaving the evidence scattered across per-PDF
+warnings. The result also carries `summaries` (attempted, made, failed) for the
+same reason: a model that cannot load must not look like a clean run.
 
 The tag rides on the corpus entries rather than the return type because
-`process_pdf()` runs inside a `ProcessPoolExecutor`, where only the return value
-crosses back from the worker. `upsert_corpus()` reads named keys, so the extra
-one is inert.
-
-A failed model load is remembered too. Because the failure is swallowed into a
-text-only fallback, nothing upstream stopped the *next* document attempting the
-same construction — a config that cannot load made every paper in a batch pay
-for a full Detectron2 build that was guaranteed to fail. The failure is now
-cached alongside successful models and re-raised without retrying.
+`process_pdf()` can run inside a `ProcessPoolExecutor`, where only the return
+value crosses back from the worker. `upsert_corpus()` reads named keys, so the
+extra one is inert.
 
 ---
 

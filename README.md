@@ -161,7 +161,7 @@ the code:
   names is the right one is still yours to judge.
 
 
-The first of those is being fixed: `CITATION_INDEX_VERSION=2` builds a second index from GROBID full text with proper chunks and captions, beside the old one — see `PIPELINE.md`.
+The first of those is being fixed: the current index (v3) is built from GROBID full text with proper chunks and captions, and embeds each figure as an image so a text query can find it — see `PIPELINE.md`. Older indexes stay on disk, read-only.
 
 We will give him depth. Those three are where it goes. Until then he is a very
 well-read undergraduate: he has read everything and understood some of it. He
@@ -184,7 +184,7 @@ Free, forever, miserable. Five commands.
 ```bash
 git clone https://github.com/mukims/research_assistant.git && cd research_assistant
 pip install -e . && pip install -r requirements.txt          # Python 3.10–3.12
-ollama pull gemma4:e2b && ollama pull nomic-embed-text       # the default local models
+ollama pull gemma4:e2b && ollama pull embeddinggemma-2       # the default local models
 docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
 streamlit run app.py
 ```
@@ -197,7 +197,7 @@ streamlit run app.py
   `GEMINI_API_KEY` to use Gemini (`gemini-3.5-flash-lite`) for chat, synthesis
   and judging, or `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` /
   `OPENAI_API_KEY`) for any OpenAI-compatible endpoint. Embeddings stay on
-  Ollama (`nomic-embed-text`) with Gemini, so an existing index keeps working.
+  Ollama (`embeddinggemma-2`, which embeds text and figure images) with Gemini.
 - **Access code.** Set `APP_PASSWORD` and the app asks for it before anything
   else. Unset, it is open.
 - **GROBID** is how Agent 1 reads reference lists. Without it Marvin still

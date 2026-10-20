@@ -44,8 +44,8 @@ The left sidebar provides persistent visibility and control over background oper
 - **Safe Item-Boundary Abort**: Cancellation is checked between discrete items (between individual PDF downloads, PDF parsings, summary calls, and graph nodes). It **never** aborts mid-write or inside an in-flight LLM call, ensuring ChromaDB and BM25 index files are never corrupted.
 
 ### 3. Corpus & System Metrics
-- **Corpus Counters**: Total indexed documents, total chunks, median chunk size (typically ~1,000–1,200 characters in Index v2), and total figure/table captions.
-- **Active Backend Telemetry**: Displays the current inference backend (e.g. Google Gemini `gemini-3.5-flash-lite` or local Ollama `gemma4:e2b`), active embeddings (`nomic-embed-text`), and GROBID service status.
+- **Corpus Counters**: Total indexed documents, total chunks, median chunk size (typically ~1,000–1,200 characters), and total figure/table captions.
+- **Active Backend Telemetry**: Displays the current inference backend (e.g. Google Gemini `gemini-3.5-flash-lite` or local Ollama `gemma4:e2b`), active embeddings (`embeddinggemma-2`), and GROBID service status.
 - **GROBID Service Controls**: Includes buttons to inspect GROBID health, view diagnostics, or restart the container if running in Docker.
 
 ---
@@ -84,7 +84,7 @@ Tab 1 is the dedicated engine for auditing citations in published research paper
 * **Single PDF Upload (Seed Audit Mode)**:
   1. Drag and drop a single `.pdf` research manuscript.
   2. *(Optional)* Enter a **Research topic / question** to guide the final synthesis across the literature (e.g. `mechanical properties of MXene monolayers`). If left blank, the topic is automatically inferred from the paper's title.
-  3. Configure toggles (Audit citations, Synthesize answer, Force re-run, Analyse figures).
+  3. Configure toggles (Audit citations, Synthesize answer, Force re-run).
   4. Click **Audit Citations & Index Paper(s)**.
   5. *What happens:* The system ingests your seed paper, parses its bibliography using GROBID TEI, downloads all open-access references from Unpaywall, Europe PMC, and arXiv, indexes full text into sentence windows, writes a multi-paper synthesis, and executes a full scientific audit of the seed paper's in-text citations.
 * **Batch Upload (Multiple PDFs or ZIP Archive)**:
@@ -101,7 +101,6 @@ Tab 1 is the dedicated engine for auditing citations in published research paper
 | **Audit citations** | `ON` | Evaluates every in-text citation in the uploaded seed paper against the full text of the downloaded references using Rubric V1.6. | Turn `OFF` if you only want literature ingestion and synthesis, skipping citation checking. |
 | **Synthesize answer** | `ON` | Generates a structured Map-Reduce synthesis of the shortlisted papers at the end of the run. | Turn `OFF` if you only want to download and index literature without generating a summary. |
 | **Force re-run** | `OFF` | Bypasses cached seed papers and re-fetches all references from scratch. | Turn `ON` if you modified pipeline parameters or want to refresh cached web downloads. |
-| **Analyse figures** | `OFF` | Passes every figure and table crop through the Vision-Language Model (`gemma4:e2b` or Gemini) to generate descriptive text chunks. | Turn `ON` when visual diagrams or charts are vital for synthesis and chat. *(Note: Adds ~30–60s per figure on CPU).* |
 
 ---
 
@@ -148,7 +147,7 @@ Use Tab 2 to explore a new research topic or hypothesis from scratch without upl
 │ Seed paper URL (optional):                                                             │
 │ [ https://arxiv.org/abs/2401.12345                                                    ]│
 │                                                                                        │
-│ [x] Synthesize answer   [ ] Force re-run   [ ] Analyse figures                         │
+│ [x] Synthesize answer   [ ] Force re-run                                               │
 │ [ Explore Research Idea ]                                                              │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -356,11 +355,11 @@ docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1
 # 5. Set up inference models
 # Option A: Local Ollama (Default CPU)
 ollama pull gemma4:e2b
-ollama pull nomic-embed-text
+ollama pull embeddinggemma-2
 
 # Option B: High-Speed Google Gemini (Recommended)
 export GEMINI_API_KEY="your-gemini-api-key"
-# (Embeddings will continue using nomic-embed-text via Ollama)
+# (Embeddings will continue using embeddinggemma-2 via Ollama)
 
 # 6. Run automated test suite
 CITATION_LOG_FILE=0 pytest tests/ -q
@@ -378,7 +377,7 @@ streamlit run app.py
 | `GEMINI_API_KEY` | *(None)* | Setting this automatically activates high-speed Gemini inference (`gemini-3.5-flash-lite`). |
 | `LLM_BACKEND` | `ollama` (or `openai` if Gemini key set) | Backend engine: `ollama` for local CPU or `openai` for OpenAI/Gemini-compatible endpoints. |
 | `CITATION_CHAT_MODEL` | `gemma4:e2b` (or `gemini-3.5-flash-lite`) | Model used for research chat and literature synthesis. |
-| `CITATION_EMBED_MODEL`| `nomic-embed-text` | Dense embedding model used for vector retrieval. |
-| `CITATION_INDEX_VERSION` | `2` | Index architecture: `2` uses GROBID full-text extraction, sentence-window chunking, and prefixed embeddings. |
+| `CITATION_EMBED_MODEL`| `embeddinggemma-2` | Embedding model for text and figure images. An index records which one built it and refuses a different one. A value pinned in `.env` or `data/.env` overrides this default. |
+| `CITATION_INDEX_VERSION` | `3` | Which index to read and write. `3` is the current one (GROBID full text, sentence-window chunks, figure images, embeddinggemma-2). `1` and `2` are older, read-only indexes and need `CITATION_EMBED_MODEL=nomic-embed-text`. |
 | `CITATION_CHAT_WINDOW_TOKENS` | `32768` (cloud) / `4096` (Ollama) | Maximum token budget Agent 7 uses for conversation fitting before memory folding. |
 | `CITATION_DATA_DIR` | `data/` | Path to persistent storage volume containing ChromaDB, pulled PDFs, and manifests. |

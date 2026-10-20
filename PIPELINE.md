@@ -39,7 +39,7 @@ and the app on `127.0.0.1`. See [deploy/README.md](deploy/README.md).
 | **Agent 0 — Discoverer** | [agent0_discoverer.py](research_assistant/agents/agent0_discoverer.py) | Takes a free-text research idea and searches relevance-ranked indexes in turn — arXiv, then OpenAlex, then Semantic Scholar — downloading the first result whose PDF actually fetches (paywalled publisher links are skipped, not fatal). Saves it into `data/raw/` under a `source_key`-derived name and records the query → paper in `seed_papers.json`. If nothing downloads, `--url` / `discover_from_url()` takes an arXiv or direct-PDF link instead, and `--seed-file` / `discover_from_file()` seeds from a PDF you already have — validating the magic bytes, reading a title / DOI / arXiv id out of it, and filing it under the same `source_key` scheme (falling back to a content hash). With that path the research query is optional: left blank, it is inferred from the paper's title or filename. From here the rest of the pipeline runs unchanged. |
 | **Agent 1 — Extractor** | [agent1_extractor.py](research_assistant/agents/agent1_extractor.py) | Sends every PDF in `data/raw/` to a GROBID server and parses the TEI output into each paper's own metadata plus its full reference list (title, authors, year, DOI, raw string), scoring each consolidated DOI against the printed reference so grey-literature mismatches can be flagged. **When GROBID is unreachable — or returns no reference list for a particular paper — it falls back** to pattern-matching a numbered reference list (`[1]`, `1.`, `(1)`) out of that PDF's `pdftotext` output instead. The fallback is weaker (a raw string per reference, no DOIs, no authors/year), but it keeps the pipeline moving instead of dead-ending on a single external Java service. The path taken — `grobid`, `regex`, or `none` — is recorded per PDF, and a per-run count sits under `"extraction"` in `extracted_citations.json`. |
 | **Agent 2 — Fetcher** | [agent2_fetcher.py](research_assistant/agents/agent2_fetcher.py) | Collapses the references to distinct sources, resolves a DOI per source (trusting Agent 1 when it was confident, otherwise asking Crossref), and tries to download an open-access PDF from Unpaywall → Europe PMC → arXiv. Writes `downloaded.json` / `failed_downloads.json` atomically after every paper, so a crashed run resumes where it stopped. A recorded failure is skipped next run only when it was definitive (paywalled, not indexed, 404); a transient one (dropped connection, rate limit, 5xx, truncated body) is retried. |
-| **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: semantic chunking of the text, embedding into ChromaDB, a rebuild of the BM25 index, and **one LLM summary per paper** into a separate `physics_summaries` collection. With layout detection on, it also crops figures/tables and keeps their captions (a VLM description of each is opt-in, `CITATION_FIGURE_VLM=1`). Tracks what's ingested in `data/ingested.json` so re-runs are cheap. Under `CITATION_INDEX_VERSION=2`: GROBID full-text extraction (PyMuPDF fallback), sentence-window chunks (~1,200 chars, one-sentence overlap, within sections), figure/table captions from GROBID with crops from its coordinates, and — when `--describe-figures` / the Tab 1 toggle is on for the run — a model description of every figure and table, stored as its own `figure_description` chunk marked as generated. Writes to `physics_papers_v2` / `physics_summaries_v2` / `bm25_index_v2.pkl` / `ingested_v2.json`; v1 is never touched. |
+| **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: GROBID full text split into sentence-window chunks, embedded into ChromaDB; a rebuild of the BM25 index; **one LLM summary per paper** into a separate `physics_summaries_v3` collection; and, for every figure and table, a caption chunk plus the cropped image itself embedded by embeddinggemma-2. No model describes the image. Tracks what is ingested in `data/ingested_v3.json` so re-runs are cheap. The result reports summaries that failed and figure images embedded. |
 | **Two-stage retrieval** | [shared/retrieve.py](research_assistant/shared/retrieve.py) | Stage 1: rank papers by summary similarity → LLM gate ("relevant prior work? Y/N") → shortlist. Stage 2: hybrid chunk search restricted to the shortlist. `research_answer()` then reads every shortlisted paper — its own restricted search and, in `map_reduce` mode, its own notes — and synthesises what is established, where the papers differ, and the gap, citing by checkable keys. |
 | **Agent 4 — Assistant** | [agent4_assistant.py](research_assistant/agents/agent4_assistant.py) | Given a single sentence of draft text, runs hybrid search over the corpus and asks the LLM to rewrite the sentence with the correct `\cite{key}` inserted, plus an explanation of why that source supports the claim. |
 
@@ -97,12 +97,10 @@ python watch.py --chat        # watch mode + an interactive research chat in the
 ```
 research_assistant/                the checkout root
 ├── pyproject.toml                 editable install; package + pytest config
-├── requirements.txt               core (UI, orchestration, text-only ingestion)
-├── requirements-layout.txt        optional: detectron2 + torch layout stack
+├── requirements.txt               the install (UI, orchestration, ingestion)
 ├── requirements-test.txt          the light packages CI installs
 ├── .gitignore  .env.example
-├── publaynet_config.yaml
-├── model_final.pth                Detectron2 / PubLayNet checkpoint (optional, gitignored)
+├── model_final.pth                v1 layout checkpoint, no longer read (gitignored; safe to delete)
 │
 ├── app.py                         Streamlit page layout: sidebar, six tabs (also the container entry point)
 ├── orchestrate.py                 LangGraph — one research idea, end to end
@@ -159,8 +157,8 @@ research_assistant/                the checkout root
 │       ├── tokenize.py         NFKC normalisation, English Snowball stemming, stopword removal
 │       ├── extract.py          PDF → Document: GROBID full-text TEI with PyMuPDF fallback
 │       ├── chunking.py         sentence windows packed within sections
-│       ├── figures.py          figure cropping, context formatting and VLM description
-│       ├── ingest_v2.py        PDF → corpus entries: extract, chunk, caption, crop, describe
+│       ├── figures.py          figure crops: the cropping and the naming; the image embedding lives in ingest_v2
+│       ├── ingest_v2.py        PDF → corpus entries: extract, chunk, caption, crop, embed the image
 │       ├── batch_uploader.py   multi-PDF / ZIP upload → direct ingestion (UI tab 1)
 │       ├── seed_audit.py       seed paper's own citations → claims → judged against the corpus (UI tab 1)
 │       ├── claim_text.py       GROBID paragraph → judgeable sentences, citation roles, context
@@ -192,13 +190,14 @@ research_assistant/                the checkout root
     │   └── seed_audits/            cached seed audits, history/ of every run, runs/ (job results)
     ├── pulled_pdfs/                PDFs from Agent 2, or dropped by hand for Agent 6
     ├── drafts/                     drop a .txt here and watch.py runs Agent 5 on it
-    ├── images/                     figure/table crops from ingestion (debug artefact)
     ├── eval/judge/                 evaluation harness results
     ├── logs/
     ├── physics_vectordb/           persistent ChromaDB store
     ├── seed_papers.json  extracted_citations.json  downloaded.json  failed_downloads.json
-    ├── ingested.json  bm25_index.pkl          the v1 index (CITATION_INDEX_VERSION=1)
-    ├── ingested_v2.json  bm25_index_v2.pkl    the v2 index (CITATION_INDEX_VERSION=2)
+    ├── ingested.json  bm25_index.pkl          the v1 index (read-only history; CITATION_INDEX_VERSION=1)
+    ├── ingested_v2.json  bm25_index_v2.pkl    the v2 index, nomic (read-only history; CITATION_INDEX_VERSION=2)
+    ├── ingested_v3.json  bm25_index_v3.pkl    the current index (embeddinggemma-2; CITATION_INDEX_VERSION=3)
+    ├── images/                     figure crops; the source for any future image re-embed, so keep them
     ├── pipeline_status.json(.lock) live progress for the sidebar
     └── ingest.lock                 flock held while a batch is ingesting
 ```
@@ -226,8 +225,10 @@ such as `/data` on a read-only or ephemeral host.
     models in `config.py` pulled.
 
     `LLM_MODEL` and `CHAT_MODEL` default to `gemma4:e2b` and `EMBED_MODEL` to
-    `nomic-embed-text` — both run locally, so `ollama pull gemma4:e2b` and
-    `ollama pull nomic-embed-text` is the whole setup. Override with
+    `embeddinggemma-2` (text and images, one space) — both run locally, so
+    `ollama pull gemma4:e2b` and `ollama pull embeddinggemma-2` is the whole
+    setup. A `CITATION_EMBED_MODEL` set in `.env` or `data/.env` wins over the
+    default, so remove a leftover `nomic-embed-text` there. Override with
     `CITATION_LLM_MODEL` / `CITATION_CHAT_MODEL` / `CITATION_EMBED_MODEL`.
   - `openai` — any OpenAI-compatible endpoint (`OPENAI_BASE_URL`,
     `OPENAI_API_KEY`); `huggingface` for embeddings via `huggingface_hub`.
@@ -245,9 +246,9 @@ such as `/data` on a read-only or ephemeral host.
   **silently**: references then carry no DOIs, authors or years, and Agent 2
   fetches noticeably less. Check the GROBID indicator before concluding the
   pipeline is performing badly.
-- **Layout detection is optional** (`CITATION_LAYOUT_DETECTION=1`). It needs
-  `pip install -r requirements-layout.txt` plus detectron2 from source, and a
-  torch build. With it off, ingestion is text-only (PyMuPDF).
+- **Figures need GROBID.** Its coordinates are where figure crops come from. If
+  GROBID is down, a paper falls back to PyMuPDF text and gets no figures; the
+  run reports how many papers fell back.
 
 ## Usage
 
@@ -319,10 +320,11 @@ streamlit run app.py
   anywhere.
 - Backend: `LLM_BACKEND`, `EMBED_BACKEND`, `OPENAI_BASE_URL`, `OPENAI_API_KEY` /
   `HF_TOKEN`, `CITATION_LLM_MODEL`, `CITATION_CHAT_MODEL`, `CITATION_EMBED_MODEL`.
-- Ingestion: `CITATION_LAYOUT_DETECTION`, `CITATION_FIGURE_VLM`,
-  `CITATION_DETECTRON_WEIGHTS`, `CITATION_DETECTRON_CONFIG`, `CITATION_IMAGES_DIR`,
-  `CITATION_SUMMARY_MODEL`, `CITATION_SUMMARY_MAX_CHARS`.
-- Ingestion v2: `CITATION_INDEX_VERSION` (1 default; 2 selects the v2 index and extractor), `CITATION_CHUNK_TARGET_CHARS`, `CITATION_CHUNK_MAX_CHARS`, `GROBID_FULLTEXT_TIMEOUT`, `CITATION_FIGURE_VLM` (now the default state of the per-run switch).
+- Ingestion: `CITATION_IMAGES_DIR`, `CITATION_FIGURE_CROP_DPI`,
+  `CITATION_SUMMARY_MODEL`, `CITATION_SUMMARY_MAX_CHARS`, `CITATION_CHUNK_TARGET_CHARS`,
+  `CITATION_CHUNK_MAX_CHARS`, `GROBID_FULLTEXT_TIMEOUT`.
+- Index: `CITATION_INDEX_VERSION` (3 default; 1 and 2 open the older read-only indexes and
+  need their own `CITATION_EMBED_MODEL`). A collection records its embedder and refuses a different one.
 - Retrieval: `CITATION_DOC_SELECT_K` (stage-1 shortlist size),
   `CITATION_DOC_GATE` (LLM relevance gate, default on),
   `CITATION_GATE_BATCHED` (batched relevance gate, default on),
@@ -416,7 +418,7 @@ CITATION_LOG_FILE=0 python -m pytest tests/ -v
 
 The suite exercises pure logic — citation parsing, paper naming, extractor
 filing, ingestion bookkeeping, retrieval ranking, task decomposition, and DAG execution — and needs none of the heavy
-stack (ChromaDB, PyTorch, detectron2, an LLM backend, GROBID). CI
+stack (ChromaDB, PyTorch, an LLM backend, GROBID). CI
 (`.github/workflows/tests.yml`) runs it on Python 3.10 and 3.12 and separately
 import-sweeps every module in the package to catch a broken import that no
 test happens to cover.
