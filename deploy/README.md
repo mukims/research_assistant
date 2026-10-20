@@ -86,8 +86,10 @@ python scripts/migrate_to_v3.py --from-data-dir ~/migration-source            # 
 python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --verify    # complete?
 ```
 
-It stops, and says why, if GROBID stops answering or a batch falls back to PyMuPDF (those papers would
-have no figures yet be marked done). Then use `CITATION_DATA_DIR` the same way for the app.
+It stops, and says why, if GROBID stops answering or a batch contains a paper GROBID could not read. Such a
+paper is neither stored nor marked (a text-only copy would end up beside the real one on a retry), so after
+`docker start grobid` the same command picks up exactly where it stopped. Then use `CITATION_DATA_DIR` the
+same way for the app.
 
 **Keep the figure crops** (`<data>/images/`): a future embedder re-embeds them from there.
 

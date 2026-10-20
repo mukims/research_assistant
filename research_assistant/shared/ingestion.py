@@ -506,6 +506,7 @@ def ingest_pdfs(
     skip_ingested: bool = True,
     rebuild_index: bool = True,
     log_prefix: str = "",
+    require_grobid: bool = False,
 ) -> dict:
     """Ingest a batch of PDFs: process → upsert → mark → rebuild the BM25 index.
 
@@ -534,10 +535,10 @@ def ingest_pdfs(
         is the list of paths that could not be read.
     """
     with _ingest_lock():
-        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
+        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, require_grobid)
 
 
-def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix) -> dict:
+def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, require_grobid=False) -> dict:
     """ingest_pdfs()'s body. Call it through ingest_pdfs(), which holds the lock."""
     if not isinstance(pdfs, dict):
         pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
@@ -647,6 +648,19 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
 
         result["processed"] = len(candidates)
         result["scanned_or_empty"] = scanned_or_empty
+
+        if require_grobid:
+            # A migration must not keep a paper GROBID could not read: its PyMuPDF text would sit in
+            # the index beside the GROBID chunks a later run adds. Drop it, report it as failed so it
+            # is not marked, and let the next run retry it.
+            fell_back = {e["document"] for e in corpus if e.get("extraction") == "pymupdf" and e.get("document")}
+            corpus = [e for e in corpus if e.get("document") not in fell_back]
+            result["fell_back"] = sorted(fell_back)
+            result["failed"].extend(p for p in candidates if pdf_key(p) in fell_back and p not in result["failed"])
+            result["processed"] = len(candidates) - len(fell_back)
+            if fell_back:
+                logger.warning("%s%d document(s) could not be read by GROBID and were not stored: %s",
+                               log_prefix, len(fell_back), ", ".join(sorted(fell_back)[:5]))
 
         # How the batch was actually extracted, counted per document rather than
         # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for

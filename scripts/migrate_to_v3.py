@@ -248,12 +248,12 @@ def grobid_alive() -> bool:
 def run_batches(todo, found, ingest, alive, batch_size, say=print):
     """Ingest `todo` keys batch by batch. Returns (totals, stop reason or "").
 
-    A paper GROBID could not read falls back to PyMuPDF and is still marked
-    done, with no figures, and a re-run skips it. So GROBID is checked before
-    every batch, and the run stops at the first batch that fell back.
+    `ingest` is called with require_grobid, so a paper GROBID could not read is neither stored nor
+    marked and a re-run retries it. GROBID is checked before every batch, and the run stops at the
+    first batch that lost a paper, since GROBID is then probably down.
     """
     totals = {"processed": 0, "inserted": 0, "failed": 0, "summaries_failed": 0, "figure_images": 0,
-              "grobid": 0, "pymupdf": 0}
+              "grobid": 0, "pymupdf": 0, "fell_back": 0}
     t0 = time.time()
     for i in range(0, len(todo), batch_size):
         keys = todo[i : i + batch_size]
@@ -268,9 +268,11 @@ def run_batches(todo, found, ingest, alive, batch_size, say=print):
         for mode, n in (result.get("extraction") or {}).items():
             totals[mode] = totals.get(mode, 0) + n
         say(f"[{min(i + batch_size, len(todo))}/{len(todo)}] {time.time() - t0:.0f}s  {totals}")
-        if (result.get("extraction") or {}).get("pymupdf"):
-            return totals, (f"{result['extraction']['pymupdf']} paper(s) in the batch {keys[0]} .. {keys[-1]} "
-                            "fell back to PyMuPDF (no figures)")
+        if result.get("fell_back"):
+            totals["fell_back"] += len(result["fell_back"])
+            return totals, (f"{len(result['fell_back'])} paper(s) in the batch {keys[0]} .. {keys[-1]} could not "
+                            f"be read by GROBID ({', '.join(result['fell_back'][:3])}); they were not stored or marked, "
+                            "so a re-run retries them")
     return totals, ""
 
 
@@ -379,7 +381,7 @@ def main(argv=None) -> int:
     try:
         totals, stopped = run_batches(
             todo, found,
-            lambda paths: ingest_pdfs(labeled(paths, by_base), workers=1, rebuild_index=False),
+            lambda paths: ingest_pdfs(labeled(paths, by_base), workers=1, rebuild_index=False, require_grobid=True),
             grobid_alive, args.batch_size,
         )
     finally:
@@ -387,9 +389,8 @@ def main(argv=None) -> int:
         rebuild_bm25()
     print(f"\ndone: {totals}")
     if stopped:
-        print(f"\nSTOPPED: {stopped}.\nThe papers before that batch are complete. Papers the batch lost to PyMuPDF "
-              "are marked done with text only: fix GROBID, then remove those keys from "
-              f"{os.path.basename(config.INGESTED_MANIFEST_PATH)} (and tell me, a repair option is a small addition).")
+        print(f"\nSTOPPED: {stopped}.\nEverything before that batch is complete and nothing partial was kept. "
+              "Start GROBID (docker start grobid), check `docker logs grobid`, and run the same command again.")
         return 3
     if totals["failed"] or totals["summaries_failed"]:
         print("Papers that failed outright are not marked, and a re-run retries them. A paper that lost its summary "

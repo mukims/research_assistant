@@ -196,13 +196,13 @@ class TestRunBatches(unittest.TestCase):
     FOUND = {f"p{i}.pdf": f"/x/p{i}.pdf" for i in range(5)}
     TODO = sorted(FOUND)
 
-    def _ingest(self, calls, pymupdf_on=None):
+    def _ingest(self, calls, fell_back_on=None):
         def ingest(paths):
             calls.append(list(paths))
-            fell = 1 if pymupdf_on is not None and len(calls) == pymupdf_on else 0
-            return {"processed": len(paths), "inserted": 2 * len(paths), "failed": [],
-                    "figure_images": len(paths), "summaries": {"failed": 0},
-                    "extraction": {"grobid": len(paths) - fell, "pymupdf": fell}}
+            fell = [paths[0]] if fell_back_on is not None and len(calls) == fell_back_on else []
+            return {"processed": len(paths) - len(fell), "inserted": 2 * len(paths), "failed": list(fell),
+                    "figure_images": len(paths), "summaries": {"failed": 0}, "fell_back": [os.path.basename(p) for p in fell],
+                    "extraction": {"grobid": len(paths) - len(fell), "pymupdf": 0}}
         return ingest
 
     def test_every_batch_runs_when_grobid_stays_up(self):
@@ -221,14 +221,15 @@ class TestRunBatches(unittest.TestCase):
         self.assertIn("p2.pdf", stopped)
         self.assertEqual(totals["processed"], 2)
 
-    def test_the_first_batch_that_fell_back_to_pymupdf_stops_the_run(self):
+    def test_the_first_batch_with_a_paper_grobid_could_not_read_stops_the_run(self):
         calls = []
-        totals, stopped = mig.run_batches(self.TODO, self.FOUND, self._ingest(calls, pymupdf_on=2), lambda: True, 2,
+        totals, stopped = mig.run_batches(self.TODO, self.FOUND, self._ingest(calls, fell_back_on=2), lambda: True, 2,
                                           say=lambda *_: None)
         self.assertEqual(len(calls), 2)
-        self.assertIn("fell back to PyMuPDF", stopped)
-        self.assertIn("p2.pdf .. p3.pdf", stopped)
-        self.assertEqual(totals["pymupdf"], 1)
+        self.assertIn("could not be read by GROBID", stopped)
+        self.assertIn("p2.pdf", stopped)
+        self.assertIn("not stored", stopped)
+        self.assertEqual(totals["fell_back"], 1)
 
 
 if __name__ == "__main__":

@@ -285,6 +285,56 @@ class TestIngestReportsExtractionModes(IngestPdfsCase):
         self.assertEqual(result["extraction"], {"grobid": 0, "pymupdf": 1})
 
 
+class TestRequireGrobid(IngestPdfsCase):
+    """A paper GROBID could not read falls back to PyMuPDF text with no figures. In a migration it must
+    not be stored (a later GROBID run would add a second copy beside it) and must not be marked done."""
+
+    def _setup(self, fell_back=("b",)):
+        self.pdfs = {n: _touch(self.tmp.name, f"{n}.pdf") for n in ("a", "b", "c")}
+        seen = {"corpus": None}
+
+        def fake_process(path, label, *a, **k):
+            key = ing.pdf_key(path)
+            mode = "pymupdf" if key.split(".")[0] in fell_back else "grobid"
+            return [{"content": f"{key}-text", "document": key, "extraction": mode, "type": "text_chunk"}]
+
+        def fake_upsert(corpus):
+            seen["corpus"] = list(corpus)
+            return len(corpus)
+
+        for target, repl in (("process_pdf", fake_process), ("upsert_corpus", fake_upsert)):
+            patcher = patch.object(ing, target, repl)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return seen
+
+    def test_a_fallback_is_neither_stored_nor_marked_and_is_reported(self):
+        seen = self._setup()
+        result = ing.ingest_pdfs(list(self.pdfs.values()), rebuild_index=False, require_grobid=True)
+        self.assertEqual({e["document"] for e in seen["corpus"]}, {"a.pdf", "c.pdf"})
+        self.assertEqual(result["fell_back"], ["b.pdf"])
+        self.assertEqual([os.path.basename(p) for p in result["failed"]], ["b.pdf"])
+        self.assertEqual(sorted(manifest_mod.load()), ["a.pdf", "c.pdf"])
+        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 0})
+
+    def test_a_second_run_retries_only_what_fell_back(self):
+        self._setup()
+        ing.ingest_pdfs(list(self.pdfs.values()), rebuild_index=False, require_grobid=True)
+        self.ingested = set(manifest_mod.load())          # what the real get_ingested_documents() reads
+        self.processed.clear()
+        self._setup(fell_back=())
+        result = ing.ingest_pdfs(list(self.pdfs.values()), rebuild_index=False, require_grobid=True)
+        self.assertEqual((result["processed"], result["skipped"], result.get("fell_back")), (1, 2, []))
+        self.assertEqual(sorted(manifest_mod.load()), ["a.pdf", "b.pdf", "c.pdf"])
+
+    def test_by_default_a_fallback_is_stored_as_before(self):
+        seen = self._setup()
+        result = ing.ingest_pdfs(list(self.pdfs.values()), rebuild_index=False)
+        self.assertEqual({e["document"] for e in seen["corpus"]}, {"a.pdf", "b.pdf", "c.pdf"})
+        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 1})
+        self.assertNotIn("fell_back", result)
+
+
 class TestConcurrentIngestion(IngestPdfsCase):
     """Two ingests must never touch the corpus at the same time.
 
