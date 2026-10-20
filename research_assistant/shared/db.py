@@ -33,6 +33,27 @@ def _cache_key():
     return (VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime)
 
 
+def embedder_record(embeddings) -> dict:
+    """Collection metadata naming the embedder, and its build where it can say."""
+    record = {"embedder": EMBED_MODEL}
+    build = getattr(embeddings, "build_id", lambda: None)()
+    if build:
+        record["embedder_build"] = build
+    return record
+
+
+_build_cache: dict = {}
+
+
+def _current_build():
+    """The configured embedder's build id, looked up once per process."""
+    if "build" not in _build_cache:
+        from research_assistant.shared.llm import get_embeddings
+
+        _build_cache["build"] = getattr(get_embeddings(), "build_id", lambda: None)()
+    return _build_cache["build"]
+
+
 def check_embedder(collection) -> None:
     """Refuse a collection built with a different embedder than the configured one.
 
@@ -48,6 +69,15 @@ def check_embedder(collection) -> None:
             f"CITATION_EMBED_MODEL is {EMBED_MODEL!r}. Set CITATION_EMBED_MODEL={stored} to "
             "read it, or build a new index version for the new embedder."
         )
+    stored_build = (getattr(collection, "metadata", None) or {}).get("embedder_build")
+    if stored_build:
+        current = _current_build()
+        if current and current != stored_build:
+            logger.warning(
+                "Collection %r was embedded with build %s of %s but this machine has build %s. "
+                "Same name, different weights or quantisation: retrieval will be slightly off. "
+                "Pull the same build, or re-embed.", collection.name, stored_build, EMBED_MODEL, current,
+            )
 
 
 def clear_search_cache() -> None:

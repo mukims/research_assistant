@@ -334,6 +334,24 @@ class _GemmaEmbeddings:
     def embed_query(self, text):
         return self._post([GEMMA_QUERY_PREFIX + text])["embeddings"][0]
 
+    def build_id(self):
+        """Short digest of the local model build, or None when Ollama will not say.
+
+        `embeddinggemma-2:latest` is a moving name: a machine that pulled it later,
+        or a different quantisation, embeds slightly differently. Vectors from one
+        build queried with another degrade retrieval without any error."""
+        import requests
+
+        try:
+            tags = requests.get(f"{_ollama_host()}/api/tags", timeout=5).json()
+        except Exception:                                      # noqa: BLE001
+            return None
+        for entry in tags.get("models", []):
+            name = entry.get("name", "")
+            if name == self._model or name.startswith(self._model + ":"):
+                return (entry.get("digest") or "")[:12] or None
+        return None
+
     def embed_image(self, image_path):
         import base64
 

@@ -238,5 +238,126 @@ class TestLocalScript(ScriptHarness):
         self.assertIn("usage", result.stderr)
 
 
+
+class TestMigrateSetupScript(ScriptHarness):
+    """deploy/migrate_setup.sh, copied into a throwaway project root so the real .env is never read."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "project"
+        (self.root / "deploy").mkdir(parents=True)
+        shutil.copy(DEPLOY / "migrate_setup.sh", self.root / "deploy" / "migrate_setup.sh")
+        (self.root / "requirements.txt").write_text("# none\n")
+        self.venv = self.tmp / "venv"
+        stubs = {
+            # The interpreter: `-m venv DIR` makes DIR/bin/{python,pip} stubs; version checks pass unless py313 is set.
+            "python": r'''
+                echo "python $*" >> "$CALLS"
+                if [ "$1" = "-V" ]; then echo "Python 3.12.1"; exit 0; fi
+                if [ "$1" = "-c" ]; then [ -e "$STATE/py313" ] && exit 1; exit 0; fi
+                if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+                  mkdir -p "$3/bin"
+                  printf '#!/usr/bin/env bash\necho "venvpython $*" >> "$CALLS"\n[ "$1" = "-c" ] && [ ! -e "$STATE/packages" ] && exit 1\nexit 0\n' > "$3/bin/python"
+                  printf '#!/usr/bin/env bash\necho "pip $*" >> "$CALLS"\ntouch "$STATE/packages"\nexit 0\n' > "$3/bin/pip"
+                  chmod +x "$3/bin/python" "$3/bin/pip"
+                fi
+                exit 0
+            ''',
+            "ollama": r'''
+                echo "ollama $*" >> "$CALLS"
+                [ "$1" = "pull" ] && touch "$STATE/model"
+                exit 0
+            ''',
+            "curl": r'''
+                echo "curl $*" >> "$CALLS"
+                case "$*" in
+                  *"/api/isalive"*) [ -e "$STATE/grobid_alive" ] ;;
+                  *"/api/version"*) [ -e "$STATE/ollama" ] && printf '{"version":"%s"}' "$(cat "$STATE/ollama")" ;;
+                  *"/api/tags"*)    [ -e "$STATE/ollama" ] || exit 22
+                                    if [ -e "$STATE/model" ]; then echo '{"models":[{"name":"embeddinggemma-2:latest","digest":"eaff2253e2ba0000"}]}'; else echo '{"models":[]}'; fi ;;
+                  *)                exit 0 ;;
+                esac
+            ''',
+        }
+        for name, body in stubs.items():
+            path = self.bin / name
+            path.write_text("#!/usr/bin/env bash\n" + textwrap.dedent(body).strip() + "\n")
+            path.chmod(0o755)
+        self.flag("ollama", "0.40.5")
+
+    def setup(self, *args, **env):
+        return self.run_script(self.root / "deploy" / "migrate_setup.sh", "--venv", str(self.venv), *args,
+                               CITATION_DATA_DIR=str(self.tmp / "data"), **env)
+
+    def test_a_bare_machine_gets_a_venv_the_model_and_a_loopback_only_grobid(self):
+        self.flag("start_works")
+        result = self.setup()
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        self.assertEqual(len(self.calls_starting("pip install -q -r")), 1)
+        self.assertEqual(self.calls_starting("ollama pull"), ["ollama pull embeddinggemma-2"])
+        (run,) = self.calls_starting("docker run")
+        self.assertIn("-p 127.0.0.1:8070:8070", run)
+        self.assertIn("--name grobid", run)
+        self.assertTrue(run.endswith("grobid/grobid:0.8.1"), run)
+        self.assertIn("ready. Next:", result.stdout)
+
+    def test_a_prepared_machine_is_left_alone(self):
+        self.flag("model")
+        self.flag("grobid_alive")
+        self.flag("packages")
+        (self.venv / "bin").mkdir(parents=True)
+        for n in ("python", "pip"):
+            (self.venv / "bin" / n).write_text(f"#!/usr/bin/env bash\necho \"{n} $*\" >> \"$CALLS\"\nexit 0\n")
+            (self.venv / "bin" / n).chmod(0o755)
+        result = self.setup()
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        self.assertEqual(self.calls_starting("ollama pull"), [])
+        self.assertEqual(self.calls_starting("docker"), [])
+        self.assertEqual(self.calls_starting("pip"), [])
+
+    def test_check_only_changes_nothing(self):
+        result = self.setup("--check-only")
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        self.assertFalse(self.venv.exists())
+        self.assertEqual(self.calls_starting("ollama pull"), [])
+        self.assertEqual(self.calls_starting("docker run"), [])
+        self.assertEqual(self.calls_starting("docker start"), [])
+        self.assertIn("would:", result.stdout)
+
+    def test_an_ollama_older_than_the_model_needs_is_refused(self):
+        self.flag("ollama", "0.35.9")
+        result = self.setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("older than 0.36.0", result.stderr)
+        self.assertEqual(self.calls_starting("ollama pull"), [])
+
+    def test_ollama_that_is_not_running_gets_a_clear_message(self):
+        (self.state / "ollama").unlink()
+        result = self.setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not answering", result.stderr)
+
+    def test_python_313_is_refused(self):
+        self.flag("py313")
+        result = self.setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("3.10-3.12", result.stderr)
+
+    def test_a_pinned_embedder_in_the_data_dir_env_is_warned_about(self):
+        (self.tmp / "data").mkdir()
+        (self.tmp / "data" / ".env").write_text("CITATION_EMBED_MODEL=nomic-embed-text\n")
+        self.flag("model"); self.flag("grobid_alive"); self.flag("packages")
+        result = self.setup("--skip-grobid")
+        self.assertIn("overrides the embeddinggemma-2 default", result.stderr)
+
+    def test_no_summary_model_is_warned_about(self):
+        self.flag("model")
+        result = self.setup("--skip-grobid")
+        self.assertIn("no summary model", result.stderr)
+
+    def test_an_unknown_option_is_refused(self):
+        self.assertNotEqual(self.setup("--nope").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

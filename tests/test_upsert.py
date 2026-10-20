@@ -235,7 +235,8 @@ class TestPrechunkedEntries(UpsertTestCase):
             return real
         with patch.object(chroma, "PersistentClient", client):
             ing.upsert_corpus([self._chunk("a.pdf", "body text " * 5)])
-        self.assertEqual(recorded[ing.COLLECTION_NAME]["embedder"], ing.EMBED_MODEL)
+        from research_assistant.config import EMBED_MODEL
+        self.assertEqual(recorded[ing.COLLECTION_NAME]["embedder"], EMBED_MODEL)
 
     def test_a_collection_built_with_another_embedder_is_refused(self):
         self.collection.metadata = {"embedder": "some-other-model"}

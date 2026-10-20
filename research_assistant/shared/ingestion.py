@@ -44,7 +44,6 @@ from research_assistant.config import (
     VECTORDB_PATH,
     COLLECTION_NAME,
     SUMMARY_COLLECTION_NAME,
-    EMBED_MODEL,
     BM25_INDEX_PATH,
     INDEX_VERSION,
     CHUNK_MIN_LENGTH,
@@ -57,7 +56,7 @@ from research_assistant.config import (
 from research_assistant.prompts import DOCUMENT_SUMMARY
 from research_assistant.shared.atomic import atomic_write
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.db import check_embedder, get_max_chunk_index
+from research_assistant.shared.db import check_embedder, embedder_record, get_max_chunk_index
 from research_assistant.shared import manifest
 from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
 from research_assistant.shared import pipeline_status
@@ -150,10 +149,11 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
     import chromadb
     from research_assistant.shared.llm import chat, get_embeddings
 
+    embeddings = get_embeddings()
     client = chromadb.PersistentClient(path=VECTORDB_PATH)
     col = client.get_or_create_collection(
         name=SUMMARY_COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine", "embedder": EMBED_MODEL},
+        metadata={"hnsw:space": "cosine", **embedder_record(embeddings)},
     )
     check_embedder(col)
 
@@ -163,7 +163,6 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
         if m and m.get("document"):
             have.add(m["document"])
 
-    embeddings = get_embeddings()
     made = 0
     failed = 0
     last_error = ""
@@ -283,7 +282,7 @@ def upsert_corpus(corpus: list[dict]):
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
     collection = chroma_client.get_or_create_collection(
         name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine", "embedder": EMBED_MODEL},
+        metadata={"hnsw:space": "cosine", **embedder_record(embeddings)},
     )
     check_embedder(collection)
 

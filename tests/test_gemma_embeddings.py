@@ -77,6 +77,54 @@ class GemmaEmbeddingTests(unittest.TestCase):
             self.assertEqual(llm._ollama_host(), "http://box:1")
 
 
+class BuildIdTests(unittest.TestCase):
+    def _tags(self, payload, fail=False):
+        def fake_get(url, timeout=None):
+            if fail:
+                raise OSError("down")
+            return FakeResponse(payload)
+        patcher = patch("requests.get", fake_get)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_build_is_the_short_digest_of_the_tagged_model(self):
+        self._tags({"models": [{"name": "nomic-embed-text:latest", "digest": "aaaa" * 16},
+                               {"name": "embeddinggemma-2:latest", "digest": "eaff2253e2ba" + "0" * 52}]})
+        self.assertEqual(llm._GemmaEmbeddings("embeddinggemma-2").build_id(), "eaff2253e2ba")
+
+    def test_build_is_none_when_ollama_will_not_say(self):
+        self._tags({}, fail=True)
+        self.assertIsNone(llm._GemmaEmbeddings("embeddinggemma-2").build_id())
+        self._tags({"models": []})
+        self.assertIsNone(llm._GemmaEmbeddings("embeddinggemma-2").build_id())
+
+
+class EmbedderRecordTests(unittest.TestCase):
+    def test_the_record_carries_the_model_and_the_build_when_known(self):
+        with patch.object(db, "EMBED_MODEL", "embeddinggemma-2"):
+            emb = types.SimpleNamespace(build_id=lambda: "eaff2253e2ba")
+            self.assertEqual(db.embedder_record(emb), {"embedder": "embeddinggemma-2", "embedder_build": "eaff2253e2ba"})
+            self.assertEqual(db.embedder_record(types.SimpleNamespace(build_id=lambda: None)),
+                             {"embedder": "embeddinggemma-2"})
+            self.assertEqual(db.embedder_record(object()), {"embedder": "embeddinggemma-2"})
+
+    def test_a_different_build_warns_but_does_not_refuse(self):
+        coll = types.SimpleNamespace(name="c", metadata={"embedder": "embeddinggemma-2", "embedder_build": "aaaaaaaaaaaa"})
+        with patch.object(db, "EMBED_MODEL", "embeddinggemma-2"), patch.object(db, "_current_build", lambda: "bbbbbbbbbbbb"):
+            with self.assertLogs("db", level="WARNING") as logs:
+                db.check_embedder(coll)
+        self.assertIn("aaaaaaaaaaaa", logs.output[0])
+        self.assertIn("bbbbbbbbbbbb", logs.output[0])
+
+    def test_the_same_build_or_an_unknown_one_is_silent(self):
+        coll = types.SimpleNamespace(name="c", metadata={"embedder": "embeddinggemma-2", "embedder_build": "aaaaaaaaaaaa"})
+        with patch.object(db, "EMBED_MODEL", "embeddinggemma-2"):
+            for current in ("aaaaaaaaaaaa", None):
+                with patch.object(db, "_current_build", lambda c=current: c):
+                    with self.assertNoLogs("db", level="WARNING"):
+                        db.check_embedder(coll)
+
+
 class EmbedderIdentityTests(unittest.TestCase):
     def _collection(self, metadata):
         return types.SimpleNamespace(metadata=metadata, name="c")

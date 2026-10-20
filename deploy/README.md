@@ -35,3 +35,60 @@ deploy/local.sh down            # stop the GROBID container
 
 `tests/test_deploy_scripts.py` runs `local.sh` under bash against stubbed `docker`,
 `curl` and Python; nothing real is started or removed.
+
+## Migrating to index v3 on another machine
+
+The migration (`scripts/migrate_to_v3.py`) re-ingests every paper the v1 and v2 manifests name. It
+runs anywhere with Python 3.10-3.12, Ollama 0.36+, Docker (for GROBID) and a summary model; it reads
+your old data and writes only the new index. The time is an estimate, not a measurement: about 50 s per paper with a fresh GROBID call in trials, much less where a usable
+GROBID output is reused, so plan on several hours for 874 papers. It resumes where it stopped.
+
+**1. Get the code.** Check out the `feat/v3-gemma-images` branch (or the merged result).
+
+**2. Copy the old data, inputs only** (2.46 GB; no Chroma store, no `.env`):
+
+```bash
+rsync -a --prune-empty-dirs \
+  --include='/ingested.json' --include='/ingested_v2.json' --include='/downloaded.json' \
+  --include='/pulled_pdfs/***' --include='/raw/***' --include='/raw_pdfs/***' \
+  --exclude='*' data/ USER@HOST:migration-source/
+```
+
+`downloaded.json` carries each paper's citation label (the `\cite{}` key); without it papers are
+labelled by file name. `raw/grobid_output/` lets the migration reuse GROBID output that has figure
+boxes and re-read the rest.
+
+**3. Prepare the machine** (installs and starts, never deletes; `--check-only` shows what is missing):
+
+```bash
+deploy/migrate_setup.sh --check-only
+deploy/migrate_setup.sh                       # venv + requirements, Ollama model, GROBID on 127.0.0.1:8070
+source .venv-migrate/bin/activate
+```
+
+It does not choose a summary model for you: put `GEMINI_API_KEY=...` in `.env`, or `ollama pull gemma4:e2b`.
+Do not set `CITATION_EMBED_MODEL` in `.env` or `<data>/.env`; it overrides the `embeddinggemma-2` default
+and the migration refuses to start.
+
+**4. Run it**, with the new index written under `CITATION_DATA_DIR`:
+
+```bash
+export CITATION_DATA_DIR=$HOME/marvin-data PYTHONPATH=.
+python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --dry-run   # counts, labels, GROBID cache
+python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --limit 3   # trial
+python scripts/migrate_to_v3.py --from-data-dir ~/migration-source            # everything
+python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --verify    # complete?
+```
+
+It stops, and says why, if GROBID stops answering or a batch falls back to PyMuPDF (those papers would
+have no figures yet be marked done). Then use `CITATION_DATA_DIR` the same way for the app.
+
+**Keep the figure crops** (`<data>/images/`): a future embedder re-embeds them from there.
+
+**Same model build everywhere.** `embeddinggemma-2:latest` is a moving name. A new index records the
+build digest of the machine that made it and warns when another machine's build differs, because
+vectors from one build queried with another retrieve slightly worse without any error. The setup script
+prints the digest; pull the same build on any machine that will query this index.
+
+`tests/test_deploy_scripts.py` also runs `migrate_setup.sh` under stubs (a copy in a throwaway project root).
+

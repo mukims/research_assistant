@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,6 +50,116 @@ class TestFindPdfs(unittest.TestCase):
             _touch(os.path.join(d, "two", "p.pdf"))
             found, _ = mig.find_pdfs(["p.pdf"], [os.path.join(d, "one"), os.path.join(d, "two")])
         self.assertIn(os.sep + "one" + os.sep, found["p.pdf"])
+
+
+class TestLabels(unittest.TestCase):
+    """A paper's label becomes citation_source on every chunk and so the cite key:
+    it must come from the SOURCE data directory, not the (possibly empty) target."""
+
+    def _source(self, d, records):
+        json.dump(records, open(os.path.join(d, "downloaded.json"), "w"))
+
+    def test_title_from_the_source_manifest_by_file_name_whatever_the_recorded_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._source(d, {"doi:10.1/x": {"key": "doi:10.1/x", "path": "/home/user/data/pulled_pdfs/doi_10.1_x.pdf",
+                                            "provider": "unpaywall", "fetched_at": "2026-09-10T20:05:57Z",
+                                            "title": "A Real Title"}})
+            by_base = mig.label_map(d)
+        self.assertEqual(by_base["doi_10.1_x.pdf"], "A Real Title")
+        self.assertEqual(mig.labeled(["/elsewhere/doi_10.1_x.pdf", "/elsewhere/seed.pdf"], by_base),
+                         {"/elsewhere/doi_10.1_x.pdf": "A Real Title", "/elsewhere/seed.pdf": "seed"})
+
+    def test_no_manifest_means_filename_stems(self):
+        with tempfile.TemporaryDirectory() as d:
+            by_base = mig.label_map(d)
+        self.assertEqual(by_base, {})
+        self.assertEqual(mig.labeled(["/x/a.b.pdf"], by_base), {"/x/a.b.pdf": "a.b"})
+
+
+class TestTeiCache(unittest.TestCase):
+    def test_finds_any_suffix_for_the_pdfs_own_file_stem(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "My Paper.fulltext.tei.xml"))
+            self.assertTrue(mig.tei_for(d, "/x/My Paper.pdf").endswith("My Paper.fulltext.tei.xml"))
+            self.assertIsNone(mig.tei_for(d, "/x/other.pdf"))
+
+    def test_seeding_copies_only_what_is_missing_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            for n in ("a", "b"):
+                open(os.path.join(src, f"{n}.grobid.tei.xml"), "w").write("source")
+            open(os.path.join(dst, "b.grobid.tei.xml"), "w").write("keep me")
+            copied, had, uncached = mig.seed_tei_cache(["/x/a.pdf", "/x/b.pdf", "/x/c.pdf"], src, dst)
+            self.assertEqual((copied, had, uncached), (1, 1, 1))
+            self.assertEqual(open(os.path.join(dst, "a.grobid.tei.xml")).read(), "source")
+            self.assertEqual(open(os.path.join(dst, "b.grobid.tei.xml")).read(), "keep me")
+
+    def test_a_tei_with_figures_but_no_boxes_is_not_copied_or_counted(self):
+        stale = b'<TEI><figure xml:id="fig_0"><head>Fig</head></figure></TEI>'
+        usable = b'<TEI><figure xml:id="fig_0" coords="1,2,3,4,5"><head>Fig</head></figure></TEI>'
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            open(os.path.join(src, "old.grobid.tei.xml"), "wb").write(stale)
+            open(os.path.join(src, "new.grobid.tei.xml"), "wb").write(usable)
+            copied, had, uncached = mig.seed_tei_cache(["/x/old.pdf", "/x/new.pdf"], src, dst)
+            self.assertEqual((copied, had, uncached), (1, 0, 1))
+            self.assertEqual(os.listdir(dst), ["new.grobid.tei.xml"])
+
+    def test_same_source_and_target_copies_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "a.grobid.tei.xml"))
+            self.assertEqual(mig.seed_tei_cache(["/x/a.pdf", "/x/c.pdf"], d, d), (0, 1, 1))
+
+
+class TestStaleIndex(unittest.TestCase):
+    def test_a_missing_index_or_one_older_than_the_manifest_is_stale(self):
+        with tempfile.TemporaryDirectory() as d:
+            bm25, man = os.path.join(d, "bm25.pkl"), os.path.join(d, "ingested_v3.json")
+            self.assertFalse(mig.bm25_is_stale(bm25, man))          # nothing ingested yet
+            _touch(man)
+            self.assertTrue(mig.bm25_is_stale(bm25, man))           # papers, no index: a hard kill
+            _touch(bm25)
+            os.utime(man, (os.path.getmtime(bm25) + 10,) * 2)
+            self.assertTrue(mig.bm25_is_stale(bm25, man))
+            os.utime(man, (os.path.getmtime(bm25) - 10,) * 2)
+            self.assertFalse(mig.bm25_is_stale(bm25, man))
+
+
+class TestVersionAndSummaryChecks(unittest.TestCase):
+    def test_ollama_older_than_the_embedder_needs_is_a_problem(self):
+        self.assertIsNone(mig.ollama_version_problem("0.40.5"))
+        self.assertIsNone(mig.ollama_version_problem("0.36.0"))
+        self.assertIn("0.36", mig.ollama_version_problem("0.35.9"))
+        self.assertIn("version", mig.ollama_version_problem("garbage"))
+
+    def test_a_summary_model_that_does_not_answer_is_a_problem(self):
+        def broken(*a, **k):
+            raise RuntimeError("model failed to load")
+        self.assertIn("model failed to load", mig.summary_model_problem(broken))
+        self.assertIsNone(mig.summary_model_problem(lambda *a, **k: types.SimpleNamespace(content="ok")))
+        self.assertIn("empty", mig.summary_model_problem(lambda *a, **k: types.SimpleNamespace(content=" ")))
+
+
+class TestVerifyCounts(unittest.TestCase):
+    def _meta(self, doc, type_):
+        return {"document": doc, "type": type_}
+
+    def test_reports_what_is_missing_and_what_is_only_worth_a_note(self):
+        metas = ([self._meta("a.pdf", "text_chunk")] * 3 + [self._meta("a.pdf", "caption")] * 2
+                 + [self._meta("a.pdf", "figure_image")] * 2
+                 + [self._meta("b.pdf", "text_chunk")]
+                 + [self._meta("c.pdf", "caption")])             # c: a caption, no text, no image
+        r = mig.verify_counts(metas, manifest_keys={"a.pdf", "b.pdf", "c.pdf", "d.pdf"},
+                              summary_docs={"a.pdf", "b.pdf"}, expected_keys={"a.pdf", "b.pdf", "c.pdf", "d.pdf", "e.pdf"})
+        self.assertEqual(r["types"], {"text_chunk": 4, "caption": 3, "figure_image": 2})
+        self.assertEqual(r["not_migrated"], ["e.pdf"])
+        self.assertEqual(r["no_summary"], ["c.pdf", "d.pdf"])
+        self.assertEqual(r["no_text"], ["c.pdf", "d.pdf"])
+        self.assertEqual(r["figures_without_image"], 1)
+        self.assertEqual(r["papers_with_chunks"], 3)
+
+    def test_a_complete_migration_has_no_problems(self):
+        metas = [self._meta("a.pdf", "text_chunk"), self._meta("a.pdf", "caption"), self._meta("a.pdf", "figure_image")]
+        r = mig.verify_counts(metas, {"a.pdf"}, {"a.pdf"}, {"a.pdf"})
+        self.assertEqual((r["not_migrated"], r["no_summary"], r["no_text"], r["figures_without_image"]), ([], [], [], 0))
 
 
 class TestRunBatches(unittest.TestCase):

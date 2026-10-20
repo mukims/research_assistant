@@ -178,6 +178,7 @@ research_assistant/                the checkout root
 │   ├── evaluate_judge.py           judge / verifier evaluation on the held-out set; --compare two runs
 │   ├── evaluate_citer.py           citer evaluation against the seed papers' own citations
 │   ├── judge_harvest.py  judge_label.py  judge_bench.py
+│   ├── migrate_to_v3.py            re-ingest every paper the v1/v2 manifests name into index v3 (runbook in its docstring)
 │   ├── index_stats.py              chunk-length distribution of the active index
 │   └── synth_compare.py            research_answer in both synthesis modes, side by side
 ├── notebooks/                      pipeline.ipynb: Agents 0-8 on one paper, swapping embedding and inference models
