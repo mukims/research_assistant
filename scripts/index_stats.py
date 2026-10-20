@@ -4,7 +4,6 @@
     python scripts/index_stats.py
 """
 import collections
-import statistics as st
 
 import chromadb
 

@@ -198,12 +198,6 @@ EXCLUDED_FROM_EVIDENCE   = frozenset({"figure_image", "figure_description"})
 SUMMARY_MODEL            = os.environ.get("CITATION_SUMMARY_MODEL", "") or None  # None → LLM_MODEL
 SUMMARY_MAX_CHARS        = _env_int("CITATION_SUMMARY_MAX_CHARS", 8000)
 
-# ─── Agent 5 — Batch Citer ───────────────────────────────────────────────────
-# Sentences per citation-need request. One request for a whole draft makes the
-# entire run hostage to a single malformed reply; smaller batches confine that
-# to the batch. Too small wastes calls, since each one re-sends the framing.
-CITATION_CHECK_BATCH_SIZE = 20
-
 # ─── Agent 8 — Verifier (judgement) ──────────────────────────────────────────
 # Default citation check model: gemini-3.5-flash-lite when GEMINI_API_KEY is present
 _default_judgement_model = "gemini-3.5-flash-lite" if GEMINI_API_KEY else None
