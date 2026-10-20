@@ -45,17 +45,23 @@ GROBID output is reused, so plan on several hours for 874 papers. It resumes whe
 
 **1. Get the code.** Check out the `feat/v3-gemma-images` branch (or the merged result).
 
-**2. Copy the old data, inputs only** (2.46 GB; no Chroma store, no `.env`):
+**2. On the old machine, export the labels, then copy the old data, inputs only** (2.46 GB; no Chroma
+store, no `.env`):
 
 ```bash
+PYTHONPATH=. python scripts/export_old_labels.py        # writes data/migration_labels.json
 rsync -a --prune-empty-dirs \
   --include='/ingested.json' --include='/ingested_v2.json' --include='/downloaded.json' \
+  --include='/migration_labels.json' \
   --include='/pulled_pdfs/***' --include='/raw/***' --include='/raw_pdfs/***' \
   --exclude='*' data/ USER@HOST:migration-source/
 ```
 
-`downloaded.json` carries each paper's citation label (the `\cite{}` key); without it papers are
-labelled by file name. `raw/grobid_output/` lets the migration reuse GROBID output that has figure
+A paper's label is its `\cite{}` key. `export_old_labels.py` reads it from the old Chroma store, read-only
+(plain `sqlite3`, immutable; it refuses a store whose app is still running) and the migration prefers it
+to `downloaded.json`, where a few papers hold a journal abbreviation instead of the title. The export also
+lists papers that are in the old index but in neither manifest (hand-added ones); the migration includes them.
+Without the file, labels fall back to `downloaded.json` and then to file names. `raw/grobid_output/` lets the migration reuse GROBID output that has figure
 boxes and re-read the rest.
 
 **3. Prepare the machine** (installs and starts, never deletes; `--check-only` shows what is missing):

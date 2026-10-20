@@ -32,6 +32,14 @@ class TestOldDocumentKeys(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(mig.old_document_keys(d), ([], []))
 
+    def test_papers_only_the_old_store_knows_are_included(self):
+        """The store is the record of what is indexed: hand-added papers were in no manifest."""
+        with tempfile.TemporaryDirectory() as d:
+            json.dump({"a.pdf": "t"}, open(os.path.join(d, "ingested.json"), "w"))
+            json.dump({"labels": {"a.pdf": "A", "handadded.pdf": "H"}}, open(os.path.join(d, "migration_labels.json"), "w"))
+            pdfs, _ = mig.old_document_keys(d)
+        self.assertEqual(pdfs, ["a.pdf", "handadded.pdf"])
+
 
 class TestFindPdfs(unittest.TestCase):
     def test_matches_on_the_normalised_key_and_reports_the_rest(self):
@@ -50,6 +58,28 @@ class TestFindPdfs(unittest.TestCase):
             _touch(os.path.join(d, "two", "p.pdf"))
             found, _ = mig.find_pdfs(["p.pdf"], [os.path.join(d, "one"), os.path.join(d, "two")])
         self.assertIn(os.sep + "one" + os.sep, found["p.pdf"])
+
+
+class TestLabelPrecedence(unittest.TestCase):
+    def test_the_old_index_label_beats_downloaded_json_beats_the_file_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            json.dump({"k": {"key": "k", "path": "/vm/data/pulled_pdfs/both.pdf", "provider": "u",
+                             "fetched_at": "2026-09-10T20:05:57Z", "title": "Nat. Phys"},
+                       "j": {"key": "j", "path": "/vm/data/pulled_pdfs/manifest_only.pdf", "provider": "u",
+                             "fetched_at": "2026-09-10T20:05:57Z", "title": "Manifest Title"}},
+                      open(os.path.join(d, "downloaded.json"), "w"))
+            json.dump({"labels": {"both.pdf": "The Real Title", "store_only.pdf": "Store Title"}},
+                      open(os.path.join(d, "migration_labels.json"), "w"))
+            by_key = mig.label_map(d)
+            got = mig.labeled(["/x/Both.pdf", "/x/manifest_only.pdf", "/x/store_only.pdf", "/x/neither.pdf"], by_key)
+        self.assertEqual(list(got.values()), ["The Real Title", "Manifest Title", "Store Title", "neither"])
+
+    def test_the_label_source_is_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            json.dump({"labels": {"a.pdf": "A"}}, open(os.path.join(d, "migration_labels.json"), "w"))
+            self.assertEqual(mig.exported_labels(d), {"a.pdf": "A"})
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(mig.exported_labels(d), {})
 
 
 class TestLabels(unittest.TestCase):

@@ -28,6 +28,9 @@ On another machine
   3. Point --from-data-dir at that copy and CITATION_DATA_DIR at where v3 should live.
      Labels come from downloaded.json in the source; the GROBID cache is copied from it.
   4. --dry-run first, then --limit 3, then everything, then --verify.
+  (On the OLD machine, once: scripts/export_old_labels.py writes <data>/migration_labels.json, the
+   label each paper has in the old index, and lists papers in the index but in no manifest.
+   Copy it with the rest; without it, labels fall back to downloaded.json and then file names.)
 """
 
 import argparse
@@ -43,16 +46,35 @@ from research_assistant.shared.ingestion import pdf_key
 MIN_FREE_GIB = 2.0
 BATCH_SIZE = 10
 OLD_MANIFESTS = ("ingested.json", "ingested_v2.json")
+EXPORTED_LABELS = "migration_labels.json"      # written by scripts/export_old_labels.py
 
 
-def old_document_keys(data_dir: str) -> tuple[list[str], list[str]]:
-    """(pdf keys, other keys) recorded by the v1 and v2 manifests, sorted."""
-    keys = set()
+def exported_labels(data_dir: str) -> dict[str, str]:
+    """{pdf key: label} exported from the old Chroma store, or {} when there is no export."""
+    path = os.path.join(data_dir, EXPORTED_LABELS)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh).get("labels", {})
+
+
+def manifest_keys(data_dir: str) -> set[str]:
+    """Every document key the v1 and v2 manifests record."""
+    keys: set[str] = set()
     for name in OLD_MANIFESTS:
         path = os.path.join(data_dir, name)
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 keys.update(json.load(fh))
+    return keys
+
+
+def old_document_keys(data_dir: str) -> tuple[list[str], list[str]]:
+    """(pdf keys, other keys) the old indexes hold, sorted.
+
+    The manifests, plus the papers the exported labels show are in the old store: hand-added
+    papers were in the store but in no manifest, and a manifest-only list would drop them."""
+    keys = set(exported_labels(data_dir)) | manifest_keys(data_dir)
     pdfs = sorted(k for k in keys if k.endswith(".pdf"))
     return pdfs, sorted(keys - set(pdfs))
 
@@ -98,24 +120,27 @@ def seed_tei_cache(paths, source_dir: str, target_dir: str) -> tuple[int, int, i
 
 
 def label_map(source_dir: str) -> dict[str, str]:
-    """{pdf file name: citation label} from the source's downloaded.json.
+    """{pdf key: citation label}. The label the old index holds wins, then downloaded.json.
 
-    A label becomes citation_source on every chunk and so the cite key. It is read
-    from the source, not from DATA_DIR: a fresh target has no downloaded.json, and
-    every paper would be labelled by its file name."""
+    A label becomes citation_source on every chunk and so the cite key. It is read from the
+    source, not from DATA_DIR: a fresh target has neither file, and every paper would be
+    labelled by its file name. Where the two disagree the old index is right: downloaded.json
+    sometimes holds a journal abbreviation ("Nat. Phys") where the index has the title."""
     from research_assistant.agents.agent3_ingestor import _pdfs_from_manifest
 
+    labels: dict[str, str] = {}
     path = os.path.join(source_dir, "downloaded.json")
-    if not os.path.exists(path):
-        return {}
-    with open(path, encoding="utf-8") as fh:
-        downloaded = json.load(fh)
-    return {os.path.basename(p): label for p, label in _pdfs_from_manifest(downloaded).items()}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            downloaded = json.load(fh)
+        labels.update({pdf_key(p): label for p, label in _pdfs_from_manifest(downloaded).items()})
+    labels.update(exported_labels(source_dir))
+    return labels
 
 
-def labeled(paths, by_base: dict[str, str]) -> dict[str, str]:
-    """{path: label}: the manifest's label, else the file name without its extension."""
-    return {p: by_base.get(os.path.basename(p)) or os.path.splitext(os.path.basename(p))[0] for p in paths}
+def labeled(paths, by_key: dict[str, str]) -> dict[str, str]:
+    """{path: label}: the known label, else the file name without its extension."""
+    return {p: by_key.get(pdf_key(p)) or os.path.splitext(os.path.basename(p))[0] for p in paths}
 
 
 def bm25_is_stale(bm25_path: str, manifest_path: str) -> bool:
@@ -316,10 +341,17 @@ def main(argv=None) -> int:
         print(f"  missing: {key}")
 
     by_base = label_map(source)
-    from_manifest = sum(1 for k in todo if os.path.basename(found[k]) in by_base)
+    exported = exported_labels(source)
+    from_index = sum(1 for k in todo if k in exported)
+    from_manifest = sum(1 for k in todo if k not in exported and pdf_key(found[k]) in by_base)
+    store_only = len(set(exported) - manifest_keys(source))
     source_cache = os.path.join(source, "raw", "grobid_output")
     cached = sum(1 for k in todo if tei_for(config.GROBID_TEI_DIR, found[k]) or tei_for(source_cache, found[k]))
-    print(f"  labels: {from_manifest} from downloaded.json, {len(todo) - from_manifest} will be labelled by file name")
+    print(f"  labels: {from_index} from the old index, {from_manifest} from downloaded.json, "
+          f"{len(todo) - from_index - from_manifest} will be labelled by file name"
+          + ("" if exported else "   (no migration_labels.json: run scripts/export_old_labels.py on the old machine)"))
+    if store_only:
+        print(f"  {store_only} papers are in the old index but in no manifest; they are included")
     print(f"  GROBID cache: {cached} of {len(todo)} already have a TEI; GROBID reads the other {len(todo) - cached}")
     if args.dry_run:
         return 0
