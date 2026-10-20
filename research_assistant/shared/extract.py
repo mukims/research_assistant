@@ -247,11 +247,44 @@ def _stem(pdf_path: str) -> str:
     return os.path.splitext(os.path.basename(pdf_path))[0]
 
 
+def _has_usable_boxes(path: str) -> bool:
+    """False for a TEI that has figures but no box on any of them.
+
+    Agent 1 asks GROBID without teiCoordinates=figure (and without sentence
+    segmentation), so its TEI describes figures it gives no position for: a crop
+    cannot be made and the figure is silently dropped. A TEI with no figures at
+    all has nothing to lose."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    figures = re.findall(r"<figure\b[^>]*>", text)
+    return not figures or any("coords=" in tag for tag in figures)
+
+
+def find_cached_tei(cache_dir: str, pdf_path: str):
+    """The first cached TEI for this PDF's file stem that can be used, else None."""
+    stem = _stem(pdf_path)
+    for suffix in _TEI_SUFFIXES:
+        candidate = os.path.join(cache_dir, stem + suffix)
+        if os.path.exists(candidate) and _has_usable_boxes(candidate):
+            return candidate
+    return None
+
+
 def tei_cache_path(pdf_path: str) -> str:
+    """The TEI to read, or where a fresh one should be written.
+
+    An existing file that cannot be used is left exactly as it is (the seed audit
+    reads Agent 1's) and the fresh TEI goes beside it under the next free suffix."""
+    found = find_cached_tei(GROBID_TEI_DIR, pdf_path)
+    if found:
+        return found
     stem = _stem(pdf_path)
     for suffix in _TEI_SUFFIXES:
         candidate = os.path.join(GROBID_TEI_DIR, stem + suffix)
-        if os.path.exists(candidate):
+        if not os.path.exists(candidate):
             return candidate
     return os.path.join(GROBID_TEI_DIR, stem + _TEI_SUFFIXES[0])
 

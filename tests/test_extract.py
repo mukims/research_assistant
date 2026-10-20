@@ -176,6 +176,53 @@ class TestExtractDispatch(unittest.TestCase):
         self.assertEqual(d.extraction, "grobid")
         self.assertTrue(os.path.exists(os.path.join(self.tmp.name, "paper.grobid.tei.xml")))
 
+    def _without_figure_boxes(self):
+        import re
+        return re.sub(rb'(<figure\b[^>]*?) coords="[^"]*"', rb"\1", self.tei)
+
+    def test_a_cached_tei_without_figure_boxes_is_not_reused(self):
+        """Agent 1 asks GROBID without teiCoordinates=figure, so its TEI has figures
+        and no boxes: reusing it silently drops every figure crop."""
+        stale = self._without_figure_boxes()
+        self.assertNotEqual(stale, self.tei)
+        old = os.path.join(self.tmp.name, "paper.grobid.tei.xml")
+        with open(old, "wb") as f:
+            f.write(stale)
+        with patch.object(ex, "grobid_fulltext", return_value=self.tei) as call:
+            d = ex.extract("/x/paper.pdf", key="paper.pdf")
+        call.assert_called_once()
+        self.assertTrue(any(fig.bbox for fig in d.figures))
+        with open(old, "rb") as f:
+            self.assertEqual(f.read(), stale, "Agent 1's file must be left exactly as it was")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, "paper.fulltext.tei.xml")))
+
+    def test_the_refreshed_tei_is_found_next_time_without_another_call(self):
+        with open(os.path.join(self.tmp.name, "paper.grobid.tei.xml"), "wb") as f:
+            f.write(self._without_figure_boxes())
+        with patch.object(ex, "grobid_fulltext", return_value=self.tei):
+            ex.extract("/x/paper.pdf", key="paper.pdf")
+        with patch.object(ex, "grobid_fulltext", side_effect=AssertionError("must not be called again")):
+            d = ex.extract("/x/paper.pdf", key="paper.pdf")
+        self.assertTrue(any(fig.bbox for fig in d.figures))
+
+    def test_a_cached_tei_with_no_figures_at_all_is_reused(self):
+        import re
+        figureless = re.sub(rb"<figure\b.*?</figure>", b"", self.tei, flags=re.S)
+        self.assertNotIn(b"<figure", figureless)
+        with open(os.path.join(self.tmp.name, "paper.grobid.tei.xml"), "wb") as f:
+            f.write(figureless)
+        with patch.object(ex, "grobid_fulltext", side_effect=AssertionError("nothing to crop, nothing to refresh")):
+            d = ex.extract("/x/paper.pdf", key="paper.pdf")
+        self.assertEqual(d.figures, [])
+
+    def test_find_cached_tei_skips_an_unusable_file_and_finds_a_usable_one(self):
+        with open(os.path.join(self.tmp.name, "paper.grobid.tei.xml"), "wb") as f:
+            f.write(self._without_figure_boxes())
+        self.assertIsNone(ex.find_cached_tei(self.tmp.name, "/x/paper.pdf"))
+        with open(os.path.join(self.tmp.name, "paper.tei.xml"), "wb") as f:
+            f.write(self.tei)
+        self.assertTrue(ex.find_cached_tei(self.tmp.name, "/x/paper.pdf").endswith("paper.tei.xml"))
+
     def test_grobid_failure_falls_back_to_pymupdf(self):
         fallback = ex.Document("paper.pdf", "paper.pdf", [], [], [], "pymupdf")
         with patch.object(ex, "grobid_fulltext", side_effect=RuntimeError("down")), \
