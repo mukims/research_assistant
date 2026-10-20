@@ -83,11 +83,7 @@ def hybrid_search(
     if embeddings_model is None:
         embeddings_model = _get_embeddings()
 
-    # When narrowing to a handful of documents, most global candidates get
-    # discarded — widen the candidate pool so enough survive the filter.
-    # Excluding a document costs the same way: the sparse side drops the
-    # excluded chunks from the pool after ranking, and a seed paper's own
-    # chunks dominate a query written from its sentences.
+    # k_cand is the dense side's candidate count (Chroma filters before it ranks).
     k_cand = max(60, top_k * 10) if (doc_filter or exclude_docs) else max(15, top_k * 3)
 
     # 1. Sparse (BM25) retrieval — tokenised the way the pickle was built
@@ -96,26 +92,37 @@ def hybrid_search(
         tokenized_query = legacy_tokenize(query)
     else:
         tokenized_query = tokenize(query)
-    bm25_scores = bm25.get_scores(tokenized_query)
-
-    # Only the top k_cand matter, so partition instead of sorting the whole
-    # corpus. Agent 5 calls this once per sentence needing a citation, and a
-    # full argsort is O(n log n) over every chunk each time.
-    if k_cand < len(bm25_scores):
-        top_unordered = np.argpartition(bm25_scores, -k_cand)[-k_cand:]
-        sparse_top_indices = top_unordered[np.argsort(bm25_scores[top_unordered])[::-1]]
-    else:
-        sparse_top_indices = np.argsort(bm25_scores)[::-1]
 
     def _meta(i):
         return metadatas[i] if i < len(metadatas) else {}
 
-    if doc_filter:
-        sparse_top_indices = [i for i in sparse_top_indices if _meta(i).get("document") in doc_filter]
-    if exclude_types:
-        sparse_top_indices = [i for i in sparse_top_indices if _meta(i).get("type") not in exclude_types]
-    if exclude_docs:
-        sparse_top_indices = [i for i in sparse_top_indices if _meta(i).get("document") not in exclude_docs]
+    def _top(scores, k):
+        """Positions of the k highest scores, best first. Partitions instead of
+        sorting everything: Agent 5 calls this once per sentence needing a
+        citation, and a full argsort is O(n log n) over every chunk each time."""
+        if k < len(scores):
+            top_unordered = np.argpartition(scores, -k)[-k:]
+            return top_unordered[np.argsort(scores[top_unordered])[::-1]]
+        return np.argsort(scores)[::-1]
+
+    if doc_filter or exclude_types or exclude_docs:
+        # Rank within the allowed chunks. Cutting a global top-k first and
+        # filtering after meant that on a large corpus none of the cited
+        # paper's chunks were in the pool, and the sparse side silently
+        # returned nothing for the one paper the auditor had asked about.
+        pool = [
+            i for i in range(len(texts))
+            if (not doc_filter or _meta(i).get("document") in doc_filter)
+            and (not exclude_types or _meta(i).get("type") not in exclude_types)
+            and (not exclude_docs or _meta(i).get("document") not in exclude_docs)
+        ]
+        if hasattr(bm25, "get_batch_scores"):          # rank_bm25: scores only these, not every chunk
+            pool_scores = np.asarray(bm25.get_batch_scores(tokenized_query, pool), dtype=float)
+        else:
+            pool_scores = np.asarray(bm25.get_scores(tokenized_query), dtype=float)[pool]
+        sparse_top_indices = [pool[j] for j in _top(pool_scores, k_cand)]
+    else:
+        sparse_top_indices = _top(np.asarray(bm25.get_scores(tokenized_query), dtype=float), k_cand)
 
     # 2. Dense (embedding) retrieval
     query_emb = embeddings_model.embed_query(query)

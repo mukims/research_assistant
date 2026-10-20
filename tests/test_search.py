@@ -239,6 +239,68 @@ class TestQueryTokenizerFollowsThePickle(unittest.TestCase):
         self.assertEqual(self._run(bm25), ["the", "ﬁelds"])
 
 
+class TestFilterBeforeThePoolIsCut(unittest.TestCase):
+    """The sparse side must rank within the allowed chunks, not rank everything
+    and then filter. Cutting a global top-k first meant that on a big corpus the
+    cited paper's own keyword hits fell out of the pool and BM25 silently
+    returned nothing for the one paper the auditor asked about."""
+
+    N = 300
+
+    def _corpus(self, doc_of):
+        texts = [f"chunk {i}" for i in range(self.N)]
+        metas = [{"document": doc_of(i), "type": "text_chunk"} for i in range(self.N)]
+        return texts, metas
+
+    def _scores(self):
+        # Chunks 0-4 are paper a's, with the weakest scores; the other 295 all outrank them.
+        return [1.0 - 0.1 * i if i < 5 else 50.0 + i for i in range(self.N)]
+
+    def test_doc_filter_still_finds_a_paper_whose_chunks_score_low(self):
+        texts, metas = self._corpus(lambda i: "a.pdf" if i < 5 else "b.pdf")
+        out = hybrid_search("q", FakeCollection([]), FakeBM25(self._scores()), texts, metas, top_k=3,
+                            embeddings_model=FakeEmbeddings(), doc_filter={"a.pdf"})
+        self.assertEqual([r["chunk_index"] for r in out], [0, 1, 2])
+
+    def test_exclude_docs_still_finds_what_is_left(self):
+        texts, metas = self._corpus(lambda i: "a.pdf" if i < 5 else "b.pdf")
+        out = hybrid_search("q", FakeCollection([]), FakeBM25(self._scores()), texts, metas, top_k=3,
+                            embeddings_model=FakeEmbeddings(), exclude_docs={"b.pdf"})
+        self.assertEqual([r["chunk_index"] for r in out], [0, 1, 2])
+
+    def test_exclude_types_still_finds_what_is_left(self):
+        texts, metas = self._corpus(lambda i: "a.pdf")
+        for i in range(5, self.N):
+            metas[i]["type"] = "figure_image"
+        out = hybrid_search("q", FakeCollection([]), FakeBM25(self._scores()), texts, metas, top_k=3,
+                            embeddings_model=FakeEmbeddings(), exclude_types={"figure_image"})
+        self.assertEqual([r["chunk_index"] for r in out], [0, 1, 2])
+
+    def test_an_unfiltered_search_is_unchanged(self):
+        texts, metas = self._corpus(lambda i: "a.pdf" if i < 5 else "b.pdf")
+        out = hybrid_search("q", FakeCollection([]), FakeBM25(self._scores()), texts, metas, top_k=3,
+                            embeddings_model=FakeEmbeddings())
+        self.assertEqual([r["chunk_index"] for r in out], [self.N - 1, self.N - 2, self.N - 3])
+
+    def test_the_real_bm25_agrees_with_scoring_everything(self):
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            self.skipTest("rank-bm25 not installed")
+        from research_assistant.shared.tokenize import tokenize
+        texts = ["graphene conductance", "graphene ribbons edge states", "unrelated stock market index",
+                 "graphene edge conductance measurement", "market volatility", "graphene"]
+        metas = [{"document": d, "type": "text_chunk"} for d in ("a.pdf", "a.pdf", "b.pdf", "a.pdf", "b.pdf", "b.pdf")]
+        bm25 = BM25Okapi([tokenize(t) for t in texts])
+        bm25.tokenizer_version = "v2"
+        out = hybrid_search("graphene edge conductance", FakeCollection([]), bm25, texts, metas, top_k=3,
+                            embeddings_model=FakeEmbeddings(), doc_filter={"a.pdf"})
+        scores = bm25.get_scores(tokenize("graphene edge conductance"))
+        expected = sorted((i for i, m in enumerate(metas) if m["document"] == "a.pdf" and scores[i] > 0),
+                          key=lambda i: -scores[i])
+        self.assertEqual([r["chunk_index"] for r in out if scores[r["chunk_index"]] > 0], expected[:3])
+
+
 class TestExcludeTypes(unittest.TestCase):
     """A verdict must rest on what the paper says, not on a model's reading of
     a plot: Agent 8 excludes figure_description chunks from evidence."""
