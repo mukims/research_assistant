@@ -425,19 +425,37 @@ def _match_citation_line(line):
     return None
 
 
+def _pymupdf_text(pdf_path: str) -> str:
+    """Raw text via PyMuPDF, a hard dependency, for hosts without poppler."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return ""
+    try:
+        with fitz.open(pdf_path) as doc:
+            return "\n".join(page.get_text() for page in doc)
+    except Exception as exc:  # noqa: BLE001 — a corrupt PDF just yields no text
+        logger.warning("PyMuPDF could not read %s: %s", pdf_path, exc)
+        return ""
+
+
 def _pdftotext(pdf_path: str) -> str:
-    """Extract raw text. Returns "" when pdftotext is missing or fails."""
+    """Extract raw text with poppler's pdftotext, else PyMuPDF. "" if both fail.
+
+    The regex fallback exists for when GROBID is down; it must not also depend
+    on a binary most machines (this project's Mac included) do not have.
+    """
     try:
         result = subprocess.run(
             ["pdftotext", pdf_path, "-"],
             capture_output=True, text=True, timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("pdftotext unavailable for %s: %s", pdf_path, exc)
-        return ""
+        logger.warning("pdftotext unavailable for %s (%s); using PyMuPDF", pdf_path, exc)
+        return _pymupdf_text(pdf_path)
     if result.returncode != 0:
-        logger.warning("pdftotext failed on %s: %s", pdf_path, result.stderr.strip())
-        return ""
+        logger.warning("pdftotext failed on %s: %s; using PyMuPDF", pdf_path, result.stderr.strip())
+        return _pymupdf_text(pdf_path)
     return result.stdout
 
 

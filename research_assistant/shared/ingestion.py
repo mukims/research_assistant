@@ -548,6 +548,12 @@ def _process_pdf_layout(
 # ─── Document summaries (stage-1 index) ─────────────────────────────────────
 
 
+# What the most recent upsert_summaries() call attempted and lost. upsert_corpus()
+# returns a bare chunk count, so this is how ingest_pdfs() learns that summaries
+# failed without changing that return type. Reset at the start of every call.
+last_summary_run: dict = {"attempted": 0, "made": 0, "failed": 0, "error": ""}
+
+
 def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
     """One LLM summary per new document, into SUMMARY_COLLECTION_NAME.
 
@@ -571,6 +577,9 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
 
     embeddings = get_embeddings()
     made = 0
+    failed = 0
+    last_error = ""
+    last_summary_run.update(attempted=0, made=0, failed=0, error="")
     to_summarize = [doc for doc, text in per_doc_text.items() if doc not in have and text.strip()]
     total_to_sum = len(to_summarize)
     model_name = SUMMARY_MODEL or LLM_MODEL
@@ -595,8 +604,13 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
             ).content.strip()
         except Exception as e:
             logger.error("Summary failed for %s: %s", doc, e)
+            failed += 1
+            last_error = str(e)
             continue
         if not summary:
+            logger.error("Summary for %s came back empty", doc)
+            failed += 1
+            last_error = last_error or "the model returned an empty summary"
             continue
         col.add(
             ids=[f"sum::{doc}"],
@@ -608,9 +622,16 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
         )
         made += 1
 
+    last_summary_run.update(attempted=total_to_sum, made=made, failed=failed, error=last_error)
     if made:
         pipeline_status.add_event(f"✓ Generated {made} paper summaries with {model_name}")
         logger.info("✓ Wrote %d document summary/-ies.", made)
+    if failed:
+        # Without a summary a paper is invisible to stage-1 retrieval, so a run
+        # that lost them is not a clean success, and must not look like one.
+        msg = f"{failed} of {total_to_sum} summaries failed with {model_name}: {last_error}"
+        logger.warning(msg)
+        pipeline_status.add_event(f"⚠️ {msg}")
     return made
 
 
@@ -850,6 +871,8 @@ def upsert_corpus(corpus: list[dict]):
         upsert_summaries(per_doc_text, per_doc_citation)
     except Exception as e:
         logger.error("Summary index update failed: %s", e)
+        pipeline_status.add_event(f"⚠️ Summary index update failed: {e}")
+        last_summary_run.update(failed=max(last_summary_run["failed"], 1), error=str(e))
 
     return len(documents)
 
@@ -1141,7 +1164,9 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
             )
 
         if corpus:
+            last_summary_run.update(attempted=0, made=0, failed=0, error="")
             result["inserted"] = upsert_corpus(corpus)
+            result["summaries"] = dict(last_summary_run)
             logger.info("%sInserted %d new chunk(s).", log_prefix, result["inserted"])
         else:
             logger.info("%sNo content extracted from the processed PDF(s).", log_prefix)

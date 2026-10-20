@@ -91,6 +91,12 @@ def run_ingestor(workers: int = 1, force: bool = False, describe_figures: bool |
             "Done. Processed %d, skipped %d, inserted %d chunk(s), %d unreadable.",
             result["processed"], result["skipped"], result["inserted"], len(result["failed"]),
         )
+        summ = result.get("summaries") or {}
+        if summ.get("failed"):
+            logger.warning(
+                "%d of %d paper summaries failed (%s); those papers will not be found by topic search.",
+                summ["failed"], summ.get("attempted", summ["failed"]), summ.get("error"),
+            )
         return result
 
 

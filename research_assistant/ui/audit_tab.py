@@ -187,6 +187,13 @@ def render_audit_tab():
                         st.write(f"✓ Parsed {processed} paper(s), skipped {skipped} duplicates, inserted {inserted} new chunks.")
                         if scanned_empty:
                             st.warning(f"⚠️ {len(scanned_empty)} file(s) had no extractable text: {', '.join(scanned_empty[:5])}")
+                        summ = ingest_res.get("summaries") or {}
+                        if summ.get("failed"):
+                            st.warning(
+                                f"⚠️ {summ['failed']} of {summ.get('attempted', summ['failed'])} paper summaries "
+                                f"failed ({summ.get('error') or 'unknown error'}). Those papers will not be "
+                                "found by topic search until their summaries are rebuilt."
+                            )
 
                         try:
                             dl_manifest = {}

@@ -270,3 +270,46 @@ class TestPrechunkedEntries(UpsertTestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class SummaryFailureTests(unittest.TestCase):
+    """A model that cannot summarise must not look like a clean run."""
+
+    def _run(self, chat_side_effect):
+        col = FakeCollection()
+        chroma = types.ModuleType("chromadb")
+        chroma.PersistentClient = lambda path: types.SimpleNamespace(
+            get_or_create_collection=lambda name, metadata=None: col,
+        )
+        emb = types.SimpleNamespace(embed_documents=lambda texts: [[0.0] for _ in texts])
+        events = []
+        import research_assistant.shared.llm as llm_mod
+        with patch.dict(sys.modules, {"chromadb": chroma}), \
+             patch.object(llm_mod, "get_embeddings", lambda *a, **k: emb), \
+             patch.object(llm_mod, "chat", side_effect=chat_side_effect), \
+             patch.object(ing.pipeline_status, "add_event", events.append), \
+             patch.object(ing.pipeline_status, "update_progress", lambda **k: None), \
+             patch.object(ing.pipeline_status, "is_cancel_requested", lambda: False):
+            made = ing.upsert_summaries({"a.pdf": "text a", "b.pdf": "text b"}, {})
+        return made, events
+
+    def test_every_failure_is_counted_and_announced(self):
+        made, events = self._run(RuntimeError("model failed to load"))
+        self.assertEqual(made, 0)
+        self.assertEqual(ing.last_summary_run["attempted"], 2)
+        self.assertEqual(ing.last_summary_run["failed"], 2)
+        self.assertIn("model failed to load", ing.last_summary_run["error"])
+        self.assertTrue(any("2 of 2 summaries failed" in e for e in events), events)
+
+    def test_partial_failure_reports_the_remainder(self):
+        ok = types.SimpleNamespace(content=" a summary ")
+        made, events = self._run([ok, RuntimeError("boom")])
+        self.assertEqual(made, 1)
+        self.assertEqual(ing.last_summary_run["failed"], 1)
+        self.assertTrue(any("1 of 2 summaries failed" in e for e in events), events)
+
+    def test_empty_summary_counts_as_failure(self):
+        empty = types.SimpleNamespace(content="   ")
+        made, _ = self._run([empty, empty])
+        self.assertEqual(made, 0)
+        self.assertEqual(ing.last_summary_run["failed"], 2)

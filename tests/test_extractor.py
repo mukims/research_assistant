@@ -80,6 +80,55 @@ class TestRegexReferences(unittest.TestCase):
         self.assertEqual(self._extract("Just prose, no reference list."), [])
 
 
+class TestPdftotextFallback(unittest.TestCase):
+    """With poppler absent and GROBID down, references must still come out."""
+
+    def setUp(self):
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pdf = os.path.join(self.tmp.name, "paper.pdf")
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Introduction text", fontsize=11)
+        lines = [
+            "References",
+            "[1] Smith J. A first paper on quantum wires. Nature, 2019.",
+            "[2] Doe A. A second paper on disorder. PRL, 2020.",
+        ]
+        for i, line in enumerate(lines):
+            page.insert_text((72, 100 + 16 * i), line, fontsize=11)
+        doc.save(self.pdf)
+        doc.close()
+
+    def test_pymupdf_is_used_when_pdftotext_binary_is_missing(self):
+        with patch.object(ex.subprocess, "run", side_effect=FileNotFoundError("pdftotext")):
+            refs = ex._references_from_regex(self.pdf)
+        self.assertEqual(len(refs), 2)
+        self.assertIn("Smith", refs[0].raw_reference)
+
+    def test_pymupdf_is_used_when_pdftotext_fails(self):
+        failed = types_namespace(returncode=1, stdout="", stderr="boom")
+        with patch.object(ex.subprocess, "run", return_value=failed):
+            refs = ex._references_from_regex(self.pdf)
+        self.assertEqual(len(refs), 2)
+
+    def test_unreadable_pdf_gives_empty_text_not_an_exception(self):
+        bad = os.path.join(self.tmp.name, "bad.pdf")
+        with open(bad, "wb") as f:
+            f.write(b"not a pdf")
+        with patch.object(ex.subprocess, "run", side_effect=FileNotFoundError("pdftotext")):
+            self.assertEqual(ex._pdftotext(bad), "")
+
+
+def types_namespace(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
 class TestFallbackRouting(unittest.TestCase):
     def _ref(self, method):
         return Reference(
