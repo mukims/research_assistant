@@ -232,6 +232,28 @@ into the workspace, runs a generated acceptance test over them in a subprocess,
 and gives a failing task one reflection retry. Give it a scratch `--workspace`;
 the runner refuses to point at the persistent data directory.
 
+## Where things are
+
+| Path | What it is |
+|------|------------|
+| `app.py` | the Streamlit page: sidebar and six tabs. Each tab's code is in `research_assistant/ui/` |
+| `orchestrate.py` | one research idea end to end, as a LangGraph |
+| `orchestrate_tasks.py` | command line for the Agent task planner: `plan`, `show`, `run` |
+| `watch.py` | directory watcher: drop a PDF or a draft and the matching stage runs |
+| `research_assistant/agents/` | Agents 0–8, one file each (the pipeline above) |
+| `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, the citation audit |
+| `research_assistant/judgement/` | the claim–evidence judge, source assessor, reliability policy, and the judge's evaluation set |
+| `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
+| `research_assistant/tasks/` | the Agent task planner (Pipeline 2); reaches into few shared modules |
+| `scripts/` | operator tools: judge and citer evaluation, labelling, index statistics |
+| `notebooks/` | `pipeline.ipynb`, a test bench that runs Agents 0–8 on one paper |
+| `deploy/` | `local.sh`, which starts GROBID and the app on this machine only |
+| `tests/` | the test suite |
+| `data/` | everything the pipeline writes: indexes, PDFs, logs. Gitignored |
+| `notimportant/superpowers/` | dated design specs and plans, kept for history |
+
+The full tree, down to individual files, is in [PIPELINE.md](PIPELINE.md#layout).
+
 ## Things he has written down
 
 | Read this | When |

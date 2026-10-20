@@ -106,6 +106,7 @@ research_assistant/                the checkout root
 │
 ├── app.py                         Streamlit page layout: sidebar, six tabs (also the container entry point)
 ├── orchestrate.py                 LangGraph — one research idea, end to end
+├── orchestrate_tasks.py           CLI for the Agent task planner (plan / show / run)
 ├── watch.py                       watchdog daemon — directory-driven
 │
 ├── README.md  HOW_TO_USE.md  PIPELINE.md  ARCHITECTURE.md  Research_Assistant_GROBID_Guide.md
@@ -135,6 +136,16 @@ research_assistant/                the checkout root
 │   │   ├── evalset.py  metrics.py  harvest.py  labeling.py  transforms.py
 │   │   │                       the judge evaluation harness (pure; scripts/ do the I/O)
 │   │   └── cases/              labelled examples: cases.jsonl (in-prompt), human.jsonl, transforms.jsonl
+│   ├── eval/
+│   │   ├── citer_gold.py  citer_metrics.py   the citer's evaluation: a paper's own citations as ground truth
+│   │   └── cases/              gold sets, one jsonl per seed paper
+│   ├── tasks/                  the Agent task planner (Pipeline 2); its tab is tasks/ui.py
+│   │   ├── extractor.py        paper methods → task graph (GROBID TEI, or PyMuPDF text)
+│   │   ├── retrieval.py        evidence for four facets from the corpus
+│   │   ├── iteration.py  critic.py   proposer–critic loop, at most three turns
+│   │   ├── graph.py            DAG checks, topological waves, Mermaid / Markdown / Antigravity export
+│   │   ├── roles.py  prompts.py  models.py   the six agent roles, their prompts, the data classes
+│   │   └── runner.py  harness.py   dry-run or autonomous execution, acceptance tests, scorecard
 │   ├── ui/                     the Streamlit UI that app.py lays out, one module per concern
 │   │   ├── audit_tab.py  idea_tab.py  draft_tab.py  chat_tab.py  help_tab.py   one render_*_tab() each
 │   │   ├── common.py       auth, the cached search index, helpers every tab shares
@@ -167,9 +178,11 @@ research_assistant/                the checkout root
 │
 ├── scripts/                        operator CLIs (run as PYTHONPATH=. python scripts/<name>.py)
 │   ├── evaluate_judge.py           judge / verifier evaluation on the held-out set; --compare two runs
+│   ├── evaluate_citer.py           citer evaluation against the seed papers' own citations
 │   ├── judge_harvest.py  judge_label.py  judge_bench.py
 │   ├── index_stats.py              chunk-length distribution of the active index
 │   └── synth_compare.py            research_answer in both synthesis modes, side by side
+├── notebooks/                      pipeline.ipynb: Agents 0-8 on one paper, swapping embedding and inference models
 ├── deploy/                         local.sh: run the app on this machine, loopback only (and its README)
 ├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
 ├── .github/workflows/tests.yml

@@ -48,7 +48,7 @@ local launcher ([deploy/README.md](deploy/README.md)).
 | Corpus (index v2) | ~44k chunks, 735 paper summaries | One maintainer's corpus |
 | Task planner | No measurement | Its scorecard rates the share of tasks whose acceptance check passed, not whether the paper's results were reproduced |
 
-The test suite has about 1,540 test functions in 74 files, and CI runs it on
+The test suite has about 1,600 test functions in 81 files, and CI runs it on
 Python 3.10 and 3.12. It was not run when this document was written.
 
 ## Known gaps
