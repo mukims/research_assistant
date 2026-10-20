@@ -106,7 +106,11 @@ HF_TOKEN        = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
 # ─── Models ──────────────────────────────────────────────────────────────────
 LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", _default_llm_model)
 CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", _default_llm_model)
-EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "nomic-embed-text")
+# embeddinggemma-2 embeds text and images into one space, which is what lets a
+# text query find a figure. Any other embedder indexes text only (no figure
+# images) and must be set together with a fresh CITATION_INDEX_VERSION.
+EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "embeddinggemma-2")
+EMBED_IMAGES    = EMBED_BACKEND == "ollama" and EMBED_MODEL.startswith("embeddinggemma-2")
 
 
 # ─── Chat Model Runtime Options ──────────────────────────────────────────────
@@ -127,10 +131,13 @@ CHAT_TEMPERATURE            = float(os.environ.get("CITATION_CHAT_TEMPERATURE", 
 
 
 # ─── Index version ───────────────────────────────────────────────────────────
-# Every on-disk name the index uses is derived from this, so a v2 index (new
-# extractor, new chunker, prefixed embeddings) lives beside v1 and never
-# opens a v1 file for writing. Default 1: nothing changes until set.
-INDEX_VERSION = _env_int("CITATION_INDEX_VERSION", 1)
+# Every on-disk name the index uses is derived from this, so an index built
+# with a different embedder lives beside the others and never opens one of
+# theirs for writing. 1 = unsuffixed (the original semantic-chunk index),
+# 2 = GROBID chunks embedded with nomic, 3 = GROBID chunks and figure images
+# embedded with embeddinggemma-2 (current). Indexes 1 and 2 are read-only
+# history: nothing in this package writes to them any more.
+INDEX_VERSION = _env_int("CITATION_INDEX_VERSION", 3)
 _INDEX_SUFFIX = "" if INDEX_VERSION == 1 else f"_v{INDEX_VERSION}"
 
 # ─── Vector Database ──────────────────────────────────────────────────────────
@@ -165,35 +172,10 @@ INGESTED_MANIFEST_PATH   = os.path.join(DATA_DIR, f"ingested{_INDEX_SUFFIX}.json
 PIPELINE_STATUS_PATH     = os.path.join(DATA_DIR, "pipeline_status.json")
 INGEST_LOCK_PATH         = os.path.join(DATA_DIR, "ingest.lock")
 
-# ─── Detectron2 / layout detection ──────────────────────────────────────────
-# Layout detection (figure/table crops + a VLM description of each) is the
-# heaviest, most install-fragile stage: detectron2 is not on PyPI and needs a
-# matching torch build. With it OFF, ingestion falls back to text-only
-# extraction (PyMuPDF) — which is what the Hugging Face Space runs.
-LAYOUT_DETECTION = _env_bool("CITATION_LAYOUT_DETECTION", True)
-# May be absent: when the file is not there, layoutparser downloads the
-# PubLayNet weights for DETECTRON_CONFIG on first use.
-DETECTRON_WEIGHTS = os.environ.get(
-    "CITATION_DETECTRON_WEIGHTS", os.path.join(PROJECT_ROOT, "model_final.pth")
-)
-_default_detectron_config = (
-    os.path.join(PROJECT_ROOT, "publaynet_config.yaml")
-    if os.path.exists(os.path.join(PROJECT_ROOT, "publaynet_config.yaml"))
-    else "lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config"
-)
-DETECTRON_CONFIG = (
-    os.environ.get("CITATION_DETECTRON_CONFIG", "").strip()
-    or _default_detectron_config
-)
-DETECTRON_LABEL_MAP = {0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
-DETECTRON_SCORE_THRESH = 0.5
-
 # ─── Ingestion Tunables ───────────────────────────────────────────────────────
 CHUNK_MIN_LENGTH         = 10       # Discard text chunks shorter than this
 EMBED_BATCH_SIZE         = _env_int("CITATION_EMBED_BATCH_SIZE", 64)     # ChromaDB upsert batch size (64 safe for Ollama runner)
 EMBED_MAX_CHARS          = 4000     # Truncate documents to this length before embedding
-SEMANTIC_CHUNKER_TYPE    = "percentile"
-SEMANTIC_CHUNKER_AMOUNT  = 90       # 90th percentile breakpoint
 
 # v2 chunker (INDEX_VERSION >= 2): sentence windows packed within a section.
 # ~1,200 chars is ~300 tokens; six of them fill ~1,800 tokens of a 4k window.
@@ -202,11 +184,14 @@ CHUNK_MAX_CHARS          = _env_int("CITATION_CHUNK_MAX_CHARS", 1800)
 CHUNK_MIN_CHARS          = 200      # shorter windows are dropped (captions exempt)
 CHUNK_MIN_ALPHA          = 0.6      # alphabetic ratio below this is font-map garbage
 
-# Figure/table handling. The layout pass always crops the image and keeps its
-# caption as the searchable text. Set CITATION_FIGURE_VLM=1 to also run a VLM
-# description of every crop at ingest time (one model call per figure — off by
-# default; crops can be described on demand instead).
-FIGURE_VLM = _env_bool("CITATION_FIGURE_VLM", False)
+# Figure/table handling. Every figure is cropped from GROBID's box, its caption
+# is indexed as text, and (with EMBED_IMAGES) the crop itself is embedded so a
+# text query can find it. No model describes the image: a figure is evidence of
+# nothing the judge can read, so it is searchable but never cited.
+FIGURE_CROP_DPI          = _env_int("CITATION_FIGURE_CROP_DPI", 90)
+# Entry types that are found by search but never quoted, cited or judged.
+# figure_description is the old VLM text, still present in index v2.
+EXCLUDED_FROM_EVIDENCE   = frozenset({"figure_image", "figure_description"})
 
 # Per-document summary written to SUMMARY_COLLECTION_NAME at ingest time — the
 # stage-1 "is this paper even relevant" index. One model call per paper.
@@ -354,5 +339,3 @@ GROBID_FULLTEXT_TIMEOUT  = _env_int("GROBID_FULLTEXT_TIMEOUT", 300)
 MAX_CITATION_LEN   = 500   # Skip citations longer than this (likely malformed)
 ARXIV_RATE_LIMIT   = 3     # Seconds between arXiv requests
 UNPAYWALL_SLEEP    = 0.5   # Courtesy sleep after Unpaywall downloads
-# ─── Rendering / DPI ─────────────────────────────────────────────────────────
-PDF_RENDER_DPI = 72

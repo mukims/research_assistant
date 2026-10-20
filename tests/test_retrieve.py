@@ -12,6 +12,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from research_assistant.config import EXCLUDED_FROM_EVIDENCE
 from research_assistant.shared import retrieve as rt
 
 
@@ -97,7 +98,7 @@ class TestPassagesPerPaper(unittest.TestCase):
         with patch.object(rt, "load_search_resources", return_value=(None, None, [], [])), \
              patch.object(rt, "hybrid_search", side_effect=fake_search):
             out = rt.passages_per_paper("idea", sel, per_paper=4)
-        self.assertEqual(calls, [(4, {"d1.pdf"}, {"figure_description"}), (4, {"d2.pdf"}, {"figure_description"})])
+        self.assertEqual(calls, [(4, {"d1.pdf"}, EXCLUDED_FROM_EVIDENCE), (4, {"d2.pdf"}, EXCLUDED_FROM_EVIDENCE)])
         self.assertEqual(list(out), ["P1", "P2"])
         self.assertEqual(out["P1"][0]["key"], "P1")
 

@@ -12,6 +12,7 @@ import json
 import os
 import random
 
+from research_assistant.config import EXCLUDED_FROM_EVIDENCE
 from research_assistant.config import DATA_DIR
 from research_assistant.judgement import harvest as hv
 from research_assistant.shared.atomic import atomic_write
@@ -70,7 +71,7 @@ def harvest_abstract(papers: int, per_paper: int, seed: int) -> list[dict]:
                 metadatas,
                 top_k=4,
                 doc_filter={doc},
-                exclude_types={"figure_description", "caption"},
+                exclude_types=EXCLUDED_FROM_EVIDENCE | {"caption"},
             )
             hits = [h for h in hits if (h.get("metadata") or {}).get("section") != "abstract"]
             if not hits:

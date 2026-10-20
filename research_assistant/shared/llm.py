@@ -17,6 +17,7 @@ Heavy provider SDKs are imported lazily inside each backend so a checkout using
 only one of them does not need the others installed.
 """
 
+import os
 from dataclasses import dataclass
 
 from research_assistant.config import (
@@ -229,8 +230,7 @@ def _openai_stream(messages, model, temperature=None):
 
 # ─── Embeddings ──────────────────────────────────────────────────────────────
 # Returns an object implementing the LangChain Embeddings interface
-# (embed_documents / embed_query) so it can be handed straight to
-# SemanticChunker as well as used directly.
+# (embed_documents / embed_query).
 
 
 class _InferenceClientEmbeddings:
@@ -288,6 +288,67 @@ class _PrefixedEmbeddings:
         return self._inner.embed_query(self._qp + text)
 
 
+GEMMA_QUERY_PREFIX = "task: search result | query: "
+GEMMA_DOC_PREFIX = "title: none | text: "
+# One image costs ~260 prompt tokens. Ollama silently ignores an image sent in
+# the wrong field (it returns a text-only vector for the empty text), so a count
+# far below this means the image never reached the model.
+_MIN_IMAGE_TOKENS = 100
+
+
+def _ollama_host():
+    host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").strip().rstrip("/")
+    return host if "://" in host else f"http://{host}"
+
+
+class _GemmaEmbeddings:
+    """embeddinggemma-2 through Ollama's /api/embed: text and images, one space.
+
+    Text takes the model's task prefixes (a query and a document are embedded
+    differently; without them it retrieves measurably worse). An image is sent
+    as ``input=[{"text": "", "image": <base64>}]`` and takes no prefix. The
+    ``images=`` field and the older /api/embeddings endpoint are not used: both
+    ignore the image without an error.
+    """
+
+    def __init__(self, model):
+        self._model = model
+
+    def _post(self, inputs):
+        import requests
+
+        resp = requests.post(
+            f"{_ollama_host()}/api/embed",
+            json={"model": self._model, "input": inputs, "truncate": True},
+            timeout=600,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def embed_documents(self, texts):
+        texts = list(texts)
+        if not texts:
+            return []
+        return self._post([GEMMA_DOC_PREFIX + t for t in texts])["embeddings"]
+
+    def embed_query(self, text):
+        return self._post([GEMMA_QUERY_PREFIX + text])["embeddings"][0]
+
+    def embed_image(self, image_path):
+        import base64
+
+        with open(image_path, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode()
+        data = self._post([{"text": "", "image": b64}])
+        tokens = data.get("prompt_eval_count")
+        if tokens is not None and tokens < _MIN_IMAGE_TOKENS:
+            raise RuntimeError(
+                f"{self._model} embedded {image_path} as {tokens} tokens: the image "
+                "did not reach the model (is this Ollama build multimodal?)"
+            )
+        return data["embeddings"][0]
+
+
 _embeddings_singleton = None
 
 
@@ -302,6 +363,9 @@ def get_embeddings(model=None):
         elif EMBED_BACKEND == "openai":
             logger.info("Embeddings: OpenAI-compatible endpoint (%s)", model)
             _embeddings_singleton = _OpenAIEmbeddings(model)
+        elif EMBED_BACKEND == "ollama" and model.startswith("embeddinggemma"):
+            logger.info("Embeddings: %s (text and images) via Ollama", model)
+            _embeddings_singleton = _GemmaEmbeddings(model)
         elif EMBED_BACKEND == "ollama":
             from langchain_ollama import OllamaEmbeddings
 

@@ -2,7 +2,6 @@
 
 import streamlit as st
 
-from research_assistant import config
 from research_assistant.ui.common import _corpus_stats
 from research_assistant.ui.jobs import _handle_job_state, _render_recent_runs, _start_pipeline_job
 from research_assistant.ui.results import _render_build
@@ -29,14 +28,9 @@ def render_idea_tab():
             placeholder="https://arxiv.org/abs/2401.12345 — leave blank to search automatically",
             help="Used when the search finds no open-access PDF. Accepts an arXiv link or a direct .pdf URL.",
         )
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         ask = c1.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis across discovered papers.")
         force = c2.toggle("Force re-run", value=False)
-        describe_figures = c3.toggle(
-            "Analyse figures",
-            value=config.FIGURE_VLM,
-            help="Describe figures and tables with VLM during ingestion. Adds ~1 min per figure on CPU.",
-        )
         submitted_idea = st.form_submit_button("Explore Research Idea", type="primary")
 
     if submitted_idea:
@@ -53,7 +47,6 @@ def render_idea_tab():
                 seed_file_path=None,
                 ask=ask,
                 force=force,
-                describe_figures=describe_figures,
                 audit_citations=False,
                 origin="idea",
             )

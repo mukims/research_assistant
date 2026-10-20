@@ -10,7 +10,7 @@ per-sentence loop).
 
 import numpy as np
 
-from research_assistant.config import RRF_K, DEFAULT_TOP_K
+from research_assistant.config import RRF_K, DEFAULT_TOP_K, EXCLUDED_FROM_EVIDENCE
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.tokenize import tokenize, legacy_tokenize
 
@@ -70,7 +70,7 @@ def hybrid_search(
                           ``metadata["document"]`` is in this set (stage-2 of
                           two-stage retrieval).
         exclude_types:    Chunk ``metadata["type"]`` values to leave out of
-                          both retrievers (e.g. ``{"figure_description"}``
+                          both retrievers (e.g. ``EXCLUDED_FROM_EVIDENCE``
                           — Agent 8 never takes a model's reading of a plot
                           as evidence).
         exclude_docs:     Chunk ``metadata["document"]`` values to leave out of
@@ -182,6 +182,10 @@ def expand_neighbours(results, texts, metadatas, window: int = 1):
     text. Adds ``context_before`` / ``context_after`` (joined with newlines,
     nearest last / nearest first respectively); empty strings at a document
     boundary. Callers that ignore the two keys see no change.
+
+    Entries that are never evidence (a figure's image, an old VLM description)
+    are skipped: they are stored beside their caption and would otherwise reach
+    the judge as its context.
     """
     def _meta(i):
         return metadatas[i] if 0 <= i < len(metadatas) else None
@@ -195,11 +199,15 @@ def expand_neighbours(results, texts, metadatas, window: int = 1):
                 m = _meta(idx - i)
                 if m is None or m.get("document") != doc:
                     break
+                if m.get("type") in EXCLUDED_FROM_EVIDENCE:
+                    continue
                 before.insert(0, texts[idx - i])
             for i in range(1, window + 1):
                 m = _meta(idx + i)
                 if m is None or m.get("document") != doc:
                     break
+                if m.get("type") in EXCLUDED_FROM_EVIDENCE:
+                    continue
                 after.append(texts[idx + i])
         r["context_before"] = "\n".join(before)
         r["context_after"] = "\n".join(after)

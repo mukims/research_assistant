@@ -47,9 +47,6 @@ with st.sidebar:
     st.subheader("Backend")
     st.caption(f"**Chat** — `{config.LLM_MODEL}` · {config.LLM_BACKEND}")
     st.caption(f"**Embeddings** — `{config.EMBED_MODEL}` · {config.EMBED_BACKEND}")
-    st.caption(
-        f"**Layout** — {'on' if config.LAYOUT_DETECTION else 'text-only'}"
-    )
 
     st.subheader("Server & Services")
     _render_grobid_controls()

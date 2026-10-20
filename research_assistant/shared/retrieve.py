@@ -16,6 +16,7 @@ import re
 import time
 
 from research_assistant.config import (
+    EXCLUDED_FROM_EVIDENCE,
     VECTORDB_PATH,
     SUMMARY_COLLECTION_NAME,
     DOC_SELECT_K,
@@ -36,7 +37,7 @@ from research_assistant.prompts import (
     PAPER_NOTES_USER,
     SYNTHESIS_USER,
 )
-from research_assistant.shared.db import load_search_resources
+from research_assistant.shared.db import check_embedder, load_search_resources
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.search import hybrid_search
@@ -60,6 +61,7 @@ def rank_documents(query: str, k: int = DOC_SELECT_K) -> list[dict]:
     except Exception:
         logger.warning("No summary collection yet — has anything been ingested?")
         return []
+    check_embedder(col)
 
     n = col.count()
     if not n:
@@ -98,6 +100,7 @@ def document_summaries(documents) -> dict[str, str]:
     except Exception:
         logger.warning("No summary collection yet — has anything been ingested?")
         return {}
+    check_embedder(col)
     got = col.get(ids=[f"sum::{d}" for d in wanted], include=["documents", "metadatas"])
     out: dict[str, str] = {}
     for text, meta in zip(got.get("documents") or [], got.get("metadatas") or []):
@@ -211,7 +214,7 @@ def passages_per_paper(query: str, selected: list[dict], per_paper: int) -> dict
         hits = hybrid_search(
             query, collection, bm25, texts, metadatas,
             top_k=per_paper, doc_filter={r["document"]},
-            exclude_types={"figure_description"},
+            exclude_types=EXCLUDED_FROM_EVIDENCE,
         )
         for h in hits:
             h["key"] = r["key"]

@@ -1,9 +1,9 @@
 # Python 3.10–3.12 (pinned; see pyproject.toml's requires-python) —
 # pip install -r requirements.txt
 #
-# This is the core install: the Streamlit UI, the LangGraph orchestrator, the
-# text-only ingestion path, and both LLM backends. Layout detection (detectron2
-# + VLM figure captions) is optional and lives in requirements-layout.txt.
+# This is the whole install: the Streamlit UI, the LangGraph orchestrator, the
+# ingestion path (GROBID text, figure crops embedded as images), and both LLM
+# backends. There is no layout-detection or VLM stack any more.
 #
 # Pins refreshed 2026-10-14. Verified: the full test suite passes on Python 3.12
 # with exactly these versions, the real openai / langgraph / lxml / PyMuPDF
@@ -39,14 +39,11 @@ grobid-client-python==0.2.0
 beautifulsoup4==4.15.0
 lxml==6.1.3
 
-# ─── Agent 3 — Ingestor (text-only path) + retrieval ────────────────────────
+# ─── Agent 3 — Ingestor + retrieval ─────────────────────────────────────────
 PyMuPDF==1.28.2                # 1.28 deprecates `import fitz` (the code still uses it); `import pymupdf` is the new name
 numpy==2.2.6
-tqdm==4.70.1
 chromadb==1.5.9
 rank-bm25==0.2.2
-langchain-experimental==0.4.2  # SemanticChunker (the project is being sunset upstream)
-langchain-text-splitters==1.1.3  # imported directly by shared/ingestion.py; also arrives via langchain-experimental
 snowballstemmer==3.1.1         # BM25 tokenizer stemming (v2)
 pysbd==0.3.4                   # v2 chunker sentence splitter
 

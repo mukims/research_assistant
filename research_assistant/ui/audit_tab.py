@@ -46,7 +46,7 @@ def render_audit_tab():
             placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
             help="If provided, used to synthesize an answer across the papers at the end.",
         )
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         audit_citations = c1.toggle(
             "Audit citations",
             value=True,
@@ -54,11 +54,6 @@ def render_audit_tab():
         )
         ask = c2.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis.")
         force = c3.toggle("Force re-run", value=False)
-        describe_figures = c4.toggle(
-            "Analyse figures",
-            value=config.FIGURE_VLM,
-            help="Describe figures and tables with VLM during ingestion. Adds ~1 min per figure on CPU.",
-        )
         submitted_upload = st.form_submit_button("Audit Citations & Index Paper(s)", type="primary")
 
     if submitted_upload:
@@ -144,7 +139,6 @@ def render_audit_tab():
                         seed_file_path=seed_file_path,
                         ask=ask,
                         force=force,
-                        describe_figures=describe_figures,
                         audit_citations=audit_citations,
                         origin="audit",
                     )
@@ -170,7 +164,7 @@ def render_audit_tab():
                         detail=f"Batch ingesting {len(candidates)} papers",
                     ):
                         try:
-                            ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force, describe_figures=describe_figures)
+                            ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force)
                         finally:
                             pipeline_status.unregister_progress_callback(_on_batch_progress)
 
@@ -178,8 +172,8 @@ def render_audit_tab():
                         status.update(label="Batch ingestion stopped by user", state="error")
                         st.warning("Batch ingestion stopped by user.", icon="⏹️")
                     else:
-                        if ingest_res.get("described"):
-                            st.write(f"🖼️ Described {ingest_res['described']} figure(s)/table(s).")
+                        if ingest_res.get("figure_images"):
+                            st.write(f"🖼️ Embedded {ingest_res['figure_images']} figure(s)/table(s).")
                         scanned_empty = ingest_res.get("scanned_or_empty", [])
                         inserted = ingest_res.get("inserted", 0)
                         processed = ingest_res.get("processed", len(candidates))

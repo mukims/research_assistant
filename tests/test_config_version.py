@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 _PROBE = """
@@ -23,6 +24,8 @@ print(json.dumps({
     "target": c.CHUNK_TARGET_CHARS,
     "max": c.CHUNK_MAX_CHARS,
     "tei_dir": c.GROBID_TEI_DIR.rsplit("/", 1)[-1],
+    "embed": c.EMBED_MODEL,
+    "images": c.EMBED_IMAGES,
 }))
 """
 
@@ -31,21 +34,41 @@ def _probe(**env):
     # Start from a copy of the environment with every CITATION_* knob these
     # tests set removed, so the outer shell cannot leak a value into the
     # "default" case; then apply this case's values.
+    # The data directory is an empty temp dir too: config.py loads DATA_DIR/.env
+    # with override=True, and the maintainer's pins the embedder there.
     full = {k: v for k, v in os.environ.items()
-            if k not in ("CITATION_INDEX_VERSION", "CITATION_CHUNK_TARGET_CHARS", "CITATION_CHUNK_MAX_CHARS")}
-    full.update({"CITATION_LOG_FILE": "0", **env})
-    out = subprocess.run([sys.executable, "-c", _PROBE], env=full, capture_output=True, text=True, check=True)
+            if k not in ("CITATION_INDEX_VERSION", "CITATION_CHUNK_TARGET_CHARS", "CITATION_CHUNK_MAX_CHARS",
+                         "CITATION_EMBED_MODEL", "CITATION_EMBED_BACKEND", "LLM_BACKEND", "GEMINI_API_KEY")}
+    with tempfile.TemporaryDirectory() as data_dir:
+        full.update({"CITATION_LOG_FILE": "0", "CITATION_DATA_DIR": data_dir, **env})
+        out = subprocess.run([sys.executable, "-c", _PROBE], env=full, capture_output=True, text=True, check=True)
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
 class TestIndexVersionNames(unittest.TestCase):
-    def test_default_is_v1_with_the_existing_names(self):
+    def test_default_is_v3_with_its_own_names(self):
         got = _probe()
+        self.assertEqual(got["v"], 3)
+        self.assertEqual(got["chunks"], "physics_papers_v3")
+        self.assertEqual(got["summaries"], "physics_summaries_v3")
+        self.assertEqual(got["bm25"], "bm25_index_v3.pkl")
+        self.assertEqual(got["manifest"], "ingested_v3.json")
+
+    def test_v1_still_opens_the_unsuffixed_names(self):
+        got = _probe(CITATION_INDEX_VERSION="1")
         self.assertEqual(got["v"], 1)
         self.assertEqual(got["chunks"], "physics_papers")
         self.assertEqual(got["summaries"], "physics_summaries")
         self.assertEqual(got["bm25"], "bm25_index.pkl")
         self.assertEqual(got["manifest"], "ingested.json")
+
+    def test_default_embedder_takes_images_on_ollama_only(self):
+        got = _probe()
+        self.assertEqual((got["embed"], got["images"]), ("embeddinggemma-2", True))
+        got = _probe(CITATION_EMBED_MODEL="nomic-embed-text")
+        self.assertFalse(got["images"])
+        got = _probe(CITATION_EMBED_BACKEND="openai")
+        self.assertFalse(got["images"])
 
     def test_v2_suffixes_every_name(self):
         got = _probe(CITATION_INDEX_VERSION="2")

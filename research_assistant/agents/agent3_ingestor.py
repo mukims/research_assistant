@@ -43,13 +43,12 @@ def _pdfs_from_manifest(downloaded: dict) -> dict[str, str]:
     return pdfs
 
 
-def run_ingestor(workers: int = 1, force: bool = False, describe_figures: bool | None = None):
+def run_ingestor(workers: int = 1, force: bool = False):
     """Ingest every PDF Agent 2 successfully downloaded.
 
     Args:
         workers: Parallel worker processes for the parsing stage.
         force:   Re-process PDFs even if they are already recorded as ingested.
-        describe_figures: v2 — analyse every figure and table with the model for this run (None → config).
     """
     standalone = not pipeline_status.get_status().get("active")
     with pipeline_status.track_stage(
@@ -85,7 +84,7 @@ def run_ingestor(workers: int = 1, force: bool = False, describe_figures: bool |
             pipeline_status.update_progress(detail="No usable PDF paths in download manifest")
             return
 
-        result = ingest_pdfs(pdfs, workers=workers, skip_ingested=not force, describe_figures=describe_figures)
+        result = ingest_pdfs(pdfs, workers=workers, skip_ingested=not force)
 
         logger.info(
             "Done. Processed %d, skipped %d, inserted %d chunk(s), %d unreadable.",
@@ -114,14 +113,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Force re-processing of all PDFs, even if already ingested.",
     )
-    parser.add_argument(
-        "--describe-figures",
-        action="store_true",
-        default=None,
-        help="Index v2: describe every figure and table with the model during this run "
-             "(one choice for the whole run; ~1 minute per figure on CPU). Default: CITATION_FIGURE_VLM.",
-    )
     args = parser.parse_args()
 
     multiprocessing.set_start_method("spawn", force=True)
-    run_ingestor(workers=args.workers, force=args.force, describe_figures=args.describe_figures)
+    run_ingestor(workers=args.workers, force=args.force)

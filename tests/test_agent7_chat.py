@@ -12,6 +12,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from research_assistant.config import EXCLUDED_FROM_EVIDENCE
 from research_assistant.agents import agent7_research_chat as a7
 
 
@@ -94,7 +95,7 @@ class TestFirstTurn(ChatTestCase):
         self._turn("What does the MoS2 paper say?")
         self.assertEqual([c for c in self.chats if "Rewrite" in c["content"]], [])
         self.assertEqual(self.searches[0]["top_k"], 10)
-        self.assertEqual(self.searches[0]["exclude_types"], {"figure_description"})
+        self.assertEqual(self.searches[0]["exclude_types"], EXCLUDED_FROM_EVIDENCE)
         docs = [s["document"] for s in self.agent.last_sources]
         self.assertEqual(docs, ["a.pdf", "a.pdf", "a.pdf", "b.pdf", "c.pdf"])
 

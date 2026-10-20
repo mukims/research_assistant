@@ -7,8 +7,8 @@ shared with v1 rather than copied. Three entry types are new and carry
 `embed_text` (what is embedded) apart from `content` (what is stored, quoted,
 cited and verified), and flat `meta`.
 
-Figure analysis is a per-run switch (spec §4.6): when on, every figure and
-table with a crop is described here, inline, before this function returns.
+Every figure and table with a crop also gets an image entry: the crop embedded
+by embeddinggemma-2 (config.EMBED_IMAGES), stored under the caption's text.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ import os
 
 from research_assistant.config import (
     CHUNK_TARGET_CHARS, CHUNK_MAX_CHARS, CHUNK_MIN_CHARS, CHUNK_MIN_ALPHA,
-    IMAGES_DIR, PDF_RENDER_DPI, SUMMARY_MAX_CHARS,
+    EMBED_IMAGES, FIGURE_CROP_DPI, IMAGES_DIR, SUMMARY_MAX_CHARS,
 )
 from research_assistant.shared.chunking import chunk_document
 from research_assistant.shared.extract import extract, Document
 from research_assistant.shared.figures import (
-    DESCRIPTION_PREFIX, crop_name, crop_figure, figure_context, describe_crop,
+    FIGURE_IMAGE_PREFIX, crop_name, crop_figure,
 )
 from research_assistant.shared.log import get_logger
 
@@ -52,7 +52,7 @@ def _summary_source(doc: Document) -> str:
     return "\n\n".join(parts)[:SUMMARY_MAX_CHARS]
 
 
-def process_pdf_v2(pdf_path: str, citation_string: str, describe_figures: bool = False,
+def process_pdf_v2(pdf_path: str, citation_string: str,
                    images_dir: str | None = None) -> list[dict]:
     images_dir = images_dir or IMAGES_DIR
     key = _pdf_key(pdf_path)
@@ -63,7 +63,8 @@ def process_pdf_v2(pdf_path: str, citation_string: str, describe_figures: bool =
     figures = {f.id: f for f in doc.figures}
 
     entries: list[dict] = []
-    described = 0
+    imaged = failed_images = 0
+    embedder = None
     fig_index = 0
     for c in chunks:
         base = {
@@ -88,39 +89,42 @@ def process_pdf_v2(pdf_path: str, citation_string: str, describe_figures: bool =
             name = crop_name(key, fig, fig_index)
             fig_index += 1
             try:
-                if crop_figure(pdf_path, fig, os.path.join(images_dir, name), PDF_RENDER_DPI):
+                if crop_figure(pdf_path, fig, os.path.join(images_dir, name), FIGURE_CROP_DPI):
                     image_path = name
             except Exception as exc:                # noqa: BLE001
                 logger.warning("Crop failed for %s %s: %s", key, fig.label, exc)
 
         cap_meta = {**meta, "figure_id": c.figure_id, "figure_kind": c.figure_kind,
-                    "figure_label": c.figure_label, "image_path": image_path, "described": False}
+                    "figure_label": c.figure_label, "image_path": image_path}
         cap_entry = {**base, "type": "caption", "content": c.text,
                      "embed_text": _header(title, c.figure_label) + c.text, "meta": cap_meta}
         entries.append(cap_entry)
 
-        if describe_figures and fig is not None and image_path:
-            context = figure_context(fig)
+        if EMBED_IMAGES and fig is not None and image_path:
             try:
-                text = describe_crop(os.path.join(images_dir, image_path), fig, context)
+                if embedder is None:
+                    from research_assistant.shared.llm import get_embeddings
+                    embedder = get_embeddings()
+                vector = embedder.embed_image(os.path.join(images_dir, image_path))
             except Exception as exc:                # noqa: BLE001
-                logger.error("Description failed for %s %s: %s", key, fig.label, exc)
+                logger.error("Image embedding failed for %s %s: %s", key, fig.label, exc)
+                failed_images += 1
                 continue
-            if not text:
-                continue
-            content = DESCRIPTION_PREFIX.format(label=fig.label) + text
-            entries.append({**base, "type": "figure_description", "content": content,
-                            "embed_text": _header(title, c.figure_label) + content,
-                            "meta": {**cap_meta, "extraction": "vlm", "described": True}})
-            cap_meta["described"] = True
-            described += 1
-            logger.info("  described %s (%d/%d)", fig.label, described, len(doc.figures))
+            content = FIGURE_IMAGE_PREFIX.format(label=fig.label) + (fig.caption or c.text)
+            entries.append({**base, "type": "figure_image", "content": content,
+                            "embedding": vector,
+                            "meta": {**cap_meta, "extraction": "image"}})
+            imaged += 1
 
     entries.append({"document": key, "citation": citation_string, "page": 0,
                     "type": "summary_source", "content": _summary_source(doc),
                     "extraction": doc.extraction})
 
-    logger.info("✓ %s: %s, %d text chunk(s), %d caption(s), %d described, %d bib entries kept out",
+    logger.info("✓ %s: %s, %d text chunk(s), %d caption(s), %d image(s) embedded, %d bib entries kept out",
                 key, doc.extraction, sum(e["type"] == "text_chunk" for e in entries),
-                sum(e["type"] == "caption" for e in entries), described, doc.n_bib)
+                sum(e["type"] == "caption" for e in entries), imaged, doc.n_bib)
+    if failed_images:
+        # A figure without its image vector is still found by its caption, but
+        # the run should say that some images are missing.
+        logger.warning("%s: %d figure image(s) could not be embedded", key, failed_images)
     return entries

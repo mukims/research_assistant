@@ -12,7 +12,7 @@ Usage:
 import os
 import pickle
 
-from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH
+from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, EMBED_MODEL
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.tokenize import TOKENIZER_VERSION
 
@@ -31,6 +31,23 @@ def _cache_key():
     except OSError:
         mtime = None
     return (VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime)
+
+
+def check_embedder(collection) -> None:
+    """Refuse a collection built with a different embedder than the configured one.
+
+    A query embedded by one model against vectors from another returns plausible
+    but wrong neighbours and no error, so the embedder is recorded when a
+    collection is created and compared here whenever one is opened. A collection
+    that predates the record (index v1, v2) is not checked.
+    """
+    stored = (getattr(collection, "metadata", None) or {}).get("embedder")
+    if stored and stored != EMBED_MODEL:
+        raise RuntimeError(
+            f"Collection {collection.name!r} was built with the embedder {stored!r} but "
+            f"CITATION_EMBED_MODEL is {EMBED_MODEL!r}. Set CITATION_EMBED_MODEL={stored} to "
+            "read it, or build a new index version for the new embedder."
+        )
 
 
 def clear_search_cache() -> None:
@@ -74,6 +91,7 @@ def _load_search_resources_uncached():
             VECTORDB_PATH,
         )
         raise RuntimeError("Database not initialized. Please ingest papers first.")
+    check_embedder(collection)
 
     # Paginate all chunks from the collection
     paired_data = []

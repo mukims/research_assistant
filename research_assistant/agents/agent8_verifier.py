@@ -29,6 +29,7 @@ from research_assistant.agents.agent5_batch_citer import (
     split_into_sentences,
 )
 from research_assistant.config import (
+    EXCLUDED_FROM_EVIDENCE,
     JUDGEMENT_ESCALATE_TOP_K,
     JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_MODEL,
@@ -297,7 +298,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             hits = hybrid_search(
                 entry["claim"], collection, bm25, texts, metadatas,
                 top_k=retrieve_k, doc_filter=documents,
-                exclude_types={"figure_description"},
+                exclude_types=EXCLUDED_FROM_EVIDENCE,
             )
         except Exception as exc:
             entry["outcome"] = "retrieval_failed"

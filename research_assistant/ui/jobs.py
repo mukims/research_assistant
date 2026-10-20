@@ -93,7 +93,6 @@ def _start_pipeline_job(
     seed_file_path: str | None = None,
     ask: bool = True,
     force: bool = False,
-    describe_figures: bool = False,
     audit_citations: bool = True,
     origin: str = "audit",
 ) -> str | None:
@@ -116,7 +115,6 @@ def _start_pipeline_job(
         "ask": ask,
         "seed_url": seed_url_val,
         "seed_file": seed_file_path,
-        "describe_figures": describe_figures,
         "audit_citations": audit_citations,
     }
     display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"

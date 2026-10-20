@@ -78,8 +78,6 @@ class PipelineState(_Inputs, total=False):
     citation_audit: Optional[dict]
     audit_citations: Optional[bool]
     stopped: Optional[str]   # reason the run ended early, if it did
-    # v2: the run's figure-analysis switch. None → config.FIGURE_VLM.
-    describe_figures: Optional[bool]
     discovery_trace: Optional[dict]
     context_profile: Optional[dict]
 
@@ -159,7 +157,6 @@ def ingest_seed(state: PipelineState) -> dict:
             {state["seed_path"]: state["seed_label"]},
             workers=state.get("workers", 1),
             skip_ingested=not state.get("force", False),
-            describe_figures=state.get("describe_figures"),
         )
         pipeline_status.add_event(f"✅ Seed paper indexed: {label[:60]}")
         return {}
@@ -202,7 +199,6 @@ def ingest_refs(state: PipelineState) -> dict:
     with pipeline_status.track_stage("ingest_refs", "Ingesting and summarizing papers", current_step=5, total_steps=5, detail="Ingesting referenced papers into corpus"):
         agent3_ingestor.run_ingestor(
             workers=state.get("workers", 1), force=state.get("force", False),
-            describe_figures=state.get("describe_figures"),
         )
         return {}
 
@@ -316,7 +312,6 @@ def run(
     ask: bool = False,
     seed_url: str | None = None,
     seed_file: str | None = None,
-    describe_figures: bool | None = None,
     audit_citations: bool = False,
 ) -> int:
     app = build_graph()
@@ -345,7 +340,6 @@ def run(
                 "ask": ask,
                 "seed_url": seed_url,
                 "seed_file": seed_file,
-                "describe_figures": describe_figures,
                 "audit_citations": audit_citations,
             },
             config=config,
@@ -443,10 +437,6 @@ def main():
         help="Seed directly from a local PDF file instead of searching.",
     )
     parser.add_argument(
-        "--describe-figures", action="store_true", default=None,
-        help="Index v2: analyse every figure and table with the model during this run.",
-    )
-    parser.add_argument(
         "--audit-citations", action="store_true", default=False,
         help="Audit in-text citations from the seed paper against fetched references.",
     )
@@ -458,7 +448,6 @@ def main():
     raise SystemExit(run(
         args.query, workers=args.workers, force=args.force, ask=args.ask,
         seed_url=args.seed_url, seed_file=args.seed_file,
-        describe_figures=args.describe_figures,
         audit_citations=args.audit_citations,
     ))
 

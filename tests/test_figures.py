@@ -1,10 +1,5 @@
 # tests/test_figures.py
-"""Figures: crop from GROBID's box, describe with the right context.
-
-The v1 path gave the VLM whatever text block sat below a Detectron2 crop —
-30% of the time not the caption. Here the context is the caption plus the
-sentences that cite the figure, and the output is marked as generated.
-"""
+"""Figures: crop from GROBID's box. The crop is embedded as an image, never described."""
 
 import os
 import sys
@@ -24,24 +19,8 @@ def _fig(**kw):
     return Figure(**base)
 
 
-class TestContext(unittest.TestCase):
-    def test_caption_plus_citing_sentences(self):
-        f = _fig(refs=["We find a 10% increase (Figure 1b).", "Figure 1c shows the decay."])
-        ctx = fg.figure_context(f)
-        self.assertTrue(ctx.startswith("Caption: Figure 1: Photoconductivity dynamics."))
-        self.assertIn("Referenced in the text:", ctx)
-        self.assertIn("- We find a 10% increase (Figure 1b).", ctx)
-
-    def test_refs_are_capped(self):
-        f = _fig(refs=[f"Ref {i}." for i in range(10)])
-        self.assertEqual(fg.figure_context(f, max_refs=3).count("\n- "), 3)
-
-    def test_no_refs(self):
-        self.assertNotIn("Referenced", fg.figure_context(_fig()))
-
-
 class TestCropName(unittest.TestCase):
-    def test_matches_v1_naming(self):
+    def test_name_is_document_page_and_index(self):
         self.assertEqual(fg.crop_name("doi_10.1_x.pdf", _fig(page=4), 2), "doi_10.1_x.pdf_p4_f2.png")
 
 
@@ -81,23 +60,12 @@ class TestCrop(unittest.TestCase):
             self.assertFalse(fg.crop_figure("/x/p.pdf", _fig(page=7), "/x/out.png", dpi=72))
 
 
-class TestDescribe(unittest.TestCase):
-    def test_routes_through_shared_llm_with_the_image_and_temperature_zero(self):
-        seen = {}
-
-        def fake_chat(messages, images=None, temperature=None, **kw):
-            seen.update(messages=messages, images=images, temperature=temperature)
-            return types.SimpleNamespace(content="Two peaks at ±1.")
-
-        import research_assistant.shared.llm as llm_mod
-        with patch.object(llm_mod, "chat", fake_chat):
-            out = fg.describe_crop("/x/crop.png", _fig(), "Caption: ...")
-        self.assertEqual(out, "Two peaks at ±1.")
-        self.assertEqual(seen["images"], ["/x/crop.png"])
-        self.assertEqual(seen["temperature"], 0.0)
-        self.assertIn("Caption: ...", seen["messages"][-1]["content"])
-        self.assertIn("figure", seen["messages"][-1]["content"].lower())
-
+class TestImageEntryConstants(unittest.TestCase):
     def test_prefix_names_the_figure(self):
-        self.assertEqual(fg.DESCRIPTION_PREFIX.format(label="Table 2"),
-                         "Auto-generated description of Table 2 — verify values against the figure: ")
+        self.assertEqual(fg.FIGURE_IMAGE_PREFIX.format(label="Table 2"), "Image of Table 2: ")
+
+    def test_images_and_old_descriptions_are_never_evidence(self):
+        self.assertIn("figure_image", fg.EXCLUDED_FROM_EVIDENCE)
+        self.assertIn("figure_description", fg.EXCLUDED_FROM_EVIDENCE)
+        self.assertNotIn("caption", fg.EXCLUDED_FROM_EVIDENCE)
+        self.assertNotIn("text_chunk", fg.EXCLUDED_FROM_EVIDENCE)

@@ -37,7 +37,7 @@ jobs:
 
       - name: Check every module still imports
         # Catches a broken import that no test happens to cover. Modules
-        # needing the ML stack (chromadb, torch, detectron2, langchain
+        # needing the ML stack (chromadb, torch, langchain
         # embeddings) are imported lazily inside the functions that use them,
         # so the whole package tree imports fine without that stack installed;
         # CI deliberately does not install it.

@@ -6,7 +6,7 @@
 #
 # The suite exercises pure logic — citation parsing, paper naming, extractor
 # filing, ingestion bookkeeping, retrieval ranking. The heavy stack (ChromaDB,
-# PyTorch, detectron2, layoutparser, the LangChain embedding chain) is imported
+# PyTorch, the LangChain embedding chain) is imported
 # lazily inside the functions the tests never call, so none of it is needed
 # here. That is deliberate: it keeps the tests runnable anywhere.
 #

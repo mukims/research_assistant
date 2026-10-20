@@ -7,8 +7,8 @@ Provides:
                           Callers should use this rather than composing the
                           steps below themselves, so the check/mark bookkeeping
                           stays consistent across entry points.
-    - process_pdf()     — Detectron2 layout detection + VLM figure description
-    - upsert_corpus()   — Semantic chunking + ChromaDB upsert
+    - process_pdf()     — GROBID full text → chunks, captions and figure crops
+    - upsert_corpus()   — Embed (text and figure images) + ChromaDB upsert
     - rebuild_bm25()    — Full BM25 index rebuild from the collection
     - pdf_key()         — Normalised document identity used by both stores
 """
@@ -29,48 +29,35 @@ except ImportError:      # non-POSIX: fall back to the in-process lock alone
 
 warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 
-# Detectron2/layoutparser, OpenCV, PyMuPDF, ChromaDB and the LangChain
-# embedding stack are imported inside the functions that use them, not here.
+# PyMuPDF, ChromaDB and the embedding stack are imported inside the functions
+# that use them, not here.
 #
 # This is deliberate and load-bearing, not a style preference: CI installs only
 # requirements-test.txt, and test_ingestion.py imports this module. Moving these
-# to module scope makes the whole suite uncollectable there, and adding the
-# packages does not fix it — layoutparser needs detectron2, which is not on
-# PyPI and is built against a specific torch/CUDA.
+# to module scope makes the whole suite uncollectable there.
 #
 # The bookkeeping in ingest_pdfs() and the text helpers are ordinary Python;
 # keeping them importable on their own is what makes them testable anywhere.
 
 from research_assistant.config import (
     DATA_DIR,
-    PROJECT_ROOT,
     VECTORDB_PATH,
     COLLECTION_NAME,
     SUMMARY_COLLECTION_NAME,
+    EMBED_MODEL,
     BM25_INDEX_PATH,
     INDEX_VERSION,
-    LAYOUT_DETECTION,
-    FIGURE_VLM,
-    DETECTRON_WEIGHTS,
-    DETECTRON_CONFIG,
-    DETECTRON_LABEL_MAP,
-    DETECTRON_SCORE_THRESH,
-    IMAGES_DIR,
-    PDF_RENDER_DPI,
     CHUNK_MIN_LENGTH,
     EMBED_BATCH_SIZE,
     EMBED_MAX_CHARS,
-    SEMANTIC_CHUNKER_TYPE,
-    SEMANTIC_CHUNKER_AMOUNT,
     SUMMARY_MODEL,
     LLM_MODEL,
     SUMMARY_MAX_CHARS,
 )
-from research_assistant.prompts import FIGURE_DESCRIPTION, DOCUMENT_SUMMARY
+from research_assistant.prompts import DOCUMENT_SUMMARY
 from research_assistant.shared.atomic import atomic_write
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.retry import retry
-from research_assistant.shared.db import get_max_chunk_index
+from research_assistant.shared.db import check_embedder, get_max_chunk_index
 from research_assistant.shared import manifest
 from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
 from research_assistant.shared import pipeline_status
@@ -124,425 +111,24 @@ def _ingest_lock():
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-# ─── Text helpers ─────────────────────────────────────────────────────────────
-
-# Pre-compiled regex patterns for clean_text (avoid recompilation per call)
-_RE_SPACED_PAIR_BOUNDARY = re.compile(r'\b(\w) (\w) ')
-_RE_SPACED_PAIR_STANDALONE = re.compile(r'(?<!\w)(\w) (\w)(?!\w)')
-_RE_MULTI_SPACE = re.compile(r'\s+')
-
-
-def find_caption(text_blocks, bbox, box_type):
-    """Find the nearest caption text below a figure/table bounding box."""
-    x1, y1, x2, y2 = bbox
-    best, min_dist = "", float("inf")
-    for b in text_blocks:
-        tx0, ty0, tx1, ty1 = b["bbox"]
-        text = b["text"]
-        horiz_overlap = max(0, min(x2, tx1) - max(x1, tx0))
-        if horiz_overlap < 10 and (x2 - x1) > 100:
-            continue
-        if box_type == "Figure":
-            dist = ty0 - y2
-            if -20 < dist < 400:
-                score = dist - (200 if text.lower().startswith("fig") else 0)
-                if score < min_dist:
-                    min_dist, best = score, text
-    return best
-
-
-def clean_text(text):
-    """Remove fragmented single-character spacing artifacts from PDF extraction.
-
-    Uses pre-compiled regexes and converges early instead of looping a
-    fixed 20 times. Preserves paragraph breaks (double newlines).
-    """
-    paragraphs = (text or "").split("\n\n")
-    cleaned_paras = []
-    for p in paragraphs:
-        p = _RE_SPACED_PAIR_BOUNDARY.sub(r'\1\2', p)
-        # Iterate until stable (converges in 2-5 passes for typical PDF artefacts)
-        for _ in range(20):
-            new_p = _RE_SPACED_PAIR_STANDALONE.sub(r'\1\2', p)
-            if new_p == p:
-                break
-            p = new_p
-        p = _RE_MULTI_SPACE.sub(' ', p).strip()
-        if p:
-            cleaned_paras.append(p)
-    return "\n\n".join(cleaned_paras)
-
-
-# ─── VLM call (with retry) ───────────────────────────────────────────────────
-
-
-@retry(max_retries=3, backoff=2.0)
-def describe_figure(image_path: str, fig_type: str, context: str) -> str:
-    """Ask the VLM to describe a cropped figure/table image."""
-    from research_assistant.shared.llm import chat
-
-    prompt = FIGURE_DESCRIPTION.format(fig_type=fig_type.lower(), context=context)
-    return chat([{"role": "user", "content": prompt}], images=[image_path]).content
-
-
-# ─── Detectron2 model cache ──────────────────────────────────────────────────
-# In sequential mode, avoids re-loading the ~400MB model for every PDF.
-
-_detectron_model_cache = {}
-
-
-class _LoadFailure:
-    """A (weights, config) pair whose model load already failed.
-
-    Kept in the model cache alongside successful models. process_pdf() swallows
-    a load failure into a text-only fallback, so nothing upstream stops the next
-    document from trying again — without this, a config that cannot load makes
-    every paper in a batch pay for a full Detectron2 construction that is
-    guaranteed to fail. Living in the same dict means the existing cache-clearing
-    also resets it.
-    """
-
-    __slots__ = ("error",)
-
-    def __init__(self, error: Exception):
-        self.error = error
-
-
-def _build_detectron_model(lp, config_path, weights_path):
-    try:
-        import torch
-        if sys.platform == "darwin" or not torch.cuda.is_available():
-            torch.set_num_threads(1)
-    except Exception:
-        pass
-    return lp.Detectron2LayoutModel(
-        config_path=config_path,
-        model_path=weights_path,
-        extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
-        label_map=DETECTRON_LABEL_MAP,
-    )
-
-
-def _get_detectron_model(weights_path=None, config_path=None):
-    """Return a cached Detectron2 model (loaded once per unique weights/config path).
-
-    ``weights_path`` may be None — layoutparser then downloads the PubLayNet
-    weights that go with ``config_path`` (or DETECTRON_CONFIG). A load that
-    fails is remembered too, and re-raised without retrying.
-    """
-    if config_path is None:
-        config_path = DETECTRON_CONFIG
-    if weights_path is None and DETECTRON_WEIGHTS and os.path.exists(DETECTRON_WEIGHTS):
-        weights_path = DETECTRON_WEIGHTS
-
-    cache_key = (weights_path, config_path)
-    cached = _detectron_model_cache.get(cache_key)
-    if cached is None and config_path == DETECTRON_CONFIG:
-        cached = _detectron_model_cache.get(weights_path)
-    if isinstance(cached, _LoadFailure):
-        raise cached.error
-    if cached is not None:
-        return cached
-
-    import layoutparser as lp
-
-    logger.debug(
-        "Loading Detectron2 model from %s (config: %s)…",
-        weights_path or "the lp model zoo",
-        config_path,
-    )
-    local_config = os.path.join(PROJECT_ROOT, "publaynet_config.yaml")
-    try:
-        try:
-            model = _build_detectron_model(lp, config_path, weights_path)
-        except Exception as e:
-            is_same = False
-            try:
-                if os.path.exists(config_path) and os.path.exists(local_config):
-                    is_same = (
-                        os.path.abspath(config_path) == os.path.abspath(local_config)
-                        or os.path.samefile(config_path, local_config)
-                    )
-            except Exception:
-                pass
-
-            if not is_same and config_path != local_config and os.path.exists(local_config):
-                logger.warning(
-                    "Failed to load Detectron2 model with config %s (%s: %s); "
-                    "falling back to local config %s",
-                    config_path, type(e).__name__, e, local_config,
-                )
-                model = _build_detectron_model(lp, local_config, weights_path)
-                _detectron_model_cache[(weights_path, local_config)] = model
-            else:
-                raise
-    except Exception as e:
-        # Both the requested config and the local fallback are unusable. Record
-        # it so the rest of the batch fails fast instead of re-attempting.
-        logger.error(
-            "Detectron2 model could not be loaded (config: %s) — layout detection "
-            "is unavailable for this run and every document will fall back to "
-            "text-only extraction: %s: %s",
-            config_path, type(e).__name__, e,
-        )
-        _detectron_model_cache[cache_key] = _LoadFailure(e)
-        raise
-
-    _detectron_model_cache[cache_key] = model
-    if config_path == DETECTRON_CONFIG:
-        _detectron_model_cache[weights_path] = model
-    return model
-
-
 # ─── Core PDF processing ─────────────────────────────────────────────────────
 
-
-EXTRACTION_MODES = ("layout", "text_only")
-
-# v2 entries arrive already chunked; these pass straight through to the store.
-PRECHUNKED_TYPES = ("text_chunk", "caption", "figure_description")
+# Entries arrive already chunked from ingest_v2; these pass straight to the store.
+# "figure_image" carries a precomputed image embedding (see ingest_v2).
+PRECHUNKED_TYPES = ("text_chunk", "caption", "figure_image")
 
 
-def _tag_extraction(corpus: list[dict], mode: str) -> list[dict]:
-    """Record on each entry which extraction path produced it.
+def process_pdf(pdf_path: str, citation_string: str, images_dir=None):
+    """Extract a single PDF into corpus entries (shared.ingest_v2): GROBID full
+    text with the PyMuPDF fallback, sentence-window chunks, captions, figure
+    crops and their image embeddings.
 
-    Layout detection falling back to text-only costs every figure and table in
-    the document, but the fallback is per-PDF and only logs a warning — so a
-    whole corpus can quietly come out with no figures at all. Tagging here, at
-    the single point where the choice is made, lets ingest_pdfs() count it.
-    The tag rides on the entries rather than the return type because
-    process_pdf() runs inside a process pool, where only the return value
-    crosses back. upsert_corpus() reads named keys, so the extra one is inert.
+    Every entry is tagged with the extraction mode that produced it so
+    ingest_pdfs() can report how the batch was actually extracted.
     """
-    for entry in corpus:
-        entry["extraction"] = mode
-    return corpus
+    from research_assistant.shared.ingest_v2 import process_pdf_v2
 
-
-def process_pdf(
-    pdf_path: str,
-    citation_string: str,
-    detectron_weights=None,
-    images_dir=None,
-    detectron_config=None,
-    describe_figures=None,
-):
-    """Extract a single PDF into corpus entries.
-
-    INDEX_VERSION >= 2: GROBID full-text extraction with the PyMuPDF fallback,
-    sentence-window chunks, captions, crops, and — when the run's switch is on
-    — a VLM description of every figure and table (shared.ingest_v2).
-
-    INDEX_VERSION 1: with ``config.LAYOUT_DETECTION`` on, Detectron2 layout
-    detection plus a VLM description of every figure and table; if that is
-    unavailable or fails it falls back to text-only PyMuPDF. With it off:
-    text-only. Both return the same ``list[dict]`` shape.
-
-    Every entry is tagged with the mode that produced it so ingest_pdfs() can
-    report how the batch was actually extracted — see _tag_extraction().
-    """
-    if INDEX_VERSION >= 2:
-        from research_assistant.shared.ingest_v2 import process_pdf_v2
-
-        if describe_figures is None:
-            describe_figures = FIGURE_VLM
-        return process_pdf_v2(pdf_path, citation_string,
-                              describe_figures=describe_figures, images_dir=images_dir)
-
-    if not LAYOUT_DETECTION:
-        return _tag_extraction(_extract_text_only(pdf_path, citation_string), "text_only")
-    try:
-        return _tag_extraction(
-            _process_pdf_layout(
-                pdf_path,
-                citation_string,
-                detectron_weights,
-                images_dir,
-                detectron_config=detectron_config,
-            ),
-            "layout",
-        )
-    except Exception as e:
-        logger.warning(
-            "Layout detection failed (%s) — falling back to text-only extraction "
-            "for %s. Set CITATION_LAYOUT_DETECTION=0 to silence this.",
-            e, os.path.basename(pdf_path),
-        )
-        return _tag_extraction(_extract_text_only(pdf_path, citation_string), "text_only")
-
-
-def _extract_text_only(pdf_path: str, citation_string: str):
-    """PyMuPDF text-block extraction, no layout model, no figure descriptions."""
-    import fitz
-
-    t0 = time.perf_counter()
-    corpus = []
-    pdf_name = pdf_key(pdf_path)
-    try:
-        pdf = fitz.open(pdf_path)
-    except Exception as e:
-        logger.error("Failed to open %s: %s", pdf_path, e)
-        return corpus
-
-    for page_idx in range(len(pdf)):
-        try:
-            blocks = pdf[page_idx].get_text("blocks")
-        except Exception as e:
-            logger.warning("Failed to extract text from page %d of %s: %s", page_idx, pdf_path, e)
-            continue
-        for b in blocks:
-            if b[6] != 0:                       # skip image blocks
-                continue
-            text = b[4].replace("\n", " ").strip()
-            if len(text) > 4:
-                corpus.append({
-                    "document": pdf_name,
-                    "citation": citation_string,
-                    "page": page_idx,
-                    "type": "text",
-                    "content": text,
-                })
-    if not corpus:
-        logger.warning(
-            "⚠️ %s: 0 text blocks extracted across %d page(s). "
-            "The document appears to be scanned or image-only without an OCR text layer.",
-            pdf_name, len(pdf),
-        )
-    else:
-        logger.info(
-            "✓ %s: %d pages, %d text blocks in %.1fs (text-only)",
-            pdf_name, len(pdf), len(corpus), time.perf_counter() - t0,
-        )
-    return corpus
-
-
-def _process_pdf_layout(
-    pdf_path: str,
-    citation_string: str,
-    detectron_weights=None,
-    images_dir=None,
-    detectron_config=None,
-):
-    """
-    Run Detectron2 layout detection and VLM figure description on a single PDF.
-
-    Args:
-        pdf_path:          Path to the PDF file.
-        citation_string:   Citation label for metadata tagging.
-        detectron_weights: Path to the Detectron2 checkpoint (defaults to config;
-                           None / missing file → layoutparser downloads it).
-        images_dir:        Directory to save cropped figures (defaults to config).
-        detectron_config:  Path or URL to the Detectron2 config (defaults to config).
-
-    Returns:
-        list[dict]: Corpus entries (text blocks + figure descriptions).
-    """
-    import cv2
-    import fitz
-    import numpy as np
-    from tqdm import tqdm
-
-    detectron_weights = detectron_weights or DETECTRON_WEIGHTS
-    if not detectron_weights or not os.path.exists(detectron_weights):
-        detectron_weights = None          # let layoutparser fetch PubLayNet weights
-    detectron_config = detectron_config or DETECTRON_CONFIG
-    images_dir = images_dir or IMAGES_DIR
-    os.makedirs(images_dir, exist_ok=True)
-
-    t0 = time.perf_counter()
-    logger.info("Processing pages for %s…", pdf_path)
-    corpus = []
-    dpi = PDF_RENDER_DPI
-    zoom = dpi / 72.0
-
-    # Use cached model in sequential mode; in multiprocessing workers the
-    # cache is per-process so each worker loads once then reuses.
-    model = _get_detectron_model(detectron_weights, detectron_config)
-
-    try:
-        pdf = fitz.open(pdf_path)
-        doc_name = os.path.basename(pdf_path)
-        pdf_name = pdf_key(pdf_path)
-        num_pages = len(pdf)
-
-        for page_idx in tqdm(range(num_pages), desc=f"Parsing {doc_name}", leave=False):
-            page = pdf[page_idx]
-            pix = page.get_pixmap(dpi=dpi)
-            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
-
-            layout = model.detect(img)
-            raw_blocks = page.get_text("blocks")
-            text_blocks_img = []
-
-            for b in raw_blocks:
-                if b[6] == 0:
-                    tx1, ty1, tx2, ty2 = [c * zoom for c in b[:4]]
-                    text = b[4].replace("\n", " ")
-                    text_blocks_img.append({"bbox": (tx1, ty1, tx2, ty2), "text": text.strip()})
-                    if len(text) > 4:
-                        corpus.append({
-                            "document": pdf_name,
-                            "citation": citation_string,
-                            "page": page_idx,
-                            "type": "text",
-                            "content": text,
-                        })
-
-            for i, fig in enumerate(b for b in layout if b.type in ["Figure", "Table"]):
-                pad = 20
-                x1, y1, x2, y2 = fig.coordinates
-                x1, y1 = max(0, int(x1 - pad)), max(0, int(y1 - pad))
-                x2, y2 = min(img.shape[1], int(x2 + pad)), min(img.shape[0], int(y2 + pad))
-
-                if x2 <= x1 or y2 <= y1:
-                    continue
-
-                cropped = img[y1:y2, x1:x2]
-                if cropped.size == 0:
-                    continue
-                out_name = f"{pdf_name}_p{page_idx}_f{i}.png"
-                out_path = os.path.join(images_dir, out_name)
-                cv2.imwrite(out_path, cropped)
-
-                context = find_caption(text_blocks_img, (x1, y1, x2, y2), fig.type)
-
-                # The searchable text for a figure is its caption. A VLM
-                # description is opt-in (CITATION_FIGURE_VLM) — otherwise the
-                # crop is kept for on-demand description at query time.
-                described = False
-                content = context or f"{fig.type} on page {page_idx + 1} ({pdf_name})"
-                if FIGURE_VLM:
-                    try:
-                        content = describe_figure(out_path, fig.type, context)
-                        described = True
-                    except Exception as e:
-                        logger.error("VLM failed on %s: %s", out_name, e)
-
-                corpus.append({
-                    "document": pdf_name,
-                    "citation": citation_string,
-                    "page": page_idx,
-                    "type": fig.type.lower(),
-                    "content": content,
-                    "metadata": {
-                        "image_path": out_name,
-                        "caption": context,
-                        "described": described,
-                    },
-                })
-
-        elapsed = time.perf_counter() - t0
-        logger.info(
-            "✓ %s: %d pages, %d entries extracted in %.1fs (%.2fs/page)",
-            pdf_name, num_pages, len(corpus), elapsed, elapsed / max(num_pages, 1),
-        )
-
-    except Exception as e:
-        logger.error("Layout processing failed for %s: %s", pdf_path, e)
-        raise
-
-    return corpus
+    return process_pdf_v2(pdf_path, citation_string, images_dir=images_dir)
 
 
 # ─── Document summaries (stage-1 index) ─────────────────────────────────────
@@ -566,8 +152,10 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
 
     client = chromadb.PersistentClient(path=VECTORDB_PATH)
     col = client.get_or_create_collection(
-        name=SUMMARY_COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+        name=SUMMARY_COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine", "embedder": EMBED_MODEL},
     )
+    check_embedder(col)
 
     have = set()
     got = col.get(include=["metadatas"])
@@ -674,12 +262,11 @@ def _embed_documents_safe(embeddings, texts: list[str], sub_batch_size: int = 32
 
 
 def upsert_corpus(corpus: list[dict]):
-    """
-    Semantic-chunk the corpus and upsert into ChromaDB.
+    """Embed the corpus entries and upsert them into ChromaDB.
 
-    Batches text blocks together before chunking to reduce the number of
-    embedding calls made by SemanticChunker (one call per batch instead of
-    one per text block).
+    Entries arrive already chunked (ingest_v2). A text entry is embedded here
+    from its ``embed_text``; a ``figure_image`` entry already carries its image
+    embedding in ``embedding`` and is stored as it is.
 
     Returns the number of new chunks inserted.
     """
@@ -688,93 +275,30 @@ def upsert_corpus(corpus: list[dict]):
         return 0
 
     import chromadb
-    from langchain_experimental.text_splitter import SemanticChunker
 
     from research_assistant.shared.llm import get_embeddings
 
     t0 = time.perf_counter()
-    logger.info("Initializing chunker and embedding model…")
     embeddings = get_embeddings()
-    chunker = SemanticChunker(
-        embeddings,
-        breakpoint_threshold_type=SEMANTIC_CHUNKER_TYPE,
-        breakpoint_threshold_amount=SEMANTIC_CHUNKER_AMOUNT,
-    )
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
     collection = chroma_client.get_or_create_collection(
         name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
+        metadata={"hnsw:space": "cosine", "embedder": EMBED_MODEL},
     )
+    check_embedder(collection)
 
-    # ── Group text entries by (document, page) and batch-chunk ────────────
-    # Instead of calling chunker.create_documents() once per text block
-    # (which triggers an embedding call each time), we concatenate all text
-    # on the same page and chunk once.  Figures/tables pass through directly.
+    # One summary_source entry per document feeds the stage-1 summary index.
     total_corpus = []
-    page_text_groups = {}  # key: (document, citation, page) → list[str]
-
-    # Per-document text for the summary index. v1 accumulates it from page
-    # groups below; v2 sends one explicit summary_source entry per document.
     per_doc_text, per_doc_citation = {}, {}
-
     for entry in corpus:
-        if entry["type"] in ["figure", "table"] or entry["type"] in PRECHUNKED_TYPES:
+        if entry["type"] in PRECHUNKED_TYPES:
             total_corpus.append(entry)
         elif entry["type"] == "summary_source":
             per_doc_text[entry["document"]] = entry.get("content") or ""
             per_doc_citation.setdefault(entry["document"], entry["citation"])
-        elif entry["type"] == "text":
-            content = clean_text(entry["content"])
-            if len(content) < CHUNK_MIN_LENGTH:
-                continue
-            key = (entry["document"], entry["citation"], entry["page"])
-            page_text_groups.setdefault(key, []).append(content)
-
-    # Chunk each page's concatenated text in one call
-    for (doc, cit, page), texts in page_text_groups.items():
-        merged = "\n\n".join(texts)
-        if doc not in per_doc_text or not per_doc_text[doc].strip():
-            per_doc_text[doc] = ""
-        per_doc_text[doc] = per_doc_text[doc] + "\n\n" + merged
-        per_doc_citation.setdefault(doc, cit)
-        try:
-            docs = chunker.create_documents([merged])
-            for j, doc_chunk in enumerate(docs):
-                total_corpus.append({
-                    "document": doc,
-                    "citation": cit,
-                    "page": page,
-                    "type": "text_chunk",
-                    "content": doc_chunk.page_content,
-                    "metadata": {"chunk_index": j},
-                })
-        except Exception as e:
-            logger.warning(
-                "SemanticChunker failed on page %d of %s (%s); falling back to character chunking.",
-                page, doc, e,
-            )
-            try:
-                try:
-                    from langchain_text_splitters import RecursiveCharacterTextSplitter
-                    fallback_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-                    docs = fallback_splitter.create_documents([merged])
-                    fb_texts = [d.page_content for d in docs]
-                except Exception:
-                    fb_texts = [p.strip() for p in merged.split("\n\n") if p.strip()] or [merged[:1000]]
-                for j, text_part in enumerate(fb_texts):
-                    total_corpus.append({
-                        "document": doc,
-                        "citation": cit,
-                        "page": page,
-                        "type": "text_chunk",
-                        "content": text_part,
-                        "metadata": {"chunk_index": j, "fallback": True},
-                    })
-            except Exception as fb_err:
-                logger.error("Fallback chunker also failed on page %d of %s: %s", page, doc, fb_err)
 
     chunk_time = time.perf_counter() - t0
-    logger.info("Chunking completed in %.1fs (%d entries)", chunk_time, len(total_corpus))
+    logger.info("Prepared %d entries in %.1fs", len(total_corpus), chunk_time)
 
     # ── Deduplicate against existing DB content ──────────────────────────
     # Keyed on (document, text), not text alone. Two papers legitimately share
@@ -796,10 +320,10 @@ def upsert_corpus(corpus: list[dict]):
 
     current_index = get_max_chunk_index(collection)
     documents, embed_texts, metadatas, ids, seen = [], [], [], [], set()
+    precomputed = []                    # per entry: a ready vector (figure images) or None
 
     for entry in total_corpus:
-        is_prechunked = entry.get("type") in PRECHUNKED_TYPES
-        content = entry["content"] if is_prechunked else entry["content"].strip()
+        content = entry["content"]
         # Compare on the same form that reaches the store: add() truncates to
         # EMBED_MAX_CHARS, so comparing full text against stored text would
         # never match for a long chunk and would re-insert it on every run.
@@ -822,8 +346,9 @@ def upsert_corpus(corpus: list[dict]):
         for k, v in (entry.get("meta") or {}).items():
             meta[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
         documents.append(stored_form)
-        # v2 embeds a contextual header + text; v1 embeds the stored text.
+        # A contextual header + text is embedded; a figure image arrives embedded.
         embed_texts.append((entry.get("embed_text") or content)[:EMBED_MAX_CHARS])
+        precomputed.append(entry.get("embedding"))
         metadatas.append(meta)
         ids.append(f"chunk_{current_index}")
         current_index += 1
@@ -843,7 +368,10 @@ def upsert_corpus(corpus: list[dict]):
                 logger.info("Embedding stopped early by user request at chunk %d/%d", i, len(documents))
                 break
             batch_embed_texts = embed_texts[i : i + EMBED_BATCH_SIZE]
-            batch_embs = _embed_documents_safe(embeddings, batch_embed_texts)
+            batch_ready = precomputed[i : i + EMBED_BATCH_SIZE]
+            todo = [t for t, v in zip(batch_embed_texts, batch_ready) if v is None]
+            fresh = iter(_embed_documents_safe(embeddings, todo))
+            batch_embs = [v if v is not None else next(fresh) for v in batch_ready]
             collection.add(
                 embeddings=batch_embs,
                 documents=documents[i : i + EMBED_BATCH_SIZE],
@@ -979,7 +507,6 @@ def ingest_pdfs(
     skip_ingested: bool = True,
     rebuild_index: bool = True,
     log_prefix: str = "",
-    describe_figures: bool | None = None,
 ) -> dict:
     """Ingest a batch of PDFs: process → upsert → mark → rebuild the BM25 index.
 
@@ -989,7 +516,7 @@ def ingest_pdfs(
 
     Having one implementation matters because the check/mark bookkeeping has to
     agree across callers. Processing is by far the most expensive step in the
-    pipeline — layout detection on every page plus a VLM call per figure — so a
+    pipeline — GROBID full text plus an image embedding per figure — so a
     PDF that gets processed but never marked is re-processed in full on every
     subsequent run, and one that gets marked but never checked is processed
     twice in the same run.
@@ -997,36 +524,27 @@ def ingest_pdfs(
     Args:
         pdfs:          Mapping of ``{pdf_path: citation_label}``, or an iterable
                        of paths (the filename stem is then used as the label).
-        workers:       Worker processes for the parsing stage. 1 runs in-process
-                       and reuses the cached Detectron2 model.
+        workers:       Worker processes for the parsing stage. 1 runs in-process.
         skip_ingested: Skip PDFs already recorded as ingested.
         rebuild_index: Rebuild the BM25 index once at the end. Pass False when
                        ingesting several batches and rebuild once yourself.
         log_prefix:    Prefix for log lines, e.g. ``"[Sync] "``.
-        describe_figures: v2 only. The run's figure-analysis switch: describe
-                       every figure and table in every PDF of this batch with
-                       the model, inline. None → config.FIGURE_VLM. Ignored
-                       under INDEX_VERSION 1.
 
     Returns:
         dict: ``{"processed", "skipped", "inserted", "failed"}`` — ``failed``
         is the list of paths that could not be read.
     """
     with _ingest_lock():
-        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, describe_figures)
+        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix)
 
 
-def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, describe_figures=None) -> dict:
+def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix) -> dict:
     """ingest_pdfs()'s body. Call it through ingest_pdfs(), which holds the lock."""
     if not isinstance(pdfs, dict):
         pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
 
     result = {"processed": 0, "skipped": 0, "inserted": 0, "failed": []}
-    if describe_figures is None:
-        describe_figures = FIGURE_VLM
-    if INDEX_VERSION >= 2:
-        logger.info("%sIndex v%d — figure analysis %s for this run.",
-                    log_prefix, INDEX_VERSION, "ON" if describe_figures else "off")
+    logger.info("%sIndex v%d.", log_prefix, INDEX_VERSION)
 
     candidates = {}
     for path, label in pdfs.items():
@@ -1089,7 +607,7 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
                     detail=f"Parsing PDF [{i}/{len(candidates)}]: {name}",
                 )
                 logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), name)
-                entries = process_pdf(path, label, describe_figures=describe_figures)
+                entries = process_pdf(path, label)
                 if not entries:
                     scanned_or_empty.append(name)
                 corpus.extend(entries)
@@ -1099,7 +617,7 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
             )
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(process_pdf, path, label, None, None, None, describe_figures): (path, label)
+                    executor.submit(process_pdf, path, label): (path, label)
                     for path, label in candidates.items()
                 }
                 completed_count = 0
@@ -1135,32 +653,22 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
         # per entry. Agent 1 records its GROBID-vs-regex fallback the same way, for
         # the same reason: a run that silently degraded should say so in its result,
         # not only in a warning somewhere up the log.
-        if INDEX_VERSION >= 2:
-            from research_assistant.shared.ingest_v2 import EXTRACTION_MODES_V2 as modes
-        else:
-            modes = EXTRACTION_MODES
+        from research_assistant.shared.ingest_v2 import EXTRACTION_MODES_V2 as modes
+
         by_mode = {mode: set() for mode in modes}
         for entry in corpus:
             docs = by_mode.get(entry.get("extraction"))
             if docs is not None and entry.get("document"):
                 docs.add(entry["document"])
         result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}
-        result["described"] = sum(1 for e in corpus if e.get("type") == "figure_description")
+        result["figure_images"] = sum(1 for e in corpus if e.get("type") == "figure_image")
 
-        if INDEX_VERSION >= 2 and by_mode["pymupdf"]:
+        if by_mode["pymupdf"]:
             logger.warning(
                 "%s%d of %d document(s) fell back to PyMuPDF extraction — no sections, "
                 "captions or figures for them, and the bibliography may be in the text. "
                 "Check GROBID at the configured GROBID_SERVER.",
                 log_prefix, len(by_mode["pymupdf"]), result["processed"],
-            )
-        elif INDEX_VERSION == 1 and LAYOUT_DETECTION and by_mode["text_only"]:
-            logger.warning(
-                "%s%d of %d document(s) fell back to text-only extraction — no figures "
-                "or tables were indexed for them. See the warnings above for why layout "
-                "detection failed, or set CITATION_LAYOUT_DETECTION=0 if text-only is "
-                "what you intended.",
-                log_prefix, len(by_mode["text_only"]), result["processed"],
             )
 
         if corpus:

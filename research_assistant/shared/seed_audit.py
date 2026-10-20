@@ -39,6 +39,7 @@ from research_assistant.agents.agent8_verifier import (
 from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
 from research_assistant.config import (
+    EXCLUDED_FROM_EVIDENCE,
     DOWNLOADED_JSON_PATH,
     JUDGEMENT_ESCALATE_TOP_K,
     JUDGEMENT_EVIDENCE_MAX_CHARS,
@@ -627,7 +628,7 @@ def _judge_claim_entry(
             metadatas,
             top_k=retrieve_k,
             doc_filter={item["document"]},
-            exclude_types={"figure_description"},
+            exclude_types=EXCLUDED_FROM_EVIDENCE,
         )
     except Exception as exc:
         logger.warning("Retrieval failed for %s: %s", item.get("document"), exc)

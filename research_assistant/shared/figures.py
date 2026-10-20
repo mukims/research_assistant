@@ -1,22 +1,24 @@
 # research_assistant/shared/figures.py
-"""Figures and tables in the v2 ingest: crop from GROBID's box, describe with
-the caption and the sentences that cite it.
+"""Figures and tables in the ingest: crop each one from GROBID's box.
 
-Nothing here decides *whether* to describe — that is the run's switch,
-threaded down from the CLI/UI to process_pdf_v2(). This module only knows how.
+The crop is embedded as an image (embeddinggemma-2) so a text query can find
+the figure. Nothing describes it in words, and it is never judge evidence: the
+types in EXCLUDED_FROM_EVIDENCE are left out of every evidence search.
 """
 
 from __future__ import annotations
 
 import os
 
-from research_assistant.prompts import FIGURE_DESCRIPTION
+from research_assistant.config import EXCLUDED_FROM_EVIDENCE  # noqa: F401  (re-exported)
 from research_assistant.shared.extract import Figure
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("figures")
 
-DESCRIPTION_PREFIX = "Auto-generated description of {label} — verify values against the figure: "
+# The stored text of a figure_image entry. It differs from the caption entry's
+# text so the two are not dropped as duplicates of each other.
+FIGURE_IMAGE_PREFIX = "Image of {label}: "
 _PAD_PT = 10.0
 
 
@@ -46,20 +48,3 @@ def crop_figure(pdf_path: str, fig: Figure, out_path: str, dpi: int) -> bool:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     page.get_pixmap(clip=clip, dpi=dpi).save(out_path)
     return True
-
-
-def figure_context(fig: Figure, max_refs: int = 4) -> str:
-    caption = f"{fig.label}: {fig.caption}" if fig.caption else fig.label
-    lines = [f"Caption: {caption}"]
-    if fig.refs:
-        lines.append("Referenced in the text:")
-        lines.extend(f"- {r}" for r in fig.refs[:max_refs])
-    return "\n".join(lines)
-
-
-def describe_crop(image_path: str, fig: Figure, context: str) -> str:
-    """One model call. Raw text back; the caller adds DESCRIPTION_PREFIX."""
-    from research_assistant.shared.llm import chat
-
-    prompt = FIGURE_DESCRIPTION.format(fig_type=fig.kind, context=context)
-    return chat([{"role": "user", "content": prompt}], images=[image_path], temperature=0.0).content.strip()

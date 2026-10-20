@@ -269,6 +269,20 @@ class TestExcludeTypes(unittest.TestCase):
         self.assertEqual(coll.where, {"$and": [{"document": {"$in": ["doc0.pdf"]}},
                                                {"type": {"$nin": ["figure_description"]}}]})
 
+    def test_the_shared_evidence_exclusion_drops_images_on_both_sides(self):
+        from research_assistant.config import EXCLUDED_FROM_EVIDENCE
+        texts = ["a", "image of the figure", "c"]
+        metas = [{"document": "d.pdf", "type": "text_chunk"},
+                 {"document": "d.pdf", "type": "figure_image"},
+                 {"document": "d.pdf", "type": "caption"}]
+        out = hybrid_search("q", FakeCollection([]), FakeBM25([1.0, 9.0, 2.0]), texts, metas,
+                            top_k=3, embeddings_model=FakeEmbeddings(), exclude_types=EXCLUDED_FROM_EVIDENCE)
+        self.assertEqual([r["chunk_index"] for r in out], [2, 0])
+        coll = self._Coll([])
+        hybrid_search("q", coll, FakeBM25([1.0, 1.0, 1.0]), texts, metas, top_k=1,
+                      embeddings_model=FakeEmbeddings(), exclude_types=EXCLUDED_FROM_EVIDENCE)
+        self.assertEqual(coll.where, {"type": {"$nin": ["figure_description", "figure_image"]}})
+
     def test_dense_where_is_none_when_nothing_is_filtered(self):
         coll = self._Coll([])
         texts, metas = _corpus(2)
@@ -363,6 +377,16 @@ class TestExpandNeighbours(unittest.TestCase):
         texts, metas = self._corpus()
         out = expand_neighbours([{"chunk_index": 2, "text": "a2", "metadata": metas[2]}], texts, metas, window=2)
         self.assertEqual(out[0]["context_before"], "a0\na1")
+
+    def test_a_figure_image_or_old_description_is_never_context(self):
+        texts = ["t0", "Figure 1: caption", "Image of Figure 1: caption", "t1", "Auto-generated description"]
+        metas = [{"document": "a.pdf", "type": "text_chunk"}, {"document": "a.pdf", "type": "caption"},
+                 {"document": "a.pdf", "type": "figure_image"}, {"document": "a.pdf", "type": "text_chunk"},
+                 {"document": "a.pdf", "type": "figure_description"}]
+        out = expand_neighbours([{"chunk_index": 1, "text": texts[1], "metadata": metas[1]}], texts, metas)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("t0", ""))
+        out = expand_neighbours([{"chunk_index": 3, "text": "t1", "metadata": metas[3]}], texts, metas)
+        self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("", ""))
 
     def test_window_zero_and_out_of_range_are_safe(self):
         texts, metas = self._corpus()

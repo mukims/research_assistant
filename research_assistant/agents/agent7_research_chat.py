@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Any
 
 from research_assistant.config import (
+    EXCLUDED_FROM_EVIDENCE,
     CHAT_ANSWER_RESERVE_TOKENS,
     CHAT_CONDENSE,
     CHAT_CONTEXT_MAX_CHARS,
@@ -157,7 +158,7 @@ class ResearchChat:
 
     def _search(self, query: str) -> list[dict]:
         """Perform diverse global search plus targeted focus search on cited papers."""
-        common = dict(top_k=self.top_k * 2, exclude_types={"figure_description"})
+        common = dict(top_k=self.top_k * 2, exclude_types=EXCLUDED_FROM_EVIDENCE)
         global_hits = hybrid_search(query, self.collection, self.bm25, self.texts, self.metadatas, **common)
         global_hits = cap_per_document(global_hits, CHAT_PER_DOC_CAP)[: self.top_k]
 
@@ -171,7 +172,7 @@ class ResearchChat:
                 self.metadatas,
                 top_k=CHAT_FOCUS_TOP_K,
                 doc_filter=set(self.focus_documents),
-                exclude_types={"figure_description"},
+                exclude_types=EXCLUDED_FROM_EVIDENCE,
             )
         return merge_results(focus_hits, global_hits)
 

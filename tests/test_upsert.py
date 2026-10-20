@@ -1,7 +1,7 @@
 """Tests for what actually reaches the corpus.
 
 upsert_corpus() is the one place chunks become citable records, and it had no
-test: the heavy collaborators (ChromaDB, SemanticChunker, the embedding stack)
+test: the heavy collaborators (ChromaDB, the embedding stack)
 are lazily imported inside the function, so the existing suite patched the
 whole function out rather than exercising it. The fakes below stand in for
 those three, which is enough to test the bookkeeping — which is where the
@@ -20,12 +20,15 @@ class FakeCollection:
     """Just enough ChromaDB to exercise the id allocation and dedup logic."""
 
     def __init__(self):
-        self.ids, self.documents, self.metadatas = [], [], []
+        self.ids, self.documents, self.metadatas, self.vectors = [], [], [], []
+        self.metadata = None
+        self.name = "fake"
 
     def add(self, embeddings, documents, metadatas, ids):
-        for doc, meta, cid in zip(documents, metadatas, ids):
+        for vec, doc, meta, cid in zip(embeddings, documents, metadatas, ids):
             if cid in self.ids:
                 raise ValueError(f"duplicate id {cid}")
+            self.vectors.append(vec)
             self.ids.append(cid)
             self.documents.append(doc)
             self.metadatas.append(meta)
@@ -56,34 +59,7 @@ class UpsertTestCase(unittest.TestCase):
             get_collection=lambda name: self.collection,
         )
 
-        # SemanticChunker splits on blank lines here; the real breakpoint logic
-        # is an embedding-distance calculation and is not what these test.
-        splitter = types.ModuleType("langchain_experimental.text_splitter")
-
-        class FakeChunker:
-            def __init__(self, embeddings, **kw):
-                pass
-
-            def create_documents(self, texts):
-                return [
-                    types.SimpleNamespace(page_content=part)
-                    for text in texts
-                    for part in text.split("\n\n")
-                    if part.strip()
-                ]
-
-        splitter.SemanticChunker = FakeChunker
-        experimental = types.ModuleType("langchain_experimental")
-        experimental.text_splitter = splitter
-
-        patcher = patch.dict(
-            sys.modules,
-            {
-                "chromadb": chroma,
-                "langchain_experimental": experimental,
-                "langchain_experimental.text_splitter": splitter,
-            },
-        )
+        patcher = patch.dict(sys.modules, {"chromadb": chroma})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -108,7 +84,7 @@ class UpsertTestCase(unittest.TestCase):
             "document": document,
             "citation": citation or f"{document} citation",
             "page": page,
-            "type": "text",
+            "type": "text_chunk",
             "content": content,
         }
 
@@ -213,10 +189,63 @@ class TestPrechunkedEntries(UpsertTestCase):
         self.assertEqual(seen, ["Title: T. Section: S. stored text"])
         self.assertEqual(self.collection.documents, ["stored text"])
 
+    def _figure_image(self, document="a.pdf", vector=(0.5, 0.25)):
+        return self._chunk(document, "Image of Figure 1: caption text", type="figure_image",
+                           meta={"figure_id": "fig_0"}) | {"embedding": list(vector)}
+
+    def test_a_figure_image_keeps_its_own_vector_and_is_not_embedded_as_text(self):
+        seen = []
+        import research_assistant.shared.llm as llm_mod
+        emb = types.SimpleNamespace(embed_documents=lambda texts: (seen.extend(texts), [[9.0] for _ in texts])[1],
+                                    embed_query=lambda t: [0.0])
+        with patch.object(llm_mod, "get_embeddings", lambda *a, **k: emb):
+            ing.upsert_corpus([self._chunk("a.pdf", "body text " * 5), self._figure_image()])
+        self.assertEqual(seen, ["body text " * 5])
+        self.assertEqual(self.collection.vectors, [[9.0], [0.5, 0.25]])
+        self.assertEqual(self.collection.metadatas[1]["type"], "figure_image")
+        self.assertEqual(self.collection.metadatas[1]["figure_id"], "fig_0")
+
+    def test_mixed_batch_keeps_vectors_with_their_own_entries(self):
+        import research_assistant.shared.llm as llm_mod
+        emb = types.SimpleNamespace(embed_documents=lambda texts: [[float(len(t))] for t in texts],
+                                    embed_query=lambda t: [0.0])
+        entries = [self._chunk("a.pdf", "first body text " * 3), self._figure_image(vector=(7.0,)),
+                   self._chunk("a.pdf", "second body text " * 3), self._figure_image(vector=(8.0,)) | {"content": "Image of Figure 2: other"}]
+        with patch.object(llm_mod, "get_embeddings", lambda *a, **k: emb):
+            ing.upsert_corpus(entries)
+        self.assertEqual([m["type"] for m in self.collection.metadatas],
+                         ["text_chunk", "figure_image", "text_chunk", "figure_image"])
+        self.assertEqual(self.collection.vectors[1], [7.0])
+        self.assertEqual(self.collection.vectors[3], [8.0])
+        self.assertEqual(self.collection.vectors[0], [float(len("first body text " * 3))])
+
+    def test_a_new_collection_records_its_embedder(self):
+        recorded = {}
+        chroma = sys.modules["chromadb"]
+        original = chroma.PersistentClient
+
+        def client(path):
+            real = original(path)
+            inner = real.get_or_create_collection
+
+            def goc(name, metadata=None):
+                recorded[name] = metadata
+                return inner(name, metadata=metadata)
+            real.get_or_create_collection = goc
+            return real
+        with patch.object(chroma, "PersistentClient", client):
+            ing.upsert_corpus([self._chunk("a.pdf", "body text " * 5)])
+        self.assertEqual(recorded[ing.COLLECTION_NAME]["embedder"], ing.EMBED_MODEL)
+
+    def test_a_collection_built_with_another_embedder_is_refused(self):
+        self.collection.metadata = {"embedder": "some-other-model"}
+        with self.assertRaisesRegex(RuntimeError, "some-other-model"):
+            ing.upsert_corpus([self._chunk("a.pdf", "body text " * 5)])
+
     def test_meta_is_merged_unprefixed(self):
-        ing.upsert_corpus([self._chunk("a.pdf", "x" * 30, meta={"section": "methods", "seq": 3, "described": False})])
+        ing.upsert_corpus([self._chunk("a.pdf", "x" * 30, meta={"section": "methods", "seq": 3, "flag": False})])
         m = self.collection.metadatas[0]
-        self.assertEqual((m["section"], m["seq"], m["described"]), ("methods", 3, False))
+        self.assertEqual((m["section"], m["seq"], m["flag"]), ("methods", 3, False))
         self.assertEqual(m["type"], "text_chunk")
         self.assertEqual(m["citation_source"], "a.pdf title")
 
@@ -230,11 +259,6 @@ class TestPrechunkedEntries(UpsertTestCase):
             ])
         self.assertEqual(seen, {"a.pdf": "abstract + intro + conclusion"})
         self.assertEqual(self.collection.chunks_for("a.pdf"), ["body chunk " * 5])
-
-    def test_v1_entries_still_go_through_the_chunker(self):
-        with patch.object(ing, "CHUNK_MIN_LENGTH", 5):
-            ing.upsert_corpus([self._entry("a.pdf", "Para one.\n\nPara two.")])
-        self.assertEqual(self.collection.chunks_for("a.pdf"), ["Para one.", "Para two."])
 
     def test_embed_documents_safe_normal(self):
         emb_mock = types.SimpleNamespace(

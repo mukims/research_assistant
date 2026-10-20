@@ -6,6 +6,7 @@ resolution against a fake collection. No network, no ChromaDB, no model.
 
 import unittest
 
+from research_assistant.config import EXCLUDED_FROM_EVIDENCE
 from research_assistant.agents.agent8_verifier import (
     citation_pairs,
     invert_citation_mapping,
@@ -613,7 +614,7 @@ class TestVerifierExcludesVlmText(VerifyDraftTestCase):
             hits,
             search_side_effect=record,
         )
-        self.assertEqual(seen["exclude_types"], {"figure_description"})
+        self.assertEqual(seen["exclude_types"], EXCLUDED_FROM_EVIDENCE)
         self.assertEqual(seen["doc_filter"], {"a.pdf"})
 
 
@@ -743,7 +744,7 @@ class TestEscalation(VerifyDraftTestCase):
     def test_retrieves_the_escalation_budget_in_one_search(self):
         _, _, hs = self._run_with([_verdict()])
         self.assertEqual(hs.call_args.kwargs["top_k"], 3)          # max(JUDGEMENT_TOP_K=1, ESCALATE_TOP_K=3)
-        self.assertEqual(hs.call_args.kwargs["exclude_types"], {"figure_description"})
+        self.assertEqual(hs.call_args.kwargs["exclude_types"], EXCLUDED_FROM_EVIDENCE)
 
     def test_sufficient_first_verdict_judges_once_on_the_top_hit_with_neighbours(self):
         report, calls, _ = self._run_with([_verdict()])
