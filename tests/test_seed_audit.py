@@ -225,6 +225,46 @@ class TestSeedAudit(unittest.TestCase):
         ref3 = {"xml_id": "b5", "doi": "10.9999/notfound", "title": "Unknown Title"}
         self.assertIsNone(_match_downloaded_paper(ref3, "seed.pdf", manifest))
 
+    def _titled(self, *titles):
+        return {f"k{i}": {"key": f"k{i}", "path": f"/p/{i}.pdf", "title": t} for i, t in enumerate(titles)}
+
+    def test_title_match_ignores_case_markup_and_punctuation(self):
+        manifest = self._titled("Effect of defects on <mml:math>MoS2</mml:math> transport")
+        ref = {"title": "Effect of defects on MoS2 transport."}
+        self.assertEqual(_match_downloaded_paper(ref, "s.pdf", manifest)["key"], "k0")
+
+    def test_a_subtitle_or_erratum_suffix_still_matches(self):
+        manifest = self._titled("Disorder-assisted quantum inversion in nanoribbons: erratum")
+        ref = {"title": "Disorder-assisted quantum inversion in nanoribbons"}
+        self.assertEqual(_match_downloaded_paper(ref, "s.pdf", manifest)["key"], "k0")
+
+    def test_a_short_or_journal_title_never_matches_inside_a_longer_one(self):
+        """The manifest holds entries titled 'rev. mod. phys', 'nat. phys', 'science'."""
+        manifest = self._titled("rev. mod. phys", "nat. phys", "science", "deep learning")
+        for title in ("Colloquium: quantum transport, Rev. Mod. Phys. 83, 1057",
+                      "A science of heat: the nat. phys. view",
+                      "Deep learning for turbulence closure modelling"):
+            self.assertIsNone(_match_downloaded_paper({"title": title}, "s.pdf", manifest), title)
+
+    def test_a_much_longer_paper_title_is_not_the_same_paper(self):
+        manifest = self._titled("Quantum Hall effect in graphene nanoribbons under strain")
+        self.assertIsNone(_match_downloaded_paper({"title": "Quantum Hall effect in graphene"}, "s.pdf", manifest))
+
+    def test_two_different_near_matches_are_not_guessed_between(self):
+        manifest = self._titled("Edge states in zigzag graphene ribbons: part one",
+                                "Edge states in zigzag graphene ribbons: part two")
+        self.assertIsNone(_match_downloaded_paper({"title": "Edge states in zigzag graphene ribbons"}, "s.pdf", manifest))
+
+    def test_the_same_paper_downloaded_twice_is_not_ambiguous(self):
+        manifest = self._titled("Edge states in zigzag graphene ribbons", "Edge states in zigzag graphene ribbons")
+        self.assertEqual(_match_downloaded_paper({"title": "edge states in zigzag graphene ribbons"}, "s.pdf",
+                                                 manifest)["key"], "k0")
+
+    def test_an_exact_title_beats_a_near_one(self):
+        manifest = self._titled("Edge states in zigzag graphene ribbons: erratum", "Edge states in zigzag graphene ribbons")
+        self.assertEqual(_match_downloaded_paper({"title": "Edge states in zigzag graphene ribbons"}, "s.pdf",
+                                                 manifest)["key"], "k1")
+
     def test_audit_seed_citations_graceful_missing_tei(self):
         report = audit_seed_citations("/non/existent/path.pdf")
         self.assertIn("error", report)

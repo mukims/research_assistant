@@ -435,14 +435,23 @@ def _relocate_manifest_paths(manifest: dict) -> dict:
     return manifest
 
 
+def _title_key(title) -> str:
+    """Case, markup and punctuation folded out, so two spellings of one title compare equal."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", re.sub(r"<[^>]+>", " ", (title or "").lower())).split())
+
+
 def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_manifest: dict) -> Optional[dict]:
-    """Find downloaded paper entry matching a cited reference."""
+    """Find downloaded paper entry matching a cited reference.
+
+    None means unresolved, and an unresolved reference is reported as such. A
+    wrong match is worse: the claim is then judged, confidently, against a
+    different paper."""
     if not ref or not downloaded_manifest:
         return None
 
     ref_xml_id = ref.get("xml_id")
     ref_doi = normalise_doi(ref.get("doi"))
-    ref_title = (ref.get("title") or "").lower().strip()
+    ref_title = _title_key(ref.get("title"))
 
     # 1. Match by xml_id and cited_by
     if ref_xml_id and seed_pdf_name:
@@ -459,12 +468,31 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
             if normalise_doi(entry.get("doi")) == ref_doi:
                 return entry
 
-    # 3. Match by exact or high-overlap title
+    # 3. Match by title. Exactly equal wins. Otherwise only near-equal: one title
+    # inside the other with the shorter at least 80% of the longer (a subtitle, an
+    # erratum suffix). The manifest holds entries titled "rev. mod. phys",
+    # "science", "deep learning", and a bare substring test matched those to any
+    # reference containing the words. Two different papers that both qualify are
+    # not guessed between.
     if len(ref_title) > 10:
+        exact, near = [], []
         for entry in downloaded_manifest.values():
-            entry_title = (entry.get("title") or "").lower().strip()
-            if entry_title and (ref_title in entry_title or entry_title in ref_title):
-                return entry
+            entry_title = _title_key(entry.get("title"))
+            if not entry_title:
+                continue
+            if entry_title == ref_title:
+                exact.append((entry_title, entry))
+                continue
+            shorter, longer = sorted((entry_title, ref_title), key=len)
+            if len(shorter) > 10 and shorter in longer and len(shorter) >= 0.8 * len(longer):
+                near.append((entry_title, entry))
+        for group in (exact, near):
+            if group:
+                if len({t for t, _ in group}) == 1:      # one title, however many copies
+                    return group[0][1]
+                logger.warning("Reference %r matches %d different downloaded titles; leaving it unresolved",
+                               ref_title[:60], len({t for t, _ in group}))
+                return None
 
     return None
 
