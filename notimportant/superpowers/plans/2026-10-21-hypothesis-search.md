@@ -1,5 +1,7 @@
 # Hypothesis Search Implementation Plan
 
+> **Superseded** by `2026-10-21-technique-transfer-design.md` / `2026-10-21-technique-transfer.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A "Hypothesis search" tab, CLI and eval that propose ranked conjectures for a question the corpus covers. Each conjecture is built from premises the judge has checked. MCTS waits until an eval shows that best-of-N earns it.

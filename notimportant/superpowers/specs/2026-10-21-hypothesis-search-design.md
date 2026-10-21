@@ -1,5 +1,7 @@
 # Hypothesis search — grounded conjectures from the corpus, best-of-N before MCTS
 
+> **Superseded** by `2026-10-21-technique-transfer-design.md` / `2026-10-21-technique-transfer.md`.
+
 *2026-10-21 · base `ab5931e` (branch `feat/v3-gemma-images`, index v3) · replaces the
 Antigravity plan "MCTS Scientific Hypothesis Tree Engine"*
 

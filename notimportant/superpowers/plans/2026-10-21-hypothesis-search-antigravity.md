@@ -1,5 +1,7 @@
 # Instructions for Antigravity: execute the Hypothesis search plan
 
+> **Superseded** by `2026-10-21-technique-transfer-design.md` / `2026-10-21-technique-transfer.md`.
+
 You are implementing `notimportant/superpowers/plans/2026-10-21-hypothesis-search.md`.
 Its design and the reasons behind it are in
 `notimportant/superpowers/specs/2026-10-21-hypothesis-search-design.md`. Read both in
