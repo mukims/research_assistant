@@ -290,10 +290,11 @@ class _PrefixedEmbeddings:
 
 GEMMA_QUERY_PREFIX = "task: search result | query: "
 GEMMA_DOC_PREFIX = "title: none | text: "
-# One image costs ~260 prompt tokens. Ollama silently ignores an image sent in
-# the wrong field (it returns a text-only vector for the empty text), so a count
-# far below this means the image never reached the model.
-_MIN_IMAGE_TOKENS = 100
+# Ollama silently ignores an image sent in the wrong field (it returns a
+# text-only vector for the empty text with prompt_eval_count None or <= 4).
+# A valid image crop in embeddinggemma-2 produces ~70-260 tokens depending on
+# aspect ratio and size. Any count far below ~20 means the image was ignored.
+_MIN_IMAGE_TOKENS = 20
 
 
 def _ollama_host():
