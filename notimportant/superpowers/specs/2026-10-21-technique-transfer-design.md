@@ -1,0 +1,215 @@
+# Technique transfer: find methods from other fields that solve your problem's bottleneck
+
+*2026-10-21 · base: `feat/hypothesis-search` at `8b5b5ea` (index v3) · supersedes
+`2026-10-21-hypothesis-search-design.md` on concept. Premise checking, the coverage
+gate and background jobs carry over from it.*
+
+## 1. What it is
+
+Given a research problem, the tool finds techniques that papers in *other* fields used
+on a structurally similar problem, and writes a concrete transfer:
+- which technique it is,
+- how its parts map onto the problem,
+- which assumptions survive the move,
+- whether the problem is even identifiable,
+- an implementation sketch,
+- a test against the current method,
+- whether it has been done before.
+
+It runs unattended for as long as its budget allows. Its objective is **relevant
+transfers with sufficient depth**, defined in §4 as checks that can be counted and
+verified, never as a model's opinion of itself.
+
+Worked example: *the forward problem in quantum transport* → bottleneck "the recursive
+Green's function method (RGF) needs a matrix inversion per slice, per energy, per
+disorder sample" → generic form "an expensive forward map evaluated many times" → a
+technique card for "latent-space surrogate with property-guided search", from a
+molecular-design paper → a mapping table, an identifiability argument, an
+implementation sketch, a test against RGF, and prior art.
+
+"From scratch" means this feature: a new package, `research_assistant/transfer/`. It
+reuses the repo's shared core rather than rebuilding it:
+
+| Reused | For |
+|---|---|
+| `shared.llm` | model calls |
+| `judgement.judge` and the citer's acceptance rule | checking premises |
+| `hybrid_search` | passage retrieval |
+| `retrieve.rank_documents` and `gate_documents` | the near set and coverage |
+| `run_jobs` and `pipeline_status` | background runs and progress |
+| the eval conventions | the retrodiction harness |
+
+## 2. The pipeline
+
+| Stage | Does | Model calls |
+|---|---|---|
+| S0 Coverage | nearest summaries → relevance gate; fewer than 3 kept → refused | 1 (gate) |
+| S1 Bottlenecks | from the near passages: up to 3 bottlenecks, each with grounded premises, the quantities it limits, the current method, and **three generic forms** (specific, mid, broad) | 1 |
+| S2 Techniques | each generic form searches the **technique-card index**; near-set and excluded documents are skipped, as are unverified cards; best 3 cards per bottleneck | 0 (embeddings only) |
+| S3 Write | one transfer per (bottleneck, card): mapping table, identifiability, steps, data, baseline, metric, prediction, refuting result, premises | 1 per transfer |
+| S4 Judge | every premise is judged against its own passage with the citer's rule (Supports with a verified span = 1.0, Partially supports with a verified span = 0.5, anything else = 0); results cached per (claim, chunk) | ~2–4 per transfer |
+| S5 Critique | an adversarial critic attacks the mapping rows and identifiability, ideally on a **different model**; then one revision call answers each objection or concedes it | 2 per transfer |
+| S6 Prior art | OpenAlex and arXiv titles and abstracts for technique + target quantity, optionally only before a cutoff year | 0 (HTTP and embeddings) |
+| S7 Reward | gates, then the depth checklist, then the prior-art bonus (§4); rank | 0 |
+
+Each run records a **trace**: for every transfer, the card it came from, that card's
+document, the abstraction level and the retrieval rank. Retrodiction scoring (§6) reads
+the trace, not just the prose.
+
+## 3. Technique cards
+
+Summaries describe what a paper *found*. Transfer needs what it *did*. So each paper
+gets one card-building call:
+
+- **Input.** About 9,000 characters of the paper's own passages:
+  1. its abstract chunks;
+  2. its `methods` chunks;
+  3. one chunk per distinct `section_raw` heading, in document order.
+
+  Figures and captions are excluded. The normalised `section` field can't be relied
+  on: only 3,702 of 57,169 v3 chunks are labelled `methods`, and 26,633 are `other`,
+  including headings such as "Quantum Green's functions".
+- **Output.** Up to 3 techniques, each with:
+  - `name`: a reusable method;
+  - `problem_solved`: stated generically, with no field nouns; this field is what gets matched;
+  - `context`: how this paper used it;
+  - `inputs`, `outputs` and `assumptions`;
+  - an **evidence premise** citing one passage key.
+- **Verified** means the evidence premise passes the judge. Only verified cards can be sources.
+- **Stored** as `DATA_DIR/transfer/cards.jsonl` plus `cards.npy` (the `problem_solved` vectors). There are no Chroma writes. Building is resumable through a per-document manifest; rerun it after an ingest.
+- **Cost.** About 700 generation calls plus 700–2,000 judge calls for the current corpus. Minutes to an hour or two on Gemini; overnight on Ollama.
+
+## 4. The reward
+
+**Gates.** A transfer must pass all of them. The first one that fails becomes its
+`set_aside` reason, in this order:
+
+| reason | fails when |
+|---|---|
+| `contradicted` | any premise is judged Contradicts |
+| `ungrounded_bottleneck` | the bottleneck has no accepted or partial premise |
+| `unverified_technique` | the card's evidence premise did not pass |
+| `shape_mismatch` | the critic says the problem shapes do not match (`shape_match == "no"`) |
+| `core_assumption_breaks` | a core mapping row's final status (the critic overrides the writer) is `breaks` |
+| `not_identifiable` | the final identifiability verdict is `underdetermined` |
+| `off_target` | the metric names none of the bottleneck's quantities |
+| `done_before` | prior art found the same combination. The transfer is listed under "Already done", with references |
+
+**Depth.** Ten items, each pass or fail; `depth` = passed / 10. Every item is checked in code:
+
+1. Mapping complete: at least 3 rows, each with a source role and a target role.
+2. Every row is classified as holds, breaks or enforce, and at least one row is core.
+3. Identifiability argued: the measurements and the unknowns are both named, the verdict is not `unclear`, and the argument runs to at least 10 words.
+4. At least 3 steps, each naming an input, an output and a tool.
+5. The data requirement contains a number.
+6. The baseline shares a content word with the bottleneck's current method.
+7. The prediction states a direction or a number.
+8. The refuting result has at least 5 words and differs from the prediction.
+9. At least one accepted or partial premise from the card's paper and one from a near paper.
+10. The critic raised at least one objection, and each one is answered or conceded in at least 5 words.
+
+**Reward.** `reward = depth × (1 + TRANSFER_PRIOR_ART_BONUS)` when prior art is
+`not_found`, otherwise `reward = depth`. The bonus defaults to 0.25. A transfer that
+is set aside scores 0.
+
+Prior-art status:
+
+| status | when |
+|---|---|
+| `done_before` | a hit's similarity to the transfer summary is ≥ 0.85 and every content word of the technique name appears in its title or abstract |
+| `partial` | similarity ≥ 0.75 |
+| `not_found` | otherwise |
+| `unchecked` | the network failed; no bonus, with a warning |
+
+Thresholds, the bonus and the gate order are calibrated in §6 before any unattended
+run.
+
+## 5. Search
+
+**Phase 1, best-of-N.** Every (bottleneck, top card) pair is developed: 3 × 3 = 9
+transfers, roughly 60 model and judge calls.
+
+**Phase 2, MCTS. Only after §6 passes.** The tree runs root → bottleneck →
+abstraction level → technique:
+- UCT allocates a budget, counted in transfers developed.
+- Progressive widening: a node's next child is its next-ranked card.
+- A leaf's value is its reward; there are no rollouts.
+- The run stops when the budget is spent, or when the top 3 haven't changed for 3
+  iterations.
+
+MCTS ships only if it beats best-of-N on the retrodiction metrics at an equal budget.
+
+## 6. Feasibility gates and calibration
+
+The cases are retrodictions: transfers that really happened, with the papers that
+report them hidden.
+
+| Gate | What | Pass |
+|---|---|---|
+| **F1 Cards** | cards for 20 random papers, rated blind by the maintainer (correct / partial / wrong; specific yes / no) | ≥ 70% correct or partial and ≥ 60% specific |
+| **F2 Retrieval** | for each case, a hand-written generic bottleneck searches the cards, with no generation | an expected source card is in the top 5 for ≥ 3 of 4 cases |
+| **F3 Retrodiction** | full runs, 2 each | see the case table below |
+
+| Case | Kind | Corpus | Hidden |
+|---|---|---|---|
+| NQS: RBMs as variational wavefunctions | positive | built for the case (target, source and distractor papers before 2017) | Carleo & Troyer 2017 |
+| KPM into real-space Kubo transport | positive | built for the case (RGF/Landauer papers, the KPM review, trace estimation) | the real-space Kubo-KPM transport paper |
+| Maintainer's autoencoder (**unpublished**) | positive | main corpus minus that work | not in any model's training data |
+| Autoencoder → impurity positions | negative | main corpus | — |
+
+Scoring reads the trace, so a technique named from the model's memory, without its
+card being retrieved, earns nothing.
+
+| Case kind | Passes when |
+|---|---|
+| positive | a transfer whose card comes from an expected source paper and matches the technique terms ranks in the **top 3** among transfers not set aside; ≥ 50% of the key mapping terms appear in it; the critic hits ≥ 1 known failure term |
+| negative | every transfer using the technique is set aside, and the expected reason (`not_identifiable`) is among those reasons |
+
+Queries are written in neutral words, without the target field's vocabulary. Prior art
+in retrodiction runs is limited to years before the case's cutoff. Answer keys for the
+two maintainer cases live under `data/eval/transfer/answer_keys/`, which is gitignored.
+
+**Rule:** no unattended run on open questions until F1–F3 pass. If F1 fails, fix the
+cards before anything else. If F2 fails, fix the abstraction levels or the card fields
+before writing transfers.
+
+## 7. Configuration (`config.py`, `CITATION_TRANSFER_*`)
+
+| setting | default | meaning |
+|---|---|---|
+| `TRANSFER_DIR` (code) | `DATA_DIR/transfer` | cards and runs |
+| `TRANSFER_BOTTLENECKS` | 3 | per run |
+| `TRANSFER_CARDS_PER_QUERY` | 3 | cards retrieved per generic form |
+| `TRANSFER_TECHNIQUES_PER_BOTTLENECK` | 3 | kept after merging the levels |
+| `TRANSFER_MIN_NEAR_PAPERS` | 3 | coverage gate |
+| `TRANSFER_NEAR_PASSAGES` / `_SOURCE_PASSAGES` | 8 / 3 | passages per prompt |
+| `TRANSFER_PASSAGE_MAX_CHARS` | 7000 | passage text per prompt |
+| `TRANSFER_CARD_MAX_CHARS` / `_CARD_MAX_TECHNIQUES` | 9000 / 3 | card building |
+| `TRANSFER_TEMPERATURE` / `_BOTTLENECK_TEMPERATURE` | 0.7 / 0.3 | generation |
+| `TRANSFER_CRITIC_MODEL` | unset → the generator's model, with a warning | the critic |
+| `TRANSFER_PRIOR_ART_DONE` / `_PARTIAL` / `_BONUS` | 0.85 / 0.75 / 0.25 | §4 |
+| `TRANSFER_NUM_CTX` | 8192 | Ollama context |
+
+## 8. Errors
+
+| condition | behaviour |
+|---|---|
+| gate keeps fewer than 3 papers | `CorpusCoverageError`; no generation call |
+| another run active (`pipeline_status`) | `BusyError`; CLI exit 2; tab warning |
+| a reply is not the JSON asked for, twice | that item is skipped, with a warning |
+| a premise cites a key not in its own prompt | dropped, with a warning |
+| the judge or the critic raises | premise credit 0, or the critique is empty (so depth item 10 fails); the run continues |
+| prior-art network failure | `unchecked`, with a warning |
+| no verified cards match | that bottleneck yields nothing, and a "corpus gap" warning names its generic forms |
+| cancel pressed | stops at the next transfer boundary |
+
+## 9. Not in scope
+
+- Fetching and ingesting papers mid-run. Gaps are reported, and Agent 0 can build the
+  corpus.
+- Changes to Agents 0, 5 and 8, `judgement/` or ingestion.
+- Phase 2 tasks before F1–F3 pass.
+
+## 10. Results
+
+*To be filled in by the maintainer after F1, F2, F3 and the Phase 2 comparison.*
