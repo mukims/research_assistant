@@ -214,3 +214,18 @@ before writing transfers.
 ## 10. Results
 
 *To be filled in by the maintainer after F1, F2, F3 and the Phase 2 comparison.*
+
+### F1 — technique cards (2026-10-21)
+
+Both runs used the same 20 papers (`build_cards.py --sample 20 --seed 1`, then
+`--documents` with that list) and `gemini-3.5-flash-lite`. The ratings were made by
+Claude on the maintainer's behalf; the maintainer rated card 27 in run 1.
+
+| run | prompt | cards | correct or partial | specific | gate |
+|---|---|---|---|---|---|
+| 1 | up to 3 techniques; an empty list allowed | 40 | 100% | 55% | **fail** |
+| 2 | a technique is a method with steps; non-techniques listed; 2–5 step `mechanism`, enforced in code | 13 | 100% | 92% | **pass** |
+
+- **Run 1's vague cards** came from papers with no transferable method: a database, two surveys, device handling and genome annotation. The judge passed all 40 evidence premises, because each quotes its own passage. That confirms the judge checks the quote, not the card.
+- **Run 2 cut precision problems, but recall too.** Of run 1's 22 specific cards, 11 survive. The lost ones include real techniques: masked pretraining and value binning (scBERT), GW corrections, serpentine strain gauges, LSH triplet mining, title-as-auxiliary-signal (TLDR), likelihood parameterisation and ancestral sampling (DeepAR), and impurity-pair reclassification. The likely cause is the prompt's "most papers have 0 to 2". If F2 misses an expected card, loosen that line first; keep the mechanism requirement.
+- **The corpus was repaired between the runs.** 4 of the 20 papers held a different PDF from their reference (13.7% across the corpus); they were relabelled to their real titles. Run 2's cards cite the right papers, e.g. RA-BLIP rather than "BLIP-2".
