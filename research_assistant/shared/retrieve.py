@@ -37,7 +37,7 @@ from research_assistant.prompts import (
     PAPER_NOTES_USER,
     SYNTHESIS_USER,
 )
-from research_assistant.shared.db import check_embedder, load_search_resources
+from research_assistant.shared.db import check_embedder, load_search_resources, open_store
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.search import hybrid_search
@@ -51,11 +51,10 @@ logger = get_logger("retrieve")
 
 def rank_documents(query: str, k: int = DOC_SELECT_K) -> list[dict]:
     """Nearest document summaries. Returns [{document, citation, summary, score}]."""
-    import chromadb
 
     from research_assistant.shared.llm import get_embeddings
 
-    client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    client = open_store()
     try:
         col = client.get_collection(SUMMARY_COLLECTION_NAME)
     except Exception:
@@ -89,12 +88,11 @@ def document_summaries(documents) -> dict[str, str]:
     """The ingest-time summary of each named document, keyed by document.
     One store read for the lot; a document without a summary is absent
     from the result, and no summary collection at all is an empty dict."""
-    import chromadb
 
     wanted = sorted({d for d in documents if d})
     if not wanted:
         return {}
-    client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    client = open_store()
     try:
         col = client.get_collection(SUMMARY_COLLECTION_NAME)
     except Exception:

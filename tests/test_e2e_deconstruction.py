@@ -1201,10 +1201,13 @@ class TestTier2BoundaryAndCornerCases(BaseE2ETestCase):
         self.assertLessEqual(max_wave_size, 8)
 
     def test_b7_persistent_storage_preservation_invariant(self):
-        """B7.5: DATA_DIR path matches expected persistent location and is not mutated."""
+        """B7.5: DATA_DIR is where CITATION_DATA_DIR says, else the repo's data/, and exists.
+
+        Tests run on a throwaway CITATION_DATA_DIR (tests/conftest.py), so the location
+        itself is not pinned; what is pinned is that config honours the setting."""
+        from research_assistant.config import PROJECT_ROOT
         self.assertTrue(os.path.exists(DATA_DIR))
-        # Ensure DATA_DIR is never a temp directory
-        self.assertNotIn("/tmp", DATA_DIR)
+        self.assertEqual(DATA_DIR, os.environ.get("CITATION_DATA_DIR", os.path.join(PROJECT_ROOT, "data")))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

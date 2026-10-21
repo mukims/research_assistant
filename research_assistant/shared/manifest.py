@@ -96,10 +96,10 @@ def rebuild_from_collection() -> int:
     Only for recovering a lost or corrupt manifest — ingestion does not call
     this. Reads every metadata record in the collection.
     """
-    import chromadb
+    from research_assistant.shared.db import open_store
 
     try:
-        collection = chromadb.PersistentClient(path=VECTORDB_PATH).get_collection(
+        collection = open_store().get_collection(
             name=COLLECTION_NAME
         )
     except Exception as exc:  # noqa: BLE001 — no collection yet is not an error

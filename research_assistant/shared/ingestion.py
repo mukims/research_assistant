@@ -56,7 +56,7 @@ from research_assistant.config import (
 from research_assistant.prompts import DOCUMENT_SUMMARY
 from research_assistant.shared.atomic import atomic_write
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.db import check_embedder, embedder_record, get_max_chunk_index
+from research_assistant.shared.db import check_embedder, embedder_record, get_max_chunk_index, open_store
 from research_assistant.shared import manifest
 from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
 from research_assistant.shared import pipeline_status
@@ -146,11 +146,10 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
     consults before touching the detail chunks. Cost is one model call per
     document, once.
     """
-    import chromadb
     from research_assistant.shared.llm import chat, get_embeddings
 
     embeddings = get_embeddings()
-    client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    client = open_store()
     col = client.get_or_create_collection(
         name=SUMMARY_COLLECTION_NAME,
         metadata={"hnsw:space": "cosine", **embedder_record(embeddings)},
@@ -273,13 +272,12 @@ def upsert_corpus(corpus: list[dict]):
         logger.info("Empty corpus — nothing to ingest.")
         return 0
 
-    import chromadb
 
     from research_assistant.shared.llm import get_embeddings
 
     t0 = time.perf_counter()
     embeddings = get_embeddings()
-    chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    chroma_client = open_store()
     collection = chroma_client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine", **embedder_record(embeddings)},
@@ -438,7 +436,6 @@ def rebuild_bm25():
         logger.info("rebuild_bm25 skipped because cancellation was requested")
         return
 
-    import chromadb
     from rank_bm25 import BM25Okapi
 
     t0 = time.perf_counter()
@@ -448,7 +445,7 @@ def rebuild_bm25():
         detail="Rebuilding BM25 keyword index…",
     )
     pipeline_status.add_event("📚 Rebuilding BM25 index…")
-    chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    chroma_client = open_store()
     collection = chroma_client.get_collection(name=COLLECTION_NAME)
 
     # Use larger page size to reduce round-trips

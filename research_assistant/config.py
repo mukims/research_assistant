@@ -146,6 +146,22 @@ COLLECTION_NAME  = f"physics_papers{_INDEX_SUFFIX}"       # detail chunks (stage
 SUMMARY_COLLECTION_NAME = f"physics_summaries{_INDEX_SUFFIX}"   # one summary per document (stage 1)
 BM25_INDEX_PATH  = os.path.join(DATA_DIR, f"bm25_index{_INDEX_SUFFIX}.pkl")
 
+
+def chroma_server_from(environ) -> str:
+    """The Chroma server that owns VECTORDB_PATH, or "" to open the files directly.
+
+    The local store is not safe across processes: each keeps its own copy of the vector
+    index and saves it whole, so a process holding an older copy overwrites another's
+    writes. On 2026-10-21 that lost 17,201 vectors. A server is the one owner; the app and
+    scripts connect over HTTP. A scratch CITATION_DATA_DIR (trials, tests) never reaches
+    the real store through it, so it opens its own files unless a server is named."""
+    if "CITATION_CHROMA_SERVER" in environ:
+        return environ["CITATION_CHROMA_SERVER"]
+    return "" if "CITATION_DATA_DIR" in environ else "http://localhost:8000"
+
+
+CHROMA_SERVER    = chroma_server_from(os.environ)
+
 # ─── Directories ──────────────────────────────────────────────────────────────
 RAW_DIR          = os.path.join(DATA_DIR, "raw")
 DRAFTS_DIR       = os.path.join(DATA_DIR, "drafts")

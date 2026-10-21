@@ -193,6 +193,12 @@ streamlit run app.py
   answering, then the app, listening on `127.0.0.1` only (a bare `streamlit run app.py`
   listens on every network interface). `status` and `down` do what they say.
   See [deploy/README.md](deploy/README.md).
+- **The vector store has one owner: a Chroma server** on `localhost:8000`, which
+  `deploy/local.sh up` starts. The app and every script connect to it; none opens the files.
+  ChromaDB's local store is not safe across processes — two with it open lost 17,201
+  vectors on 2026-10-21. To run a script without the app, start the server alone with
+  `deploy/local.sh chroma`. `CITATION_CHROMA_SERVER=` (empty) opens the files directly, for
+  a store nothing else has open.
 - **Models** run locally through [Ollama](https://ollama.com) by default. Set
   `GEMINI_API_KEY` to use Gemini (`gemini-3.5-flash-lite`) for chat, synthesis
   and judging, or `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` /

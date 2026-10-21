@@ -12,7 +12,7 @@ Usage:
 import os
 import pickle
 
-from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, EMBED_MODEL
+from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, EMBED_MODEL, CHROMA_SERVER
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.tokenize import TOKENIZER_VERSION
 
@@ -31,6 +31,33 @@ def _cache_key():
     except OSError:
         mtime = None
     return (VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime)
+
+
+class StoreUnavailable(RuntimeError):
+    """The Chroma server that owns the store is not answering."""
+
+
+def open_store():
+    """The Chroma client for the store. Every process goes through here.
+
+    With config.CHROMA_SERVER set, the server owns VECTORDB_PATH and this connects to it
+    (see config.chroma_server_from for why); otherwise the files are opened directly,
+    which is only safe when no other process has them open."""
+    import chromadb
+    from urllib.parse import urlparse
+
+    if not CHROMA_SERVER:
+        return chromadb.PersistentClient(path=VECTORDB_PATH)
+    url = urlparse(CHROMA_SERVER)
+    client = chromadb.HttpClient(host=url.hostname, port=url.port or 8000, ssl=url.scheme == "https")
+    try:
+        client.heartbeat()
+    except Exception as exc:  # noqa: BLE001 — any failure means no usable server
+        raise StoreUnavailable(
+            f"The Chroma server at {CHROMA_SERVER} is not answering ({exc}). Start it with: "
+            f"chroma run --path {VECTORDB_PATH} --port {url.port or 8000}"
+        ) from exc
+    return client
 
 
 def embedder_record(embeddings) -> dict:
@@ -108,7 +135,7 @@ def _load_search_resources_uncached():
     import chromadb
 
     logger.info("Connecting to ChromaDB at %s…", VECTORDB_PATH)
-    chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
+    chroma_client = open_store()
 
     try:
         collection = chroma_client.get_collection(name=COLLECTION_NAME)

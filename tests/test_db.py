@@ -93,3 +93,69 @@ class TestSearchResourceCache(LoadTestCase):
         db.clear_search_cache()
         self.assertIsNot(first, db.load_search_resources())
 
+
+
+class OpenStoreTestCase(unittest.TestCase):
+    """Every process reaches the store through open_store(). The local store is not safe across
+    processes: on 2026-10-21 one process saved its older copy of the vector index over another's
+    writes and 17,201 vectors were lost. A Chroma server owns the store; the files are opened
+    directly only for tests, scratch trials and offline repair."""
+
+    def _chroma(self, heartbeat=lambda: 1):
+        calls = []
+        chroma = types.ModuleType("chromadb")
+
+        def http(**kwargs):
+            calls.append(("http", kwargs))
+            return types.SimpleNamespace(heartbeat=heartbeat)
+
+        chroma.HttpClient = http
+        chroma.PersistentClient = lambda path: calls.append(("persistent", path)) or "local"
+        p = patch.dict(sys.modules, {"chromadb": chroma}); p.start(); self.addCleanup(p.stop)
+        return calls
+
+    def test_a_configured_server_is_used_over_http(self):
+        calls = self._chroma()
+        with patch.object(db, "CHROMA_SERVER", "http://localhost:8000"):
+            client = db.open_store()
+        self.assertEqual(calls, [("http", {"host": "localhost", "port": 8000, "ssl": False})])
+        self.assertTrue(hasattr(client, "heartbeat"))
+
+    def test_a_server_that_does_not_answer_says_how_to_start_it(self):
+        def down():
+            raise ConnectionError("refused")
+
+        self._chroma(heartbeat=down)
+        with patch.object(db, "CHROMA_SERVER", "http://localhost:8000"):
+            with self.assertRaises(db.StoreUnavailable) as ctx:
+                db.open_store()
+        self.assertIn("http://localhost:8000", str(ctx.exception))
+        self.assertIn(f"chroma run --path {db.VECTORDB_PATH} --port 8000", str(ctx.exception))
+
+    def test_no_server_opens_the_files(self):
+        calls = self._chroma()
+        with patch.object(db, "CHROMA_SERVER", ""):
+            self.assertEqual(db.open_store(), "local")
+        self.assertEqual(calls, [("persistent", db.VECTORDB_PATH)])
+
+
+class ChromaServerSettingTestCase(unittest.TestCase):
+    def test_the_server_is_the_default(self):
+        from research_assistant.config import chroma_server_from
+
+        self.assertEqual(chroma_server_from({}), "http://localhost:8000")
+
+    def test_a_scratch_data_dir_never_reaches_the_real_store_through_the_server(self):
+        from research_assistant.config import chroma_server_from
+
+        self.assertEqual(chroma_server_from({"CITATION_DATA_DIR": "/scratch"}), "")
+
+    def test_an_explicit_setting_wins(self):
+        from research_assistant.config import chroma_server_from
+
+        self.assertEqual(chroma_server_from({"CITATION_CHROMA_SERVER": "http://h:9"}), "http://h:9")
+        self.assertEqual(
+            chroma_server_from({"CITATION_DATA_DIR": "/scratch", "CITATION_CHROMA_SERVER": "http://h:9"}),
+            "http://h:9",
+        )
+        self.assertEqual(chroma_server_from({"CITATION_CHROMA_SERVER": ""}), "")

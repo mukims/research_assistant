@@ -73,10 +73,10 @@ def _corpus_stats():
 
     chunks = 0
     try:
-        import chromadb
+        from research_assistant.shared.db import open_store
 
         chunks = (
-            chromadb.PersistentClient(path=config.VECTORDB_PATH)
+            open_store()
             .get_collection(config.COLLECTION_NAME)
             .count()
         )

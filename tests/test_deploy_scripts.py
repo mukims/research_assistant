@@ -27,6 +27,7 @@ STUBS = {
         case "$*" in
           *"/api/isalive"*) [ -e "$STATE/grobid_alive" ] ;;
           *"/api/tags"*)    [ -e "$STATE/ollama" ] && echo '{"models":[{"name":"a"},{"name":"b"}]}' ;;
+          *"/api/v2/heartbeat"*) [ ! -e "$STATE/chroma_down" ] ;;
           *)                exit 0 ;;
         esac
     ''',
@@ -51,6 +52,7 @@ STUBS = {
     ''',
     "python": r'''
         echo "python $*" >> "$CALLS"
+        case "$*" in *" run --path "*) [ -e "$STATE/chroma_starts" ] && rm -f "$STATE/chroma_down"; exit 0 ;; esac
         [ "$1" = "-c" ] && [ -e "$STATE/no_streamlit" ] && exit 1
         exit 0
     ''',
@@ -82,6 +84,7 @@ class ScriptHarness(unittest.TestCase):
             "STATE": str(self.state),
             "PYTHON": str(self.bin / "python"),
             "GROBID_WAIT": "3",
+            "CITATION_DATA_DIR": str(self.tmp / "data"),  # never the real data/: up writes chroma.pid there
             **env,
         }
         return subprocess.run(["bash", str(script), *args], capture_output=True, text=True, env=full, timeout=60)
@@ -237,6 +240,70 @@ class TestLocalScript(ScriptHarness):
         self.assertEqual(result.returncode, 2)
         self.assertIn("usage", result.stderr)
 
+
+
+    # ── The Chroma server: the one process that opens the vector store ──
+
+    def chroma_launches(self):
+        return [line for line in self.log() if " run --path " in line]
+
+    def test_a_stopped_chroma_server_is_started_on_loopback_before_the_app(self):
+        self.flag("grobid_alive")
+        self.flag("chroma_down")
+        self.flag("chroma_starts")
+        result = self.up()
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        (launch,) = self.chroma_launches()
+        self.assertIn(f"run --path {self.tmp / 'data' / 'physics_vectordb'} --host 127.0.0.1 --port 8000", launch)
+        self.assertTrue((self.tmp / "data" / "chroma.pid").exists())
+        self.assertLess(self.log().index(launch), self.log().index(self.app_launches()[0]))
+
+    def test_a_running_chroma_server_is_left_alone(self):
+        self.flag("grobid_alive")
+        self.up()
+        self.assertEqual(self.chroma_launches(), [])
+
+    def test_a_chroma_server_that_never_answers_stops_before_the_app(self):
+        self.flag("grobid_alive")
+        self.flag("chroma_down")
+        result = self.up(CHROMA_WAIT="2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not answer within 2s", result.stderr)
+        self.assertEqual(self.app_launches(), [])
+
+    def test_a_remote_chroma_server_is_never_started(self):
+        self.flag("chroma_down")
+        result = self.up(CITATION_CHROMA_SERVER="https://chroma.example.org")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not on this machine", result.stderr)
+        self.assertEqual(self.chroma_launches(), [])
+
+    def test_the_chroma_command_starts_only_the_server(self):
+        self.flag("chroma_down")
+        self.flag("chroma_starts")
+        result = self.run_script(DEPLOY / "local.sh", "chroma")
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        self.assertEqual(len(self.chroma_launches()), 1)
+        self.assertEqual(self.app_launches(), [])
+        self.assertEqual(self.calls_starting("docker"), [])
+
+    def test_down_stops_the_server_it_started_and_nothing_else(self):
+        server = subprocess.Popen(["/bin/sleep", "30"])
+        self.addCleanup(server.kill)
+        (self.tmp / "data").mkdir()
+        (self.tmp / "data" / "chroma.pid").write_text(f"{server.pid}\n")
+        result = self.run_script(DEPLOY / "local.sh", "down")
+        self.assertEqual(server.wait(timeout=5), -15)
+        self.assertFalse((self.tmp / "data" / "chroma.pid").exists())
+        self.assertIn("Stopping the Chroma server", result.stdout)
+
+    def test_down_without_a_pid_file_stops_nothing(self):
+        result = self.run_script(DEPLOY / "local.sh", "down")
+        self.assertIn("nothing to stop", result.stdout)
+
+    def test_status_reports_the_chroma_server(self):
+        result = self.run_script(DEPLOY / "local.sh", "status")
+        self.assertIn("chroma  http://localhost:8000   alive", result.stdout)
 
 
 class TestMigrateSetupScript(ScriptHarness):

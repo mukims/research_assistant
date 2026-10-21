@@ -6,11 +6,10 @@
 import collections
 import statistics as st
 
-import chromadb
+from research_assistant.config import COLLECTION_NAME, INDEX_VERSION
+from research_assistant.shared.db import open_store
 
-from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, INDEX_VERSION
-
-col = chromadb.PersistentClient(path=VECTORDB_PATH).get_collection(COLLECTION_NAME)
+col = open_store().get_collection(COLLECTION_NAME)
 lens, types, docs, modes = [], collections.Counter(), set(), collections.Counter()
 off = 0
 while True:

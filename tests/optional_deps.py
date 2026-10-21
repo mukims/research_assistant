@@ -44,7 +44,12 @@ def store_has_data(vectordb_path: str) -> bool:
 requires_torch = unittest.skipUnless(
     available("torch"), "torch is not installed (CI installs requirements-test.txt only)"
 )
+# Opening the store's files while the Chroma server owns them is what lost 17,201 vectors on
+# 2026-10-21 (config.chroma_server_from), so these tests run only when asked, with the server
+# and the app stopped: CITATION_TEST_REAL_STORE=1.
 requires_real_store = unittest.skipUnless(
-    available("chromadb") and store_has_data(config.VECTORDB_PATH),
-    "needs the maintainer's chromadb corpus at config.VECTORDB_PATH",
+    os.environ.get("CITATION_TEST_REAL_STORE") == "1"
+    and available("chromadb") and store_has_data(config.VECTORDB_PATH),
+    "needs the maintainer's chromadb corpus at config.VECTORDB_PATH and CITATION_TEST_REAL_STORE=1 "
+    "(stop the Chroma server and the app first)",
 )

@@ -206,11 +206,10 @@ def verify_counts(metadatas, manifest_keys, summary_docs, expected_keys) -> dict
 
 def verify(expected_keys) -> int:
     """Open the v3 store (read-only use) and print whether the migration is complete."""
-    import chromadb
-
     from research_assistant.shared import manifest
+    from research_assistant.shared.db import open_store
 
-    client = chromadb.PersistentClient(path=config.VECTORDB_PATH)
+    client = open_store()
     col = client.get_collection(config.COLLECTION_NAME)
     summaries = client.get_collection(config.SUMMARY_COLLECTION_NAME)
 
