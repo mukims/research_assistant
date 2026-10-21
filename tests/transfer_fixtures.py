@@ -218,4 +218,270 @@ def card(document: str = "a.pdf", verified: bool = True) -> Card:
         outputs="output data",
         assumptions=["basic assumption"],
         evidence=premise("Supports" if verified else "Unclear / insufficient evidence", key="C1", document=document),
+        mechanism=["step 1: compute", "step 2: apply"],
     )
+
+
+import json
+import math
+import re
+from dataclasses import dataclass, field
+import numpy as np
+
+from research_assistant.transfer.cards import CardIndex
+from research_assistant.transfer.deps import Deps
+
+
+@dataclass
+class WorldLog:
+    chat_calls: int = 0
+    critic_calls: int = 0
+    judged: list[str] = field(default_factory=list)
+    searches: list[tuple] = field(default_factory=list)
+    progress: list[tuple] = field(default_factory=list)
+
+
+def world(**overrides) -> tuple[Deps, WorldLog]:
+    gate_keeps = overrides.get("gate_keeps", 3)
+    card_names = overrides.get("card_names", {})
+    replies = overrides.get("replies", {})
+    cancel_after = overrides.get("cancel_after", 9999)
+
+    log = WorldLog()
+    chat_kind_counts: dict[str, int] = {}
+    transfers_written = [0]
+
+    all_docs = ["n0", "n1", "n2", "n3", "n4", "n5", "s1", "s2", "s3", "s4", "s5", "s6", "s7"]
+    doc_to_chunk = {doc: i for i, doc in enumerate(all_docs)}
+    texts = [f"text of {doc}" for doc in all_docs]
+    metadatas = [{"document": doc, "section": "methods", "citation": f"Citation {doc}"} for doc in all_docs]
+
+    def _angle_vec(deg: float) -> list[float]:
+        rad = math.radians(deg)
+        return [math.cos(rad), math.sin(rad)]
+
+    def embed_query(text: str) -> list[float]:
+        t = text.strip()
+        if t == "g1-specific":
+            return _angle_vec(0.0)
+        if t == "g1-mid":
+            return _angle_vec(5.0)
+        if t == "g1-broad":
+            return _angle_vec(10.0)
+        if t.startswith("g2-"):
+            if "mid" in t or t == "g2-2":
+                return _angle_vec(95.0)
+            if "broad" in t or t == "g2-3":
+                return _angle_vec(100.0)
+            return _angle_vec(90.0)
+        return _angle_vec(45.0)
+
+    def embed_documents(doc_texts: list[str]) -> list[list[float]]:
+        return [embed_query(t) for t in doc_texts]
+
+    card_specs = [
+        ("s1", 2.0, True),
+        ("s2", 7.0, True),
+        ("s3", 12.0, True),
+        ("s4", 92.0, True),
+        ("s5", 97.0, True),
+        ("s6", 102.0, True),
+        ("n0", 1.0, True),
+        ("s7", 91.0, False),
+    ]
+    card_list = []
+    card_vecs = []
+    for doc, ang, ver in card_specs:
+        c_name = card_names.get(doc, f"method {doc}")
+        ev = Premise(
+            claim=f"Claim for {doc}",
+            key="C1",
+            document=doc,
+            chunk_index=doc_to_chunk[doc],
+            judgement="Supports" if ver else "Unclear / insufficient evidence",
+            span_verified=ver,
+            supporting_span="sample span" if ver else None,
+        )
+        c = Card(
+            card_id=f"{doc}#0",
+            document=doc,
+            citation=f"Citation {doc}",
+            name=c_name,
+            problem_solved=f"problem solved by {doc}",
+            context=f"context for {doc}",
+            inputs="input",
+            outputs="output",
+            assumptions=["assumption"],
+            evidence=ev,
+            mechanism=["step 1: compute", "step 2: apply"],
+        )
+        card_list.append(c)
+        card_vecs.append(_angle_vec(ang))
+    cards_index = CardIndex(card_list, np.array(card_vecs, dtype=float))
+
+    def shortlist_fn(query: str, k: int) -> list[dict]:
+        return [
+            {"document": f"n{i}", "citation": f"Citation n{i}", "score": 1.0 - i * 0.1}
+            for i in range(min(k, 6))
+        ]
+
+    def gate_fn(query: str, sl: list[dict]) -> list[dict]:
+        return sl[:gate_keeps]
+
+    def search_fn(query: str, top_k: int, doc_filter: set | None, exclude_docs: set | None) -> list[dict]:
+        doc_filter_set = set(doc_filter) if doc_filter else set()
+        exclude_set = set(exclude_docs) if exclude_docs else set()
+        log.searches.append((doc_filter_set, exclude_set))
+        hits = []
+        for doc in sorted(doc_filter_set):
+            if doc in exclude_set:
+                continue
+            c_idx = doc_to_chunk[doc]
+            hits.append({
+                "chunk_index": c_idx,
+                "document": doc,
+                "text": f"text of {doc}",
+                "metadata": {"document": doc, "section": "methods", "citation": f"Citation {doc}"},
+                "score": 1.0,
+            })
+        return hits[:top_k]
+
+    def chat_fn(messages: list[dict], temperature: float = 0.7) -> str:
+        log.chat_calls += 1
+        content = messages[-1].get("content", "")
+        kind = "unknown"
+        if "TASK: bottlenecks" in content:
+            kind = "bottlenecks"
+        elif "TASK: transfer" in content:
+            kind = "transfer"
+        elif "TASK: revise" in content:
+            kind = "revise"
+        elif "TASK: cards" in content:
+            kind = "cards"
+
+        chat_kind_counts[kind] = chat_kind_counts.get(kind, 0) + 1
+        call_n = chat_kind_counts[kind]
+        if (kind, call_n) in replies:
+            return replies[(kind, call_n)]
+
+        if kind == "bottlenecks":
+            return json.dumps({
+                "bottlenecks": [
+                    {
+                        "statement": "Bottleneck 1",
+                        "quantities": ["conductance"],
+                        "current_method": "recursive Green's function",
+                        "generic": {
+                            "specific": "g1-specific",
+                            "mid": "g1-mid",
+                            "broad": "g1-broad",
+                        },
+                        "premises": [
+                            {"claim": "bottleneck fact one", "key": "C1"},
+                            {"claim": "bottleneck fact two", "key": "C2"},
+                        ],
+                    },
+                    {
+                        "statement": "Bottleneck 2",
+                        "quantities": ["conductance"],
+                        "current_method": "recursive Green's function",
+                        "generic": {
+                            "specific": "g2-specific",
+                            "mid": "g2-mid",
+                            "broad": "g2-broad",
+                        },
+                        "premises": [
+                            {"claim": "bottleneck fact two", "key": "C2"},
+                            {"claim": "bottleneck fact three", "key": "C3"},
+                        ],
+                    },
+                ]
+            })
+
+        if kind == "transfer":
+            keys = re.findall(r"\[(C\d+)\]", content)
+            k1 = keys[0] if keys else "C1"
+            k2 = keys[-1] if keys else "C2"
+            t, _, _ = good_transfer()
+            transfers_written[0] += 1
+            return json.dumps({
+                "title": t.title,
+                "summary": t.summary,
+                "mapping": [
+                    {"source_role": r.source_role, "target_role": r.target_role, "assumption": r.assumption, "status": r.status, "core": r.core, "note": r.note}
+                    for r in t.mapping
+                ],
+                "identifiability": {
+                    "measurements": t.identifiability.measurements,
+                    "unknowns": t.identifiability.unknowns,
+                    "symmetries": t.identifiability.symmetries,
+                    "verdict": t.identifiability.verdict,
+                    "argument": t.identifiability.argument,
+                },
+                "steps": [
+                    {"action": s.action, "input": s.input, "output": s.output, "tool": s.tool}
+                    for s in t.steps
+                ],
+                "data_requirement": t.data_requirement,
+                "baseline": t.baseline,
+                "metric": t.metric,
+                "prediction": t.prediction,
+                "refuting_result": t.refuting_result,
+                "premises": [
+                    {"claim": f"near fact {k1}", "key": k1},
+                    {"claim": f"source fact {k2}", "key": k2},
+                ],
+            })
+
+        if kind == "revise":
+            return json.dumps({
+                "objections": [
+                    {"response": "Addressed objection with concrete argument.", "conceded": False}
+                ]
+            })
+
+        return "{}"
+
+    def critic_fn(messages: list[dict]) -> str:
+        log.critic_calls += 1
+        return json.dumps({
+            "shape_match": "yes",
+            "rows": [],
+            "identifiability": "determined",
+            "objections": [
+                {"text": "Sample critic objection", "answered": False, "response": "", "conceded": False}
+            ],
+        })
+
+    def judge_fn(claim: str, evidence: str) -> dict:
+        log.judged.append(claim)
+        return {
+            "judgement": "Supports",
+            "span_verified": True,
+            "supporting_span": "sample supporting span",
+            "reason": "verified against text",
+        }
+
+    def prior_art_fn(title: str, assumptions: list[str], quantities: str, before_year: int | None) -> PriorArt:
+        status = "done_before" if "known" in title.lower() else "not_found"
+        hits = [{"title": title, "similarity": 0.9}] if status == "done_before" else []
+        return PriorArt(status=status, hits=hits)
+
+    deps = Deps(
+        chat=chat_fn,
+        critic=critic_fn,
+        judge=judge_fn,
+        embed_query=embed_query,
+        embed_documents=embed_documents,
+        shortlist=shortlist_fn,
+        gate=gate_fn,
+        search=search_fn,
+        prior_art=prior_art_fn,
+        texts=texts,
+        metadatas=metadatas,
+        cards=cards_index,
+        cancelled=lambda: transfers_written[0] >= cancel_after,
+        progress=lambda d, t, label: log.progress.append((d, t, label)),
+    )
+    return deps, log
+
