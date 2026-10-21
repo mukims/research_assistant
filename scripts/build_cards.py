@@ -66,6 +66,19 @@ def main(argv=None) -> int:
     if args.limit is not None:
         docs_to_build = docs_to_build[: args.limit]
 
+    if args.sample is not None and docs_to_build:
+        manifest_path = os.path.join(TRANSFER_DIR, "manifest.json")
+        try:
+            manifest_data = {}
+            if os.path.exists(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as fh:
+                    manifest_data = json.load(fh)
+            manifest_data["_last_sample"] = [d for d, _ in docs_to_build]
+            from research_assistant.shared.atomic import atomic_write_json
+            atomic_write_json(manifest_path, manifest_data)
+        except Exception:
+            pass
+
     # Setup checker and chat
     retried_judge = retry(max_retries=2, backoff=1.0)(judge)
     checker = PremiseChecker(retried_judge, texts, metadatas)
