@@ -291,6 +291,9 @@ TRANSFER_SOURCE_PASSAGES          = _env_int("CITATION_TRANSFER_SOURCE_PASSAGES"
 TRANSFER_PASSAGE_MAX_CHARS        = _env_int("CITATION_TRANSFER_PASSAGE_MAX_CHARS", 7000)
 TRANSFER_CARD_MAX_CHARS           = _env_int("CITATION_TRANSFER_CARD_MAX_CHARS", 9000)
 TRANSFER_CARD_MAX_TECHNIQUES      = _env_int("CITATION_TRANSFER_CARD_MAX_TECHNIQUES", 3)
+# A card names no technique unless it says how it works. Gate F1 failed on vague
+# cards ("combine microscopy with DFT"); a one-line "mechanism" is the same label again.
+TRANSFER_CARD_MIN_MECHANISM_STEPS = _env_int("CITATION_TRANSFER_CARD_MIN_MECHANISM_STEPS", 2)
 TRANSFER_TEMPERATURE             = float(os.environ.get("CITATION_TRANSFER_TEMPERATURE", "0.7"))
 TRANSFER_BOTTLENECK_TEMPERATURE   = float(os.environ.get("CITATION_TRANSFER_BOTTLENECK_TEMPERATURE", "0.3"))
 TRANSFER_CRITIC_MODEL             = os.environ.get("CITATION_TRANSFER_CRITIC_MODEL") or None

@@ -50,6 +50,10 @@ class TestBuild(unittest.TestCase):
                     "inputs": "sparse matrix",
                     "outputs": "spectral density",
                     "assumptions": ["bounded spectrum"],
+                    "mechanism": [
+                        "Rescale the matrix so its spectrum lies in [-1, 1].",
+                        "Compute Chebyshev moments by the three-term recursion.",
+                    ],
                     "evidence": {
                         "claim": "The paper expands the DOS in Chebyshev polynomials.",
                         "key": "C1",
@@ -62,6 +66,7 @@ class TestBuild(unittest.TestCase):
                     "inputs": "",
                     "outputs": "",
                     "assumptions": [],
+                    "mechanism": ["Do a.", "Do b."],
                     "evidence": {"claim": "z", "key": "C9"},
                 },
             ]
@@ -80,6 +85,49 @@ class TestBuild(unittest.TestCase):
         self.assertEqual([(c.card_id, c.verified) for c in got], [("d#0", True)])
         self.assertTrue(any("C9" in w for w in warnings))
 
+
+    def _technique(self, name, mechanism):
+        return {
+            "name": name,
+            "problem_solved": "approximate a function of a large sparse matrix",
+            "context": "DOS",
+            "inputs": "sparse matrix",
+            "outputs": "spectral density",
+            "assumptions": [],
+            "mechanism": mechanism,
+            "evidence": {"claim": "The paper expands the DOS in Chebyshev polynomials.", "key": "C1"},
+        }
+
+    def _build(self, reply):
+        ps = [models.Passage("C1", 0, "d", "D", "methods", "We use Chebyshev expansion.", "card")]
+        checker = premises.PremiseChecker(
+            lambda c, e: {"judgement": "Supports", "span_verified": True, "supporting_span": "s", "reason": "r"},
+            ["We use Chebyshev expansion."],
+            [{"document": "d"}],
+        )
+        return cards.build_card("d", "D", ps, chat=lambda m: json.dumps(reply), checker=checker)
+
+    def test_a_technique_without_a_concrete_mechanism_is_dropped_with_a_warning(self):
+        steps = [
+            "Rescale the matrix so its spectrum lies in [-1, 1].",
+            "Compute Chebyshev moments by the three-term recursion.",
+            "Damp the moments with the Jackson kernel.",
+        ]
+        got, warnings = self._build({"techniques": [
+            self._technique("Kernel polynomial method", steps),
+            self._technique("Combine methods", ["Combine the two approaches."]),
+            self._technique("Unspecified", []),
+        ]})
+        self.assertEqual([(c.name, c.mechanism) for c in got], [("Kernel polynomial method", steps)])
+        self.assertEqual([c.card_id for c in got], ["d#0"])
+        self.assertEqual(sum("mechanism" in w for w in warnings), 2)
+
+    def test_blank_mechanism_steps_do_not_count(self):
+        got, _ = self._build({"techniques": [self._technique("T", ["Do one thing.", "  ", ""])]})
+        self.assertEqual(got, [])
+
+    def test_a_paper_with_no_reusable_technique_gives_no_cards_and_no_warnings(self):
+        self.assertEqual(self._build({"techniques": []}), ([], []))
 
 class TestStoreAndIndex(unittest.TestCase):
     def test_the_store_resumes_and_the_index_excludes_documents_and_unverified_cards(self):
@@ -144,3 +192,10 @@ class TestStoreAndIndex(unittest.TestCase):
             self.assertEqual(len(chat_calls), 1)
             self.assertEqual(res["skipped"], 1)
             self.assertEqual(res["built"], 1)
+
+
+class TestCardRecords(unittest.TestCase):
+    def test_a_card_stored_before_mechanism_existed_loads_with_no_steps(self):
+        d = models.card_to_dict(card("a.pdf", True))
+        del d["mechanism"]
+        self.assertEqual(models.card_from_dict(d).mechanism, [])

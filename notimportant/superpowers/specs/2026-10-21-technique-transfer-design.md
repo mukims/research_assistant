@@ -74,6 +74,7 @@ gets one card-building call:
   - `problem_solved`: stated generically, with no field nouns; this field is what gets matched;
   - `context`: how this paper used it;
   - `inputs`, `outputs` and `assumptions`;
+  - `mechanism`: 2–5 concrete steps saying how it works. A technique with fewer is dropped in code (`TRANSFER_CARD_MIN_MECHANISM_STEPS`), so a survey, a database or a benchmark yields no card. This was added after F1 run 1 (§10);
   - an **evidence premise** citing one passage key.
 - **Verified** means the evidence premise passes the judge. Only verified cards can be sources.
 - **Stored** as `DATA_DIR/transfer/cards.jsonl` plus `cards.npy` (the `problem_solved` vectors). There are no Chroma writes. Building is resumable through a per-document manifest; rerun it after an ingest.

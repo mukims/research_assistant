@@ -13,6 +13,7 @@ from research_assistant.config import (
     EXCLUDED_FROM_EVIDENCE,
     TRANSFER_CARD_MAX_CHARS,
     TRANSFER_CARD_MAX_TECHNIQUES,
+    TRANSFER_CARD_MIN_MECHANISM_STEPS,
     TRANSFER_PASSAGE_MAX_CHARS,
 )
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
@@ -131,6 +132,16 @@ def build_card(
     card_index = 0
 
     for tech in raw_techniques:
+        mechanism = [
+            str(s).strip() for s in tech.get("mechanism") or [] if str(s).strip()
+        ]
+        if len(mechanism) < TRANSFER_CARD_MIN_MECHANISM_STEPS:
+            warnings.append(
+                f"Technique {tech.get('name', '')!r} dropped: its mechanism has "
+                f"{len(mechanism)} step(s), {TRANSFER_CARD_MIN_MECHANISM_STEPS} needed"
+            )
+            continue
+
         ev = tech.get("evidence", {})
         resolved, w = resolve_premises([ev], passages_by_key, limit=1)
         warnings.extend(w)
@@ -156,6 +167,7 @@ def build_card(
                 outputs=tech.get("outputs", ""),
                 assumptions=tech.get("assumptions", []),
                 evidence=prem,
+                mechanism=mechanism,
             )
         )
         card_index += 1

@@ -74,6 +74,7 @@ class Card:
     outputs: str
     assumptions: list[str]
     evidence: Premise
+    mechanism: list[str] = field(default_factory=list)  # how it works, step by step
 
     @property
     def verified(self) -> bool:

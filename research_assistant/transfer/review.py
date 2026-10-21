@@ -23,6 +23,9 @@ def review_sheet(index: CardIndex, documents: list[str]) -> tuple[str, str]:
     for c in cards:
         span_str = c.evidence.supporting_span or "N/A"
         assumptions_str = ", ".join(c.assumptions) if c.assumptions else "none"
+        mechanism_str = "".join(
+            f"   {i}. {step}\n" for i, step in enumerate(c.mechanism, start=1)
+        ) or "   none\n"
         block = f"""## Card {c.card_id}
 - **Paper:** {c.citation} ({c.document})
 - **Technique:** {c.name}
@@ -31,7 +34,8 @@ def review_sheet(index: CardIndex, documents: list[str]) -> tuple[str, str]:
 - **Inputs:** {c.inputs}
 - **Outputs:** {c.outputs}
 - **Assumptions:** {assumptions_str}
-- **Evidence Claim:** "{c.evidence.claim}" (Key: {c.evidence.key})
+- **Mechanism:**
+{mechanism_str}- **Evidence Claim:** "{c.evidence.claim}" (Key: {c.evidence.key})
 - **Supporting Span:** "{span_str}"
 - **Verdict:** {c.evidence.judgement} (Verified: {c.evidence.span_verified})
 """
