@@ -204,3 +204,18 @@ def sample_result() -> RunResult:
         seconds=12.5,
         warnings=[],
     )
+
+
+def card(document: str = "a.pdf", verified: bool = True) -> Card:
+    return Card(
+        card_id=f"{document}#0",
+        document=document,
+        citation=f"Citation for {document}",
+        name="test technique",
+        problem_solved="generic problem description",
+        context="specific context",
+        inputs="input data",
+        outputs="output data",
+        assumptions=["basic assumption"],
+        evidence=premise("Supports" if verified else "Unclear / insufficient evidence", key="C1", document=document),
+    )
