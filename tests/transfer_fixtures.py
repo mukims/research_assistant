@@ -222,6 +222,47 @@ def card(document: str = "a.pdf", verified: bool = True) -> Card:
     )
 
 
+def good_transfer_reply(**overrides) -> str:
+    t, _, _ = good_transfer()
+    data = {
+        "title": t.title,
+        "summary": t.summary,
+        "mapping": [
+            {
+                "source_role": r.source_role,
+                "target_role": r.target_role,
+                "assumption": r.assumption,
+                "status": r.status,
+                "core": r.core,
+                "note": r.note,
+            }
+            for r in t.mapping
+        ],
+        "identifiability": {
+            "measurements": t.identifiability.measurements,
+            "unknowns": t.identifiability.unknowns,
+            "symmetries": t.identifiability.symmetries,
+            "verdict": t.identifiability.verdict,
+            "argument": t.identifiability.argument,
+        },
+        "steps": [
+            {"action": s.action, "input": s.input, "output": s.output, "tool": s.tool}
+            for s in t.steps
+        ],
+        "data_requirement": t.data_requirement,
+        "baseline": t.baseline,
+        "metric": t.metric,
+        "prediction": t.prediction,
+        "refuting_result": t.refuting_result,
+        "premises": [
+            {"claim": "near fact", "key": "C1"},
+            {"claim": "source fact", "key": "C2"},
+        ],
+    }
+    data.update(overrides)
+    return json.dumps(data)
+
+
 import json
 import math
 import re
@@ -361,8 +402,15 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
 
         chat_kind_counts[kind] = chat_kind_counts.get(kind, 0) + 1
         call_n = chat_kind_counts[kind]
+        if kind == "transfer":
+            transfers_written[0] += 1
         if (kind, call_n) in replies:
-            return replies[(kind, call_n)]
+            rep = replies[(kind, call_n)]
+            if isinstance(rep, list):
+                if rep:
+                    return rep.pop(0) if len(rep) > 1 else rep[0]
+                return ""
+            return rep
 
         if kind == "bottlenecks":
             return json.dumps({
@@ -403,7 +451,6 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             k1 = keys[0] if keys else "C1"
             k2 = keys[-1] if keys else "C2"
             t, _, _ = good_transfer()
-            transfers_written[0] += 1
             return json.dumps({
                 "title": t.title,
                 "summary": t.summary,
@@ -435,8 +482,8 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
 
         if kind == "revise":
             return json.dumps({
-                "objections": [
-                    {"response": "Addressed objection with concrete argument.", "conceded": False}
+                "responses": [
+                    {"objection": 0, "response": "Addressed objection with concrete argument.", "concede": False}
                 ]
             })
 
@@ -449,7 +496,7 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             "rows": [],
             "identifiability": "determined",
             "objections": [
-                {"text": "Sample critic objection", "answered": False, "response": "", "conceded": False}
+                "Sample critic objection"
             ],
         })
 
@@ -462,9 +509,9 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             "reason": "verified against text",
         }
 
-    def prior_art_fn(title: str, assumptions: list[str], quantities: str, before_year: int | None) -> PriorArt:
-        status = "done_before" if "known" in title.lower() else "not_found"
-        hits = [{"title": title, "similarity": 0.9}] if status == "done_before" else []
+    def prior_art_fn(technique_name: str, quantities: list[str], summary: str, before_year: int | None) -> PriorArt:
+        status = "done_before" if "known" in technique_name.lower() else "not_found"
+        hits = [{"title": technique_name, "similarity": 0.9}] if status == "done_before" else []
         return PriorArt(status=status, hits=hits)
 
     deps = Deps(

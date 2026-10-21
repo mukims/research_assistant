@@ -6,10 +6,29 @@ from dataclasses import dataclass
 from typing import Any
 
 from research_assistant.config import DOC_SELECT_K
+from research_assistant.shared import pipeline_status
 from research_assistant.transfer.deps import Deps, TransferSettings
-from research_assistant.transfer.models import Bottleneck, Card, Passage, Premise
+from research_assistant.transfer.models import (
+    Bottleneck,
+    Card,
+    Critique,
+    Identifiability,
+    MappingRow,
+    Passage,
+    Premise,
+    PriorArt,
+    Step,
+    Transfer,
+)
 from research_assistant.transfer.premises import PremiseChecker
-from research_assistant.transfer.prompts import BOTTLENECKS_USER, SYSTEM, format_passages
+from research_assistant.transfer.prompts import (
+    BOTTLENECKS_USER,
+    CRITIQUE_USER,
+    REVISE_USER,
+    SYSTEM,
+    TRANSFER_USER,
+    format_passages,
+)
 from research_assistant.transfer.replies import ask_json, resolve_premises
 
 
@@ -213,7 +232,7 @@ def candidate_cards(
             warnings.append(f"corpus gap for {b.id}: no verified card matches '{mid_text}'")
             continue
 
-        sorted_candidates = sorted(best_by_card.values(), key=lambda x: x[1], reverse=True)
+        sorted_candidates = sorted(best_by_card.values(), key=lambda x: round(x[1], 8), reverse=True)
         top_candidates = sorted_candidates[: settings.techniques_per_bottleneck]
 
         for card_obj, score, level, rank_idx in top_candidates:
@@ -228,4 +247,317 @@ def candidate_cards(
             )
 
     return seeds, warnings
+
+
+def develop(
+    seed: Seed,
+    n: int,
+    grounding: Grounding,
+    deps: Deps,
+    settings: TransferSettings,
+    checker: PremiseChecker,
+) -> Transfer | None:
+    """
+    Stage S3–S5: Write, judge, critique, and revise one technique transfer.
+    """
+    if deps.cancelled():
+        raise pipeline_status.PipelineCancelledError("Technique transfer stopped by user")
+
+    transfer_id = f"{seed.bottleneck_id}.T{n}"
+    bottleneck = next((b for b in grounding.bottlenecks if b.id == seed.bottleneck_id), None)
+    if bottleneck is None:
+        grounding.warnings.append(f"{transfer_id}: bottleneck {seed.bottleneck_id} not found")
+        return None
+
+    card = seed.card
+
+    # Source passages:
+    # 1. Card evidence chunk comes first.
+    source_passages: list[Passage] = []
+    seen_chunks: set[int] = set()
+
+    ev_chunk = card.evidence.chunk_index
+    if ev_chunk is not None and 0 <= ev_chunk < len(deps.texts):
+        seen_chunks.add(ev_chunk)
+        existing = next(
+            (p for p in grounding.passages.values() if p.chunk_index == ev_chunk and p.document == card.document),
+            None,
+        )
+        if existing:
+            p_ev = existing
+        else:
+            meta = deps.metadatas[ev_chunk] if ev_chunk < len(deps.metadatas) else {}
+            k = f"C{len(grounding.passages) + 1}"
+            p_ev = Passage(
+                key=k,
+                chunk_index=ev_chunk,
+                document=card.document,
+                citation=card.citation,
+                section=meta.get("section", "methods"),
+                text=deps.texts[ev_chunk],
+                role="source",
+            )
+            grounding.passages[k] = p_ev
+        source_passages.append(p_ev)
+
+    # 2. Search for additional source passages
+    search_hits = deps.search(
+        card.problem_solved,
+        settings.source_passages,
+        {card.document},
+        settings.exclude_documents or None,
+    )
+    for hit in search_hits:
+        c_idx = hit.get("chunk_index")
+        if c_idx is None or c_idx in seen_chunks:
+            continue
+        seen_chunks.add(c_idx)
+        existing = next(
+            (p for p in grounding.passages.values() if p.chunk_index == c_idx and p.document == card.document),
+            None,
+        )
+        if existing:
+            p_src = existing
+        else:
+            k = f"C{len(grounding.passages) + 1}"
+            meta = hit.get("metadata", {})
+            p_src = Passage(
+                key=k,
+                chunk_index=c_idx,
+                document=card.document,
+                citation=meta.get("citation", card.citation),
+                section=meta.get("section", "methods"),
+                text=hit.get("text", deps.texts[c_idx] if c_idx < len(deps.texts) else ""),
+                role="source",
+            )
+            grounding.passages[k] = p_src
+        source_passages.append(p_src)
+
+    # 3. Prompt passages:
+    # Passages behind bottleneck premises, then source passages
+    near_passages: list[Passage] = []
+    seen_near_keys: set[str] = set()
+    for p in bottleneck.premises:
+        if p.key in grounding.passages and p.key not in seen_near_keys:
+            near_passages.append(grounding.passages[p.key])
+            seen_near_keys.add(p.key)
+
+    prompt_passages: list[Passage] = near_passages + source_passages
+
+    bottleneck_premises_str = "\n".join(f"- {p.claim} ({p.key})" for p in bottleneck.premises)
+    passages_str = format_passages(prompt_passages, settings.passage_max_chars)
+    card_mechanism_str = "\n".join(f"- {step}" for step in card.mechanism) if card.mechanism else "- N/A"
+
+    user_prompt = TRANSFER_USER.format(
+        bottleneck_statement=bottleneck.statement,
+        bottleneck_quantities=", ".join(bottleneck.quantities),
+        bottleneck_current_method=bottleneck.current_method,
+        bottleneck_premises=bottleneck_premises_str,
+        card_name=card.name,
+        card_citation=card.citation,
+        card_problem_solved=card.problem_solved,
+        card_context=card.context,
+        card_inputs=card.inputs,
+        card_outputs=card.outputs,
+        card_assumptions=", ".join(card.assumptions),
+        card_mechanism=card_mechanism_str,
+        passages=passages_str,
+    )
+
+    required_fields = (
+        "title",
+        "summary",
+        "mapping",
+        "identifiability",
+        "steps",
+        "data_requirement",
+        "baseline",
+        "metric",
+        "prediction",
+        "refuting_result",
+        "premises",
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    try:
+        reply_dict = ask_json(
+            lambda msgs: deps.chat(msgs, settings.temperature),
+            messages,
+            required=required_fields,
+        )
+    except Exception:
+        grounding.warnings.append(f"{transfer_id}: the model's reply was not usable JSON; skipped")
+        return None
+
+    transfer_warnings: list[str] = []
+
+    # 4. Premises: resolve against prompt_passages only, then judge
+    prompt_passages_dict = {p.key: p for p in prompt_passages}
+    raw_premises = reply_dict.get("premises", [])
+    resolved, p_warnings = resolve_premises(raw_premises, prompt_passages_dict, limit=4)
+    transfer_warnings.extend(p_warnings)
+    judged_premises = checker.check_all(resolved)
+
+    # 5. Critique: CRITIQUE_USER goes to deps.critic
+    mapping_list = reply_dict.get("mapping", [])
+    mapping_str = "\n".join(
+        f"Row {i}: source_role='{r.get('source_role')}', target_role='{r.get('target_role')}', "
+        f"assumption='{r.get('assumption')}', status='{r.get('status')}', core={r.get('core')}, note='{r.get('note', '')}'"
+        for i, r in enumerate(mapping_list)
+        if isinstance(r, dict)
+    )
+    ident_dict = reply_dict.get("identifiability", {})
+    if not isinstance(ident_dict, dict):
+        ident_dict = {}
+    steps_list = reply_dict.get("steps", [])
+    steps_str = "\n".join(
+        f"Step {i+1}: action='{s.get('action')}', input='{s.get('input')}', output='{s.get('output')}', tool='{s.get('tool')}'"
+        for i, s in enumerate(steps_list)
+        if isinstance(s, dict)
+    )
+
+    critique_prompt = CRITIQUE_USER.format(
+        title=reply_dict.get("title", ""),
+        summary=reply_dict.get("summary", ""),
+        mapping=mapping_str,
+        measurements=ident_dict.get("measurements", ""),
+        unknowns=ident_dict.get("unknowns", ""),
+        symmetries=", ".join(ident_dict.get("symmetries", [])) if isinstance(ident_dict.get("symmetries"), list) else str(ident_dict.get("symmetries", "")),
+        identifiability_verdict=ident_dict.get("verdict", ""),
+        identifiability_argument=ident_dict.get("argument", ""),
+        steps=steps_str,
+        baseline=reply_dict.get("baseline", ""),
+        metric=reply_dict.get("metric", ""),
+        prediction=reply_dict.get("prediction", ""),
+        refuting_result=reply_dict.get("refuting_result", ""),
+    )
+
+    critique_messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": critique_prompt},
+    ]
+
+    critique = Critique()
+    try:
+        crit_dict = ask_json(deps.critic, critique_messages, required=("shape_match",))
+        crit_objections_raw = crit_dict.get("objections", [])
+        crit_objections = []
+        for obj in crit_objections_raw:
+            text = obj if isinstance(obj, str) else (obj.get("text", "") if isinstance(obj, dict) else str(obj))
+            crit_objections.append({
+                "text": text,
+                "answered": False,
+                "response": "",
+                "conceded": False,
+            })
+        critique = Critique(
+            shape_match=crit_dict.get("shape_match", "unknown"),
+            rows=crit_dict.get("rows", []),
+            identifiability=crit_dict.get("identifiability"),
+            objections=crit_objections,
+        )
+    except Exception as err:
+        transfer_warnings.append(f"critic failed for {transfer_id}: {err}")
+        critique = Critique()
+
+    # 6. Revision: REVISE_USER goes to deps.chat with the objections
+    if critique.objections:
+        objections_text = "\n".join(f"{i}. {o['text']}" for i, o in enumerate(critique.objections))
+        revise_prompt = REVISE_USER.format(
+            title=reply_dict.get("title", ""),
+            summary=reply_dict.get("summary", ""),
+            objections=objections_text,
+        )
+        revise_messages = [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": revise_prompt},
+        ]
+        try:
+            rev_dict = ask_json(
+                lambda msgs: deps.chat(msgs, settings.temperature),
+                revise_messages,
+                required=("responses",),
+            )
+            for item in rev_dict.get("responses", []):
+                idx = item.get("objection")
+                if isinstance(idx, int) and 0 <= idx < len(critique.objections):
+                    critique.objections[idx]["answered"] = True
+                    critique.objections[idx]["response"] = item.get("response", "")
+                    critique.objections[idx]["conceded"] = bool(item.get("concede", False))
+        except Exception as err:
+            transfer_warnings.append(f"revision failed for {transfer_id}: {err}")
+
+    # 7. Prior art
+    summary = reply_dict.get("summary", "")
+    try:
+        prior_art = deps.prior_art(
+            card.name,
+            bottleneck.quantities,
+            summary,
+            settings.prior_art_before_year,
+        )
+    except Exception as err:
+        transfer_warnings.append(f"prior art check failed for {transfer_id}: {err}")
+        prior_art = PriorArt(status="unchecked")
+
+    mapping_objs = [
+        MappingRow(
+            source_role=r.get("source_role", ""),
+            target_role=r.get("target_role", ""),
+            assumption=r.get("assumption", ""),
+            status=r.get("status", "unknown"),
+            core=bool(r.get("core", False)),
+            note=r.get("note", ""),
+        )
+        for r in mapping_list
+        if isinstance(r, dict)
+    ]
+
+    ident_obj = Identifiability(
+        measurements=ident_dict.get("measurements", ""),
+        unknowns=ident_dict.get("unknowns", ""),
+        symmetries=ident_dict.get("symmetries", []) if isinstance(ident_dict.get("symmetries"), list) else [],
+        verdict=ident_dict.get("verdict", "unclear"),
+        argument=ident_dict.get("argument", ""),
+    )
+
+    step_objs = [
+        Step(
+            action=s.get("action", ""),
+            input=s.get("input", ""),
+            output=s.get("output", ""),
+            tool=s.get("tool", ""),
+        )
+        for s in steps_list
+        if isinstance(s, dict)
+    ]
+
+    return Transfer(
+        id=transfer_id,
+        bottleneck_id=seed.bottleneck_id,
+        card_id=card.card_id,
+        card_document=card.document,
+        level=seed.level,
+        retrieval_rank=seed.rank,
+        title=reply_dict.get("title", ""),
+        summary=summary,
+        mapping=mapping_objs,
+        identifiability=ident_obj,
+        steps=step_objs,
+        data_requirement=reply_dict.get("data_requirement", ""),
+        baseline=reply_dict.get("baseline", ""),
+        metric=reply_dict.get("metric", ""),
+        prediction=reply_dict.get("prediction", ""),
+        refuting_result=reply_dict.get("refuting_result", ""),
+        premises=judged_premises,
+        critique=critique,
+        prior_art=prior_art,
+        scores=None,
+        warnings=transfer_warnings,
+    )
+
 

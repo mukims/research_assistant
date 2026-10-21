@@ -103,3 +103,153 @@ Format your response as a JSON object matching this schema:
 }}
 """
 
+
+TRANSFER_USER = """TASK: transfer
+Propose a cross-disciplinary technique transfer from the source technique to solve the target bottleneck.
+
+Target bottleneck:
+Statement: {bottleneck_statement}
+Quantities: {bottleneck_quantities}
+Current method: {bottleneck_current_method}
+Premises:
+{bottleneck_premises}
+
+Source technique card:
+Name: {card_name}
+Citation: {card_citation}
+Problem solved: {card_problem_solved}
+Context: {card_context}
+Inputs: {card_inputs}
+Outputs: {card_outputs}
+Assumptions: {card_assumptions}
+Mechanism:
+{card_mechanism}
+
+Passages:
+{passages}
+
+Rules:
+1. Map every role the technique has in its source onto the target problem, one row each; mark each row's assumption holds, breaks or enforce, and core if the transfer fails without it.
+2. Identifiability: say what the measurements are, what the unknowns are, any symmetry that makes different unknowns give the same measurements, and whether the measurements determine the unknowns.
+3. Steps name an input, an output and a tool. data_requirement gives a number and its basis. baseline is the current method. metric measures one of the quantities. prediction states a direction or a number; refuting_result names the outcome that would refute the transfer.
+4. Give 2 to 4 premises: one sentence the cited passage states, citing exactly one key, written like C7; at least one from the source paper.
+5. Reply with the JSON object only.
+
+Format your response as a JSON object matching this schema:
+{{
+  "title": "Title of the proposed transfer",
+  "summary": "One-paragraph summary of the proposed transfer and how it works",
+  "mapping": [
+    {{
+      "source_role": "Role in source technique",
+      "target_role": "Mapped role in target problem",
+      "assumption": "Assumption underlying this role",
+      "status": "holds",
+      "core": true,
+      "note": "Optional note"
+    }}
+  ],
+  "identifiability": {{
+    "measurements": "Measurements available",
+    "unknowns": "Unknowns to be determined",
+    "symmetries": ["Symmetry 1"],
+    "verdict": "determined",
+    "argument": "Argument for why measurements determine unknowns"
+  }},
+  "steps": [
+    {{
+      "action": "Concrete action",
+      "input": "Input data or structure",
+      "output": "Output data or structure",
+      "tool": "Tool or method used"
+    }}
+  ],
+  "data_requirement": "Sample count or training size with justification",
+  "baseline": "Current method",
+  "metric": "Metric measuring one of the quantities",
+  "prediction": "Directional or numerical prediction",
+  "refuting_result": "Concrete outcome that would refute the transfer",
+  "premises": [
+    {{
+      "claim": "One sentence the cited passage states",
+      "key": "C1"
+    }}
+  ]
+}}
+"""
+
+
+CRITIQUE_USER = """TASK: critique
+Review this transfer proposal to reject it if you can.
+
+Transfer:
+Title: {title}
+Summary: {summary}
+
+Mapping:
+{mapping}
+
+Identifiability:
+Measurements: {measurements}
+Unknowns: {unknowns}
+Symmetries: {symmetries}
+Verdict: {identifiability_verdict}
+Argument: {identifiability_argument}
+
+Steps:
+{steps}
+
+Baseline: {baseline}
+Metric: {metric}
+Prediction: {prediction}
+Refuting result: {refuting_result}
+
+Rules:
+1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); override the identifiability verdict if it is wrong; list your strongest objections.
+2. Reply with the JSON object only.
+
+Format your response as a JSON object matching this schema:
+{{
+  "shape_match": "yes",
+  "rows": [
+    {{
+      "row": 0,
+      "status": "holds",
+      "reason": "Reason for status"
+    }}
+  ],
+  "identifiability": null,
+  "objections": [
+    "Strongest objection 1"
+  ]
+}}
+"""
+
+
+REVISE_USER = """TASK: revise
+Address each objection raised by the critic.
+
+Transfer:
+Title: {title}
+Summary: {summary}
+
+Objections from critic:
+{objections}
+
+Rules:
+1. Each response addresses one objection by its 0-based index. State your response or concede the objection.
+2. Reply with the JSON object only.
+
+Format your response as a JSON object matching this schema:
+{{
+  "responses": [
+    {{
+      "objection": 0,
+      "response": "Detailed technical response",
+      "concede": false
+    }}
+  ]
+}}
+"""
+
+

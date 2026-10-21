@@ -60,3 +60,53 @@ class TestCandidates(unittest.TestCase):
         self.assertEqual(seeds, [])
         self.assertTrue(any(w.startswith("corpus gap for B1") for w in warnings))
 
+
+from research_assistant.shared import pipeline_status
+from tests.transfer_fixtures import good_transfer_reply
+
+
+class TestDevelop(unittest.TestCase):
+    def _go(self, **kw):
+        deps, log = world(**kw)
+        s = TransferSettings()
+        ch = PremiseChecker(deps.judge, deps.texts, deps.metadatas)
+        g = stages.ground("q", deps, s, ch)
+        seeds, _ = stages.candidate_cards(g, deps, s)
+        return deps, log, g, seeds, s, ch
+
+    def test_a_complete_transfer_has_source_premises_critique_answers_and_prior_art(self):
+        deps, log, g, seeds, s, ch = self._go()
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)
+        self.assertEqual(t.id, "B1.T1")
+        self.assertEqual(t.card_document, "s1")
+        self.assertTrue(any(p.document == "s1" and p.accepted for p in t.premises))
+        self.assertTrue(all(o["answered"] for o in t.critique.objections))
+        self.assertEqual(t.prior_art.status, "not_found")
+        self.assertEqual(log.critic_calls, 1)
+
+    def test_a_premise_citing_a_passage_from_another_prompt_is_dropped(self):
+        bad = good_transfer_reply(premises=[{"claim": "x", "key": "C3"}, {"claim": "source fact", "key": "C4"}])  # fixture helper
+        deps, log, g, seeds, s, ch = self._go(replies={("transfer", 1): [bad]})
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)          # B1's prompt shows C1, C2 and the source passage C4
+        self.assertEqual([p.key for p in t.premises], ["C4"])
+        self.assertTrue(any("C3" in w for w in t.warnings))
+
+    def test_a_reply_that_never_parses_is_skipped_with_a_warning(self):
+        deps, log, g, seeds, s, ch = self._go(replies={("transfer", 1): ["nope", "still nope"]})
+        self.assertIsNone(stages.develop(seeds[0], 1, g, deps, s, ch))
+        self.assertTrue(any(w.startswith("B1.T1:") for w in g.warnings))
+
+    def test_a_failing_critic_leaves_an_empty_critique_not_a_crash(self):
+        deps, log, g, seeds, s, ch = self._go()
+        deps.critic = lambda m: (_ for _ in ()).throw(RuntimeError("down"))
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)
+        self.assertEqual(t.critique.objections, [])
+        self.assertTrue(any("critic" in w for w in t.warnings))
+
+    def test_cancelling_stops_before_the_transfer(self):
+        deps, log, g, seeds, s, ch = self._go()
+        deps.cancelled = lambda: True
+        with self.assertRaises(pipeline_status.PipelineCancelledError):
+            stages.develop(seeds[0], 1, g, deps, s, ch)
+
+
