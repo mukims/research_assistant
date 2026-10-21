@@ -320,6 +320,8 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--verify", action="store_true",
                         help="check the finished v3 index against the old manifests and stop")
+    parser.add_argument("--allow-fallback", action="store_true",
+                        help="allow PyMuPDF extraction when GROBID produces no body text, instead of halting")
     parser.add_argument("--from-data-dir", default=config.DATA_DIR,
                         help="where the old manifests and PDFs are read from (read-only); defaults to the data "
                              "directory v3 is written to. Point CITATION_DATA_DIR at a scratch directory and this "
@@ -381,7 +383,7 @@ def main(argv=None) -> int:
     try:
         totals, stopped = run_batches(
             todo, found,
-            lambda paths: ingest_pdfs(labeled(paths, by_base), workers=1, rebuild_index=False, require_grobid=True),
+            lambda paths: ingest_pdfs(labeled(paths, by_base), workers=1, rebuild_index=False, require_grobid=not args.allow_fallback),
             grobid_alive, args.batch_size,
         )
     finally:
