@@ -23,6 +23,8 @@ model_final.pth
 # Local secrets — never commit (.env.example is the tracked template)
 .env
 .env.*
+# a case-variant copy of .env: this filesystem is case-sensitive, so .env does not cover it
+.ENV
 !.env.example
 .claude/
 .agents/
