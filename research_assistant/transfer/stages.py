@@ -7,7 +7,7 @@ from typing import Any
 
 from research_assistant.config import DOC_SELECT_K
 from research_assistant.transfer.deps import Deps, TransferSettings
-from research_assistant.transfer.models import Bottleneck, Passage, Premise
+from research_assistant.transfer.models import Bottleneck, Card, Passage, Premise
 from research_assistant.transfer.premises import PremiseChecker
 from research_assistant.transfer.prompts import BOTTLENECKS_USER, SYSTEM, format_passages
 from research_assistant.transfer.replies import ask_json, resolve_premises
@@ -161,3 +161,71 @@ def ground(
         bottlenecks=bottlenecks,
         warnings=warnings,
     )
+
+
+@dataclass
+class Seed:
+    bottleneck_id: str
+    card: Card
+    score: float
+    level: str
+    rank: int
+
+
+def candidate_cards(
+    grounding: Grounding,
+    deps: Deps,
+    settings: TransferSettings,
+) -> tuple[list[Seed], list[str]]:
+    """
+    Stage S2: Retrieve and rank candidate technique cards for each bottleneck.
+
+    1. For each level in ("specific", "mid", "broad"), search cards index.
+    2. Merge hits by card_id keeping the highest similarity score, level, and 1-based rank.
+    3. Keep top settings.techniques_per_bottleneck cards per bottleneck.
+    4. Warn if no verified cards found for a bottleneck.
+    """
+    near_docs = {r["document"] for r in grounding.near}
+    exclude = frozenset(near_docs | set(settings.exclude_documents))
+    seeds: list[Seed] = []
+    warnings: list[str] = []
+
+    for b in grounding.bottlenecks:
+        best_by_card: dict[str, tuple[Card, float, str, int]] = {}
+
+        for level in ("specific", "mid", "broad"):
+            generic_text = b.generic.get(level, "")
+            if not generic_text:
+                continue
+            query_vec = deps.embed_query(generic_text)
+            hits = deps.cards.search(
+                query_vec,
+                settings.cards_per_query,
+                exclude_documents=exclude,
+            )
+            for rank_idx, (card_obj, score) in enumerate(hits, start=1):
+                cid = card_obj.card_id
+                if cid not in best_by_card or score > best_by_card[cid][1]:
+                    best_by_card[cid] = (card_obj, score, level, rank_idx)
+
+        if not best_by_card:
+            mid_text = b.generic.get("mid", "")
+            warnings.append(f"corpus gap for {b.id}: no verified card matches '{mid_text}'")
+            continue
+
+        sorted_candidates = sorted(best_by_card.values(), key=lambda x: x[1], reverse=True)
+        top_candidates = sorted_candidates[: settings.techniques_per_bottleneck]
+
+        for card_obj, score, level, rank_idx in top_candidates:
+            seeds.append(
+                Seed(
+                    bottleneck_id=b.id,
+                    card=card_obj,
+                    score=score,
+                    level=level,
+                    rank=rank_idx,
+                )
+            )
+
+    return seeds, warnings
+

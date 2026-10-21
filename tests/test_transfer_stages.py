@@ -35,3 +35,28 @@ class TestGround(unittest.TestCase):
             PremiseChecker(deps.judge, deps.texts, deps.metadatas),
         )
         self.assertEqual(log.searches[0], ({"n1", "n2", "n3"}, {"n0"}))
+
+
+class TestCandidates(unittest.TestCase):
+    def setUp(self):
+        self.deps, self.log = world()
+        self.g = stages.ground("q", self.deps, TransferSettings(), PremiseChecker(self.deps.judge, self.deps.texts, self.deps.metadatas))
+
+    def test_each_bottleneck_gets_its_nearest_verified_cards_and_never_a_near_paper_or_unverified_card(self):
+        seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings())
+        by_b = {b: sorted(s.card.document for s in seeds if s.bottleneck_id == b) for b in ("B1", "B2")}
+        self.assertEqual(by_b, {"B1": ["s1", "s2", "s3"], "B2": ["s4", "s5", "s6"]})
+
+    def test_every_seed_records_its_level_and_rank(self):
+        seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings())
+        s1 = next(s for s in seeds if s.card.document == "s1")
+        self.assertEqual((s1.level, s1.rank), ("specific", 1))
+
+    def test_an_empty_card_index_reports_a_corpus_gap(self):
+        import numpy as np
+        from research_assistant.transfer.cards import CardIndex
+        self.deps.cards = CardIndex([], np.zeros((0, 2)))
+        seeds, warnings = stages.candidate_cards(self.g, self.deps, TransferSettings())
+        self.assertEqual(seeds, [])
+        self.assertTrue(any(w.startswith("corpus gap for B1") for w in warnings))
+
