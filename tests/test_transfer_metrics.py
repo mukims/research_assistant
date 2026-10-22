@@ -81,6 +81,29 @@ class TestTransferMetrics(unittest.TestCase):
         self.assertTrue(m.case_passed(good, case, set())["passed"])
         self.assertFalse(m.case_passed(bad, case, set())["passed"])
 
+    def test_a_negative_run_with_no_matching_transfer_is_not_tested_rather_than_failed(self):
+        case = _case(kind="negative", technique_terms=["autoencoder"])
+        res = m.case_passed(_result_with([{"card_document": "a.pdf", "card_name": "genetic search", "set_aside": None}]), case, set())
+        self.assertEqual((res["passed"], res["tested"]), (False, False))
+        self.assertTrue(m.case_passed(_result_with([]), _case(), set())["tested"])
+
+    def test_f3_judges_a_case_on_its_tested_runs_and_cannot_pass_with_an_untested_case(self):
+        records = [
+            {"case_id": "neg", "passed": True, "tested": True},
+            {"case_id": "neg", "passed": False, "tested": False},
+            {"case_id": "pos", "passed": True},
+            {"case_id": "never", "passed": False, "tested": False},
+        ]
+        f3 = m.score(records)["f3"]
+        self.assertEqual((f3["passed"], f3["of"], f3["not_tested"]), (2, 2, 1))
+        self.assertFalse(f3["all_passed"])
+        self.assertTrue(m.score(records[:3])["f3"]["all_passed"])
+
+    def test_a_mapping_term_may_be_a_group_of_synonyms(self):
+        case = _case(mapping_terms=[["spin", "quantum state"], ["amplitude", "wave function"], ["energy"]])
+        transfer = {"mapping": [{"source_role": "hidden units", "target_role": "quantum state and wave function"}]}
+        self.assertAlmostEqual(m.mapped_share(transfer, case), 2 / 3)
+
     def test_the_leak_guard_stops_a_run_whose_hidden_paper_is_in_the_corpus(self):
         case = _case(hidden=["Solving the quantum many-body problem with artificial neural networks"])
         with self.assertRaisesRegex(RuntimeError, "many-body"):

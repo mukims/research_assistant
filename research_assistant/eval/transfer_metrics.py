@@ -151,7 +151,11 @@ def mapped_share(transfer: Any, case: Any) -> float:
                     row_texts.append(v)
 
     combined = " ".join(row_texts).lower()
-    found = sum(1 for term in mapping_terms if term.lower() in combined)
+    # A term may be a list of synonyms; the group counts once if any of them appears.
+    found = sum(
+        1 for term in mapping_terms
+        if any(t.lower() in combined for t in (term if isinstance(term, list) else [term]))
+    )
     return found / len(mapping_terms)
 
 
@@ -212,8 +216,15 @@ def case_passed(result: Any, case: Any, expected_docs: set[str]) -> dict[str, An
     """
     Evaluate whether a retrodiction case passed per spec §6 rules.
 
-    Returns dict with keys: passed, found_rank, mapped, critiqued, reason.
+    Returns dict with keys: passed, tested, found_rank, mapped, critiqued, reason.
+    A negative run in which no transfer matched the technique terms is not tested.
     """
+    res = _case_passed(result, case, expected_docs)
+    res.setdefault("tested", True)
+    return res
+
+
+def _case_passed(result: Any, case: Any, expected_docs: set[str]) -> dict[str, Any]:
     kind = _get_case_field(case, "kind", "positive")
     technique_terms = _get_case_field(case, "technique_terms", [])
     transfers = (
@@ -258,12 +269,14 @@ def case_passed(result: Any, case: Any, expected_docs: set[str]) -> dict[str, An
                 matching_transfers.append(t)
 
         if not matching_transfers:
+            # Nothing the case warns against was proposed, so the run says nothing about the gates.
             return {
                 "passed": False,
+                "tested": False,
                 "found_rank": None,
                 "mapped": 0.0,
                 "critiqued": False,
-                "reason": "no transfer matched technique terms",
+                "reason": "not tested: no transfer matched technique terms",
             }
 
         reasons_found = []
@@ -442,13 +455,19 @@ def score(records: list[dict] | dict) -> dict[str, Any]:
     differences = []
     passed_cases_count = 0
     total_f3_cases = 0
+    not_tested = 0
 
     for cid, runs in grouped.items():
         f3_runs = [r for r in runs if "passed" in r or "found_rank" in r]
         if not f3_runs:
             continue
+        # A case is judged on its tested runs; one with none is reported apart.
+        tested_runs = [r for r in f3_runs if r.get("tested", True)]
+        if not tested_runs:
+            not_tested += 1
+            continue
         total_f3_cases += 1
-        if all(r.get("passed", False) for r in f3_runs):
+        if all(r.get("passed", False) for r in tested_runs):
             passed_cases_count += 1
 
         if len(f3_runs) >= 2:
@@ -463,7 +482,8 @@ def score(records: list[dict] | dict) -> dict[str, Any]:
         "passed": passed_cases_count,
         "of": total_f3_cases,
         "spread": spread,
-        "all_passed": (passed_cases_count == total_f3_cases and total_f3_cases > 0),
+        "not_tested": not_tested,
+        "all_passed": (passed_cases_count == total_f3_cases and total_f3_cases > 0 and not_tested == 0),
     }
 
     return {

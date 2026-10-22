@@ -40,6 +40,21 @@ class TestGround(unittest.TestCase):
         g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
         self.assertEqual([b.inference for b in g.bottlenecks], [False, True])     # missing means inference
 
+    def test_missing_generic_levels_are_repaired_not_dropped(self):
+        reply = json.dumps({"bottlenecks": [
+            {"statement": "Only mid", "quantities": ["q"], "current_method": "m",
+             "generic": {"mid": "the mid form"}, "premises": [{"claim": "bottleneck fact one", "key": "C1"}]},
+            {"statement": "No generic forms", "quantities": ["q"], "current_method": "m",
+             "premises": [{"claim": "bottleneck fact two", "key": "C2"}]},
+        ]})
+        deps, _ = world(replies={("bottlenecks", 1): reply})
+        g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
+        self.assertEqual([b.generic for b in g.bottlenecks], [
+            {"specific": "the mid form", "mid": "the mid form", "broad": "the mid form"},
+            {"specific": "No generic forms", "mid": "No generic forms", "broad": "No generic forms"},
+        ])
+        self.assertTrue(any(w.startswith("Repaired generic levels") for w in g.warnings))
+
     def test_excluded_documents_never_reach_the_gate_or_the_search(self):
         deps, log = world()
         stages.ground(

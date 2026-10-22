@@ -150,6 +150,7 @@ def run_score_case(case: Case, deps: Deps, run_idx: int = 0) -> dict[str, Any]:
         "case_id": case.id,
         "run": run_idx + 1,
         "passed": eval_res["passed"],
+        "tested": eval_res.get("tested", True),
         "found_rank": eval_res["found_rank"],
         "mapped": eval_res["mapped"],
         "critiqued": eval_res["critiqued"],
@@ -257,7 +258,7 @@ def write_review_md(
 
         for run_info in runs:
             run_num = run_info.get("run", 1)
-            passed_str = "PASS" if run_info.get("passed") else "FAIL"
+            passed_str = "PASS" if run_info.get("passed") else ("FAIL" if run_info.get("tested", True) else "NOT TESTED")
             rank_str = run_info.get("found_rank") or "-"
             lines.append(f"### Run {run_num} [{passed_str}] (rank: {rank_str})\n\n")
             lines.append(f"Reason: {run_info.get('reason', '')}\n\n")
@@ -385,7 +386,8 @@ def main(argv: list[str] | None = None) -> int:
 
         f3 = summary["f3"]
         status = "PASS" if f3["all_passed"] else "FAIL"
-        sys.stdout.write(f"F3 {status}: {f3['passed']} of {f3['of']} passed (spread={f3['spread']:.2f})\n")
+        untested = f", {f3['not_tested']} not tested" if f3.get("not_tested") else ""
+        sys.stdout.write(f"F3 {status}: {f3['passed']} of {f3['of']} passed{untested} (spread={f3['spread']:.2f})\n")
         return 0 if f3["all_passed"] else 1
 
     if args.retrieval_only:

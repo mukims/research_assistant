@@ -151,9 +151,15 @@ def ground(
             warnings.append(f"Dropped bottleneck with no quantities: {statement!r}")
             continue
 
-        if not all(isinstance(generic.get(lvl), str) and generic.get(lvl).strip() for lvl in levels):
-            warnings.append(f"Dropped bottleneck with incomplete generic levels: {statement!r}")
-            continue
+        present = {lvl: generic[lvl].strip() for lvl in levels if isinstance(generic.get(lvl), str) and generic[lvl].strip()}
+        if len(present) < len(levels):
+            # A missing level borrows the mid form, then another level, then the statement.
+            fallback = next((present[lvl] for lvl in ("mid", "specific", "broad") if lvl in present), statement)
+            if not fallback:
+                warnings.append(f"Dropped bottleneck with no generic forms and no statement: {item!r}"[:200])
+                continue
+            warnings.append(f"Repaired generic levels {sorted(set(levels) - set(present))} of: {statement!r}")
+            generic = {lvl: present.get(lvl, fallback) for lvl in levels}
 
         resolved_p, p_warns = resolve_premises(raw_premises, passages, limit=3)
         warnings.extend(p_warns)
