@@ -133,7 +133,7 @@ Passages:
 
 Rules:
 1. Map every role the technique has in its source onto the target problem, one row each; mark each row's assumption holds, breaks or enforce, and core if the transfer fails without it.
-2. Identifiability: say what the measurements are, what the unknowns are, any symmetry that makes different unknowns give the same measurements, and whether the measurements determine the unknowns.
+2. Identifiability: say what the measurements are, what the unknowns are, any symmetry that makes different unknowns give the same measurements, and whether the measurements determine the unknowns. verdict is exactly one word: determined, underdetermined or overdetermined.
 3. Steps name an input, an output and a tool. data_requirement gives a number and its basis. baseline is the current method. metric measures one of the quantities. prediction states a direction or a number; refuting_result names the outcome that would refute the transfer.
 4. Give 2 to 4 premises: one sentence the cited passage states, citing exactly one key, written like C7; at least one from the source paper.
 5. Reply with the JSON object only.
@@ -208,7 +208,7 @@ Prediction: {prediction}
 Refuting result: {refuting_result}
 
 Rules:
-1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); override the identifiability verdict if it is wrong; list your strongest objections.
+1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); set identifiability to null if the verdict is right, otherwise to exactly one word, determined, underdetermined or overdetermined, and put your reasons in the objections; list your strongest objections.
 2. kind says what the transfer does to the current method (the baseline): replace it with a different method, augment it with a new component, or tune it (its parameters, ordering, implementation or hardware use) while the method stays the same.
 3. Reply with the JSON object only.
 

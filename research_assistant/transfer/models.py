@@ -97,7 +97,7 @@ class Identifiability:
     measurements: str = ""
     unknowns: str = ""
     symmetries: list[str] = field(default_factory=list)
-    verdict: str = "unclear"  # "determined", "underdetermined", "unclear"
+    verdict: str = "unclear"  # "determined", "underdetermined", "overdetermined"; "unclear" until written
     argument: str = ""
 
 

@@ -85,13 +85,39 @@ def final_rows(transfer: Transfer) -> list[MappingRow]:
     return rows
 
 
+_VERDICTS = {
+    "determined": "determined",
+    "underdetermined": "underdetermined",
+    "undetermined": "underdetermined",
+    "indeterminate": "underdetermined",
+    "unidentifiable": "underdetermined",
+    "nonidentifiable": "underdetermined",
+    "notidentifiable": "underdetermined",
+    "overdetermined": "overdetermined",
+}
+
+
+def normalise_verdict(text) -> str | None:
+    """One of determined, underdetermined, overdetermined, or None for anything else.
+
+    Models write "under-determined", "Undetermined" or "indeterminate" for the same verdict.
+    """
+    if isinstance(text, dict):
+        text = text.get("verdict", "")
+    return _VERDICTS.get(re.sub(r"[^a-z]", "", str(text or "").lower()))
+
+
 def final_identifiability(transfer: Transfer) -> str:
-    """Return the critic's identifiability override if given, else writer's verdict."""
-    if transfer.critique and transfer.critique.identifiability:
-        val = str(transfer.critique.identifiability).strip()
-        if val:
-            return val
-    return transfer.identifiability.verdict.strip()
+    """The critic's override if it is a verdict, else the writer's verdict, normalised.
+
+    An override that is not a verdict (a sentence, "wrong", "overridden") is ignored.
+    """
+    if transfer.critique:
+        override = normalise_verdict(transfer.critique.identifiability)
+        if override:
+            return override
+    writer = transfer.identifiability.verdict
+    return normalise_verdict(writer) or str(writer or "").strip()
 
 
 def set_aside_reason(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> str | None:
@@ -121,7 +147,7 @@ def set_aside_reason(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> 
 
     # 6. not_identifiable: the final identifiability verdict is underdetermined,
     #    for a bottleneck that infers unknowns from measurements
-    if bottleneck.inference and final_identifiability(transfer).strip().lower() == "underdetermined":
+    if bottleneck.inference and final_identifiability(transfer) == "underdetermined":
         return "not_identifiable"
 
     # 7. off_target: metric names none of the bottleneck's quantities

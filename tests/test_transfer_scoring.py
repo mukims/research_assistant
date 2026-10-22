@@ -57,6 +57,22 @@ class TestScoring(unittest.TestCase):
         self.assertIsNone(s.set_aside)
         self.assertTrue(s.checks["identifiability_argued"])
 
+    def test_identifiability_verdicts_are_normalised_to_three_words(self):
+        for said, verdict in (("under-determined", "underdetermined"), ("Undetermined", "underdetermined"),
+                              ("indeterminate", "underdetermined"), ("unidentifiable", "underdetermined"),
+                              ("Over-determined", "overdetermined"), ("determined", "determined"),
+                              ("partially determined", None), ("wrong", None), ("", None)):
+            self.assertEqual(scoring.normalise_verdict(said), verdict, said)
+
+    def test_a_critic_override_that_is_not_a_verdict_is_ignored(self):
+        t, b, c = good_transfer()
+        t.identifiability.verdict = "under-determined"
+        t.critique.identifiability = "The verdict is wrong because distinct disorder gives the same conductance."
+        self.assertEqual(scoring.final_identifiability(t), "underdetermined")
+        self.assertEqual(scoring.score_transfer(t, b, c).set_aside, "not_identifiable")
+        t.critique.identifiability = {"verdict": "Determined"}
+        self.assertEqual(scoring.final_identifiability(t), "determined")
+
     def test_off_target_ignores_hyphens_and_plurals(self):
         for quantity, metric in (("wave function", "KL divergence of the wave-function"),
                                  ("correlation length", "error in correlation lengths"),
