@@ -622,6 +622,27 @@ class TestReportShowsTheJudgesAccount(unittest.TestCase):
         self.assertIn("**Verified span:** “Ballistic transport observed in graphene.”", report)
         self.assertNotIn("The growth passage says nothing about transport.", report)
 
+    def test_citation_evidence_is_saved_alongside_mapping(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w") as f:
+                f.write("Graphene shows ballistic transport.")
+            out_path = os.path.join(tmpdir, "cited.txt")
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", True), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(h) for h in self.SAME_PAPER_HITS]), \
+                 patch("research_assistant.agents.agent5_batch_citer.chat", return_value=_reply("1. YES")), \
+                 patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=list(self.SAME_PAPER_VERDICTS)):
+                run_batch_citer(draft_path, out_path)
+            ev_path = out_path.replace(".txt", "_citation_evidence.json")
+            self.assertTrue(os.path.exists(ev_path))
+            with open(ev_path) as f:
+                ev_data = json.load(f)
+            self.assertIn("cite_1", ev_data)
+            self.assertEqual(ev_data["cite_1"]["document"], "doe.pdf")
+            self.assertIn("Ballistic transport observed", ev_data["cite_1"]["evidence"])
+
+
     def test_the_accepted_verdict_is_flagged_on_its_record(self):
         with patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[dict(h) for h in self.SAME_PAPER_HITS]), \
              patch("research_assistant.agents.agent5_batch_citer.judge", side_effect=list(self.SAME_PAPER_VERDICTS)):

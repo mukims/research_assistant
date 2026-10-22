@@ -788,3 +788,69 @@ class TestEscalation(VerifyDraftTestCase):
             report, calls, hs = self._run_with([first])
         self.assertEqual(len(calls), 1)
         self.assertEqual(hs.call_args.kwargs["top_k"], 1)
+
+
+class TestReplayedEvidence(VerifyDraftTestCase):
+    def test_replayed_evidence_is_used_directly_without_search(self):
+        draft_path = self._write("Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"})
+        evidence_path = draft_path.replace(".txt", "_citation_evidence.json")
+        with open(evidence_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "cite_1": {
+                    "key": "cite_1",
+                    "citation_source": "Smith 2020",
+                    "document": "smith2020.pdf",
+                    "chunk_index": 5,
+                    "evidence": "Ground truth evidence passage.",
+                }
+            }, fh)
+
+        import research_assistant.agents.agent8_verifier as a8
+        with patch.object(a8, "hybrid_search") as hs, \
+             patch.object(a8, "judge", return_value=_verdict("Supports")) as j:
+            report = verify_draft(draft_path, search_resources=(FakeCollection([]), None, [], []))
+
+        # hybrid_search should NOT have been called because evidence was replayed!
+        hs.assert_not_called()
+        j.assert_called_once()
+        entry = report["results"][0]
+        self.assertEqual(entry["outcome"], "judged")
+        self.assertEqual(entry["judgement"], "Supports")
+        self.assertEqual(entry["evidence"], "Ground truth evidence passage.")
+        self.assertEqual(entry["evidence_source"], "replayed")
+        self.assertEqual(entry["document"], "smith2020.pdf")
+
+        # Verify markdown mentions replayed evidence
+        md = self._markdown(draft_path)
+        self.assertIn("Ground truth accepted during citation", md)
+
+
+class TestParallelVerification(VerifyDraftTestCase):
+    def test_concurrent_execution_preserves_deterministic_order(self):
+        draft_path = self._write(
+            "Claim one \\cite{cite_1}. Claim two \\cite{cite_2}. Claim three \\cite{cite_3}.",
+            {"A 2020": "cite_1", "B 2021": "cite_2", "C 2022": "cite_3"},
+        )
+        import research_assistant.agents.agent8_verifier as a8
+        hits = [{"text": "ev", "metadata": {"document": "a.pdf"}, "chunk_index": 0}]
+        with patch.object(a8, "hybrid_search", return_value=hits), \
+             patch.object(a8, "judge", return_value=_verdict("Supports")):
+            res = (FakeCollection([("A 2020", "a.pdf"), ("B 2021", "a.pdf"), ("C 2022", "a.pdf")]), None, [], [])
+            report = verify_draft(draft_path, search_resources=res, concurrency=3)
+
+        self.assertEqual(len(report["results"]), 3)
+        self.assertEqual([r["sentence_index"] for r in report["results"]], [0, 1, 2])
+        self.assertEqual([r["cite_key"] for r in report["results"]], ["cite_1", "cite_2", "cite_3"])
+
+
+class TestStripCitationsTidy(unittest.TestCase):
+    def test_parenthetical_citation_collapses_cleanly(self):
+        self.assertEqual(
+            strip_citations("Graphene conducts well ( \\cite{cite_1} )."),
+            "Graphene conducts well.",
+        )
+        self.assertEqual(
+            strip_citations("Graphene conducts well ( \\cite{cite_1}; \\cite{cite_2} )."),
+            "Graphene conducts well.",
+        )
+

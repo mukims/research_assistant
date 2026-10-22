@@ -19,6 +19,7 @@ source does not contain.
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -47,6 +48,7 @@ from research_assistant.judgement.judge import (
 from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
+from research_assistant.shared.claim_text import tidy_punctuation
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
 from research_assistant.shared.search import expand_neighbours, hybrid_search
@@ -73,8 +75,7 @@ def invert_citation_mapping(mapping: dict) -> dict:
 def strip_citations(sentence: str) -> str:
     """The sentence as prose, with every LaTeX citation removed."""
     text = _CITE_RE.sub("", sentence)
-    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
-    return _MULTI_SPACE_RE.sub(" ", text).strip()
+    return tidy_punctuation(text)
 
 
 def resolve_documents(collection, citation_source: str, cache: dict) -> set:
@@ -227,8 +228,13 @@ def needs_escalation(verdict: dict) -> bool:
 
 
 def verify_draft(draft_path, citations_path=None, top_k=None,
-                 search_resources=None) -> dict:
+                 search_resources=None, concurrency=None) -> dict:
     """Judge every citation in *draft_path* against its cited source.
+
+    When ``_citation_evidence.json`` was written by Agent 5 alongside the draft,
+    this replays the exact candidate chunk and evidence that justified the
+    citation, eliminating the retrieval gap. Otherwise it falls back to
+    resolving the cited paper and re-retrieving.
 
     Writes ``<draft>_verification.json`` and ``<draft>_verification.md``
     alongside the draft, matching agent 5's output naming.
@@ -250,6 +256,20 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
     with open(citations_path, encoding="utf-8") as fh:
         mapping = json.load(fh)
 
+    # Check for replayed evidence persisted by Agent 5
+    evidence_path = citations_path.replace("_citations.json", "_citation_evidence.json")
+    if not os.path.exists(evidence_path):
+        evidence_path = draft_path.replace(".txt", "_citation_evidence.json")
+
+    evidence_registry = {}
+    if os.path.exists(evidence_path):
+        try:
+            with open(evidence_path, encoding="utf-8") as efh:
+                evidence_registry = json.load(efh)
+            logger.info("Loaded replayed evidence for %d citation key(s) from %s", len(evidence_registry), evidence_path)
+        except Exception as exc:
+            logger.warning("Could not load evidence from %s: %s", evidence_path, exc)
+
     if search_resources is None:
         from research_assistant.shared.db import load_search_resources
         search_resources = load_search_resources()
@@ -269,23 +289,56 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         _warn_if_context_is_tight()
 
     doc_cache = {}
-    results = []
+    # Pre-resolve unique cited sources if collection exists so doc_cache is read-only
+    if collection is not None:
+        for p in pairs:
+            src = p.get("citation_source")
+            if src and src not in doc_cache:
+                resolve_documents(collection, src, doc_cache)
 
-    for i, pair in enumerate(pairs, 1):
+    def _verify_pair(i: int, pair: dict) -> dict:
         entry = dict(pair)
         logger.info("[%d/%d] %s", i, len(pairs), entry["claim"][:80])
 
         if entry["outcome"] == "orphaned":
             logger.info(" -> key %s is not in the mapping.", entry["cite_key"])
-            results.append(entry)
-            continue
+            return entry
 
+        # 1. Replayed evidence path (ground truth from citation acceptance)
+        replayed = evidence_registry.get(entry["cite_key"])
+        if replayed and replayed.get("evidence"):
+            entry["evidence"] = replayed["evidence"]
+            entry["evidence_source"] = "replayed"
+            entry["evidence_hits"] = 1
+            if replayed.get("document"):
+                entry["document"] = replayed["document"]
+            entry["escalated"] = False
+            try:
+                verdict = _judge_once(entry["claim"], entry["evidence"], context=entry.get("context"))
+            except JudgementParseError as exc:
+                entry["outcome"] = "parse_failed"
+                entry["raw"] = exc.raw
+                logger.warning(" -> unusable reply on replayed evidence after %d attempts.", _JUDGE_ATTEMPTS)
+                return entry
+            except Exception as exc:
+                entry["outcome"] = "call_failed"
+                entry["error_type"] = type(exc).__name__
+                entry["raw"] = str(exc)
+                logger.warning(" -> judging call failed on replayed evidence: %s: %s", type(exc).__name__, exc)
+                return entry
+
+            entry["outcome"] = "judged"
+            entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
+            entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
+            logger.info(" -> %s (%s confidence) [replayed evidence]", verdict["judgement"], verdict["confidence"])
+            return entry
+
+        # 2. Fallback search path (external draft, unpersisted evidence, or tests)
         documents = resolve_documents(collection, entry["citation_source"], doc_cache)
         if not documents:
             entry["outcome"] = "unresolved"
             logger.info(" -> source resolves to no documents in the corpus.")
-            results.append(entry)
-            continue
+            return entry
 
         # Retrieval is guarded like everything else in this loop: nothing is
         # persisted until the report is written, so an exception at citation 50
@@ -305,14 +358,12 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             entry["error_type"] = type(exc).__name__
             entry["raw"] = str(exc)
             logger.warning(" -> retrieval failed: %s: %s", type(exc).__name__, exc)
-            results.append(entry)
-            continue
+            return entry
 
         if not hits:
             entry["outcome"] = "no_evidence"
             logger.info(" -> nothing retrieved from that source for this claim.")
-            results.append(entry)
-            continue
+            return entry
 
         expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
         entry["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
@@ -335,8 +386,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             entry["outcome"] = "parse_failed"
             entry["raw"] = exc.raw
             logger.warning(" -> unusable reply after %d attempts.", _JUDGE_ATTEMPTS)
-            results.append(entry)
-            continue
+            return entry
         except Exception as exc:
             # Connection errors, timeouts and HTTP 4xx/5xx are not "unusable
             # model reply" — filing them as parse_failed sends the reader to
@@ -345,8 +395,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             entry["error_type"] = type(exc).__name__
             entry["raw"] = str(exc)
             logger.warning(" -> judging call failed: %s: %s", type(exc).__name__, exc)
-            results.append(entry)
-            continue
+            return entry
 
         entry["outcome"] = "judged"
         # Only the rubric's own fields are merged. _validate permits extra
@@ -359,7 +408,24 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         # Derived by enforce_rubric(); absent from older stubs and records.
         entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
         logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
-        results.append(entry)
+        return entry
+
+    default_concurrency = int(os.environ.get("CITATION_VERIFY_CONCURRENCY", "1"))
+    workers = concurrency if concurrency is not None else default_concurrency
+    workers = max(1, min(workers, len(pairs))) if pairs else 1
+
+    if workers <= 1:
+        results = [_verify_pair(i, pair) for i, pair in enumerate(pairs, 1)]
+    else:
+        results = [None] * len(pairs)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(_verify_pair, i, pair): i - 1
+                for i, pair in enumerate(pairs, 1)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                results[idx] = future.result()
 
     for entry in results:
         source_eval = assess_source({"venue": entry.get("citation_source")})
@@ -507,10 +573,11 @@ def _write_markdown(path, report) -> None:
     if clean:
         lines.append("## Verified\n")
         for entry in clean:
+            tag = " [📌 Ground truth accepted during citation]" if entry.get("evidence_source") == "replayed" else ""
             lines.append(
                 f"- Sentence {entry['sentence_index'] + 1} — `{entry['cite_key']}` "
                 f"({entry['confidence']} confidence, evidence "
-                f"{entry['evidence_sufficiency']}): {entry['sentence']}"
+                f"{entry['evidence_sufficiency']}){tag}: {entry['sentence']}"
             )
         lines.append("")
 
@@ -549,6 +616,8 @@ def _entry_block(entry) -> list:
     if entry.get("source_assessment", {}).get("badge"):
         src = entry["source_assessment"]
         block.append(f"🏛️ **Source Quality:** `{src['badge']}` ({src.get('grade_label', '')}) · *{src.get('rationale', '')}*\n")
+    if entry.get("evidence_source") == "replayed":
+        block.append("📌 **Evidence source:** Ground truth accepted during citation.\n")
     if entry.get("escalated"):
         block.append(f"↻ **Escalated:** first verdict {entry['first_judgement']} "
                      f"(sufficiency {entry['first_sufficiency']}) on the top hit; "
@@ -596,9 +665,11 @@ def main():
                         help="Path to _citations.json. Defaults to the draft's sibling.")
     parser.add_argument("--top-k", type=int, default=None,
                         help=f"Chunks judged per source (default {JUDGEMENT_TOP_K}).")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="Parallel worker count (default 1, or CITATION_VERIFY_CONCURRENCY).")
     args = parser.parse_args()
 
-    report = verify_draft(args.draft, args.citations, args.top_k)
+    report = verify_draft(args.draft, args.citations, args.top_k, concurrency=args.concurrency)
     totals = report["totals"]
     flagged = sum(
         totals.get(j, 0)

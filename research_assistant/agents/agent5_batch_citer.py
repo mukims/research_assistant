@@ -316,8 +316,9 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
     verdicts, partial = [], None
     for hit, cand in zip(hits, candidates):
         evidence = assemble_evidence([hit], JUDGEMENT_EVIDENCE_MAX_CHARS)
-        record = {"key": cand["key"], "document": cand.get("document"),
-                  "chunk_index": hit.get("chunk_index"), "evidence": evidence}
+        record = {"key": cand["key"], "citation_source": cand.get("citation"),
+                  "document": cand.get("document"), "chunk_index": hit.get("chunk_index"),
+                  "evidence": evidence}
         try:
             v = _judge_once(sentence, evidence, context=ctx)
         except Exception as exc:  # noqa: BLE001 — one candidate's failure is not the sentence's
@@ -547,6 +548,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     cited_sentences = []
     key_registry = {}      # every source offered to the model: citation → cite_N
     citation_entries = []  # For the report
+    citation_evidence = {} # key -> {key, citation_source, document, chunk_index, evidence}
 
     for i, sentence in enumerate(sentences):
         logger.info("[%d/%d] %s", i + 1, len(sentences), sentence[:80])
@@ -581,6 +583,29 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             entry["cited_text"] = res.cited_text
             entry["reasoning"] = res.reasoning
             entry["sources"] = res.candidates
+            if res.verdicts:
+                for v in res.verdicts:
+                    if v.get("accepted"):
+                        k = v.get("key")
+                        if k:
+                            citation_evidence[k] = {
+                                "key": k,
+                                "citation_source": v.get("citation_source") or next((src for src, key in key_registry.items() if key == k), ""),
+                                "document": v.get("document"),
+                                "chunk_index": v.get("chunk_index"),
+                                "evidence": v.get("evidence"),
+                            }
+            elif res.candidates:
+                for cand in res.candidates:
+                    k = cand.get("key")
+                    if k in res.keys and k not in citation_evidence:
+                        citation_evidence[k] = {
+                            "key": k,
+                            "citation_source": cand.get("citation") or next((src for src, key in key_registry.items() if key == k), ""),
+                            "document": cand.get("document"),
+                            "chunk_index": cand.get("chunk_index"),
+                            "evidence": None,
+                        }
         else:
             if res.candidates:
                 logger.info(" -> Declined: %s", res.skip_reason)
@@ -631,6 +656,12 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     with open(mapping_file, "w") as f:
         json.dump(citation_mapping, f, indent=4)
     logger.info("Saved citation mapping to %s", mapping_file)
+
+    used_evidence = {k: v for k, v in citation_evidence.items() if k in used_keys}
+    evidence_file = out_path.replace(".txt", "_citation_evidence.json")
+    with open(evidence_file, "w") as f:
+        json.dump(used_evidence, f, indent=4)
+    logger.info("Saved citation evidence to %s", evidence_file)
 
     # ── Generate citation reasoning report ───────────────────────────────
     report_path = out_path.replace(".txt", "_report.md")
