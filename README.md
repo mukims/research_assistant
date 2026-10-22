@@ -38,6 +38,10 @@ evaluation, audit — each assigned to a specialised coding-agent role. He
 considers this beneath him, and does it anyway. See the **Agent task planner**
 tab below.
 
+And a newer one, which he trusts least of all: give him a problem and he goes
+looking in other fields for a technique that already solved something of the
+same shape. See [Borrowing from other fields](#borrowing-from-other-fields).
+
 ## A note on where he lives
 
 Marvin lives on your machine and nowhere else. `deploy/local.sh up` starts him on
@@ -136,6 +140,73 @@ Every agent, every file he writes and every knob is in
 [PIPELINE.md](PIPELINE.md). The reasoning behind each design choice is in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Borrowing from other fields
+
+Good ideas often arrive from somewhere else. A restricted Boltzmann machine, built
+for machine learning, became a compact wavefunction for many-body physics. A
+Chebyshev expansion became a way to get a density of states without diagonalising
+anything. Marvin's newest job is to find the next one: give him a problem, and he
+looks through the corpus for a technique another field uses on a problem with the
+same shape. Then he proposes the transfer, argues against it, and scores it. It
+runs from the command line, not a tab, in four stages (`research_assistant/transfer/`):
+
+1. **Technique cards.** `scripts/build_cards.py` reads every paper in the corpus
+   once and writes a card for each method in it that someone in another field
+   could carry out. A card holds the method's own name, the problem it solves
+   (worded so that no material, system or field is named), how it works in two
+   to five steps, and one sentence from the paper as evidence, which the judge
+   checks. Surveys, databases and benchmarks get no card, on purpose.
+2. **Bottlenecks.** For your problem he grounds himself in the nearest papers and
+   names what makes it hard. Each bottleneck is restated three ways (specific,
+   mid, broad) with the field's nouns taken out. A problem that infers something
+   from measurements gets a fourth restatement, saying what is inferred from what.
+3. **Transfers.** Each restatement searches the cards, and the best few per
+   bottleneck become proposals:
+   - a role-by-role mapping from the source problem to yours;
+   - an argument about whether your measurements can determine the unknowns;
+   - concrete steps, a baseline, a prediction, and the result that would refute it.
+
+   A critic then tries to reject each proposal, and the writer must answer each
+   objection or concede it.
+4. **Scoring.** The reward is checked in code, not by asking the model how it
+   feels. First come gates that set a proposal aside:
+   - evidence that contradicts it;
+   - a core assumption that breaks and is conceded;
+   - unknowns the measurements cannot determine;
+   - a metric that misses the problem;
+   - prior art that already did it.
+
+   Then a ten-item depth checklist, and a bonus when OpenAlex and arXiv turn up
+   no prior art. Rebutted objections and mere tuning of the current method cost
+   reward.
+
+```bash
+deploy/local.sh chroma                                # the store's server, if the app isn't running
+python scripts/build_cards.py                         # once; resumes where it stopped
+python scripts/transfer.py -q "your problem" --show-cards   # bottlenecks and candidate cards only
+python scripts/transfer.py -q "your problem"                # the full run
+```
+
+- **Where the report goes:** the full run writes a Markdown report and a JSON
+  record to `data/transfer/runs/`.
+- **Options:**
+  - `--exclude` keeps named documents out of the run.
+  - `--before-year` counts only prior art published before that year.
+- **When it won't run:** while the app has a pipeline running, it refuses to start.
+
+**Treat what he proposes as a lead, not a finding.** Each premise is checked
+against its paper. The mapping, the steps and the prediction are his own, and the
+report labels them that way.
+
+Whether he finds the right technique is being measured by retrodiction. He is
+given problems whose answer is known (neural-network quantum states, the kernel
+polynomial method), plus held-out cases kept outside the repository, and checked
+for whether he finds it. `scripts/evaluate_transfer.py --retrieval-only` checks
+that the right card is retrieved; `--score --runs 3` runs the whole thing. The
+design and its evaluation gates are in
+[the technique-transfer design](notimportant/superpowers/specs/2026-10-21-technique-transfer-design.md).
+Results will follow when there are some. He has not been told this is a promise.
+
 ## What he's worst at
 
 Depth. Ask him what's been done on an idea and he'll tell you — grouped by
@@ -210,9 +281,14 @@ streamlit run app.py
   runs, but falls back to regex extraction — no DOIs, no authors, and
   noticeably fewer downloads. Setup and troubleshooting:
   [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
-- **Unpaywall** requires a contact address on every request, and OpenAlex and
-  Crossref use the same one to put you in their faster "polite" pools. There
-  is a placeholder default; set your own: `export UNPAYWALL_EMAIL=you@example.com`.
+- **Unpaywall** requires a contact address on every request, and Crossref uses
+  the same one to put you in its faster "polite" pool. There is a placeholder
+  default; set your own: `export UNPAYWALL_EMAIL=you@example.com`.
+- **OpenAlex** now gives requests without an API key a small daily budget, shared
+  by everyone on your network's address (about a hundred searches). Once it runs
+  out:
+  - paper searches carry on with the other providers;
+  - technique-transfer prior-art checks come back `unchecked` until the budget resets.
 
 Without the UI, one research idea end to end:
 
@@ -251,7 +327,8 @@ the runner refuses to point at the persistent data directory.
 | `research_assistant/judgement/` | the claim–evidence judge, source assessor, reliability policy, and the judge's evaluation set |
 | `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
 | `research_assistant/tasks/` | the Agent task planner (Pipeline 2); reaches into few shared modules |
-| `scripts/` | operator tools: judge and citer evaluation, labelling, index statistics |
+| `research_assistant/transfer/` | borrowing from other fields: technique cards, bottlenecks, transfers, the critic, scoring and reports |
+| `scripts/` | operator tools: judge and citer evaluation, labelling, index statistics, and the technique-transfer commands (`build_cards.py`, `transfer.py`, `evaluate_transfer.py`, `build_case_corpus.py`, `review_cards.py`) |
 | `notebooks/` | `pipeline.ipynb`, a test bench that runs Agents 0–8 on one paper |
 | `deploy/` | `local.sh`, which starts GROBID and the app on this machine only |
 | `tests/` | the test suite |
@@ -282,8 +359,10 @@ CITATION_LOG_FILE=0 python -m pytest tests/ -v
 
 The suite covers the pure logic — reference parsing, source naming, extractor
 filing, ingestion bookkeeping, retrieval ranking, the claim–evidence rubric,
-task-graph construction and execution — and needs none of the heavy stack: no ChromaDB, no PyTorch, no model backend,
-no GROBID. CI runs it on Python 3.10 and 3.12 and import-sweeps every module
+task-graph construction and execution, and technique transfer (against a small
+fake world of papers and cards). It needs none of the heavy stack: no ChromaDB,
+no PyTorch, no model backend, no GROBID. Each run gets its own throwaway data
+directory, so a test can never open the real corpus. CI runs it on Python 3.10 and 3.12 and import-sweeps every module
 in the package to catch a broken import no test happens to cover.
 
 ## License
