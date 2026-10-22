@@ -94,12 +94,14 @@ def ground(
             continue
         seen_chunks.add(c_idx)
         key = f"C{p_num}"
+        # hybrid_search keeps the paper and its citation in the chunk metadata.
         meta = h.get("metadata") or {}
+        doc = meta.get("document", "")
         passages[key] = Passage(
             key=key,
             chunk_index=c_idx,
-            document=h["document"],
-            citation=meta.get("citation", f"Citation {h['document']}"),
+            document=doc,
+            citation=meta.get("citation_source") or doc,
             section=meta.get("section", "methods"),
             text=h.get("text", ""),
             role="near",

@@ -380,9 +380,8 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             c_idx = doc_to_chunk[doc]
             hits.append({
                 "chunk_index": c_idx,
-                "document": doc,
                 "text": f"text of {doc}",
-                "metadata": {"document": doc, "section": "methods", "citation": f"Citation {doc}"},
+                "metadata": {"document": doc, "section": "methods", "citation_source": f"Citation {doc}"},
                 "score": 1.0,
             })
         return hits[:top_k]
