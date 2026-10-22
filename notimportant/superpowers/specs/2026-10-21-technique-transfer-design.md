@@ -337,3 +337,29 @@ Commit 8f76d86; the result is `data/eval/transfer/results/20261022-120405.json`.
 | positive control | fail ×3 | The expected ML-inversion cards were never seeded. Most transfers were set aside as `not_identifiable`. |
 
 Fix 4 removed the dropped-bottleneck warnings: no run lost a bottleneck.
+
+### F3 after design B and the KPM card rebuild (2026-10-22)
+
+Commit 358aa83 (the critic's `kind`, `TRANSFER_TUNE_PENALTY` 0.5), with the KPM
+case cards rebuilt under the naming rule. The result is
+`data/eval/transfer/results/20261022-132215.json`.
+**F3 FAIL: 1 of 4 (spread 0.00).** Prior art was `unchecked` throughout: the
+OpenAlex budget had run out.
+
+- **`kind` does not discriminate.** The critic said `replace` for 67 of 70
+  transfers, `augment` for 2 and nothing usable for 1, so the tune penalty
+  never fired. The FFTW paper produced no card in the rebuild, so the case it
+  was aimed at did not come up.
+- **kpm: pass, fail, pass, at rank 1 every run.** The rebuilt trace-estimator
+  card ("Randomized trace estimator…") now matches its terms. Run 2 failed
+  mapping at 25%: it is a correct trace-estimator transfer (stochastic probe
+  vectors for density-of-states and conductance traces), but the mapping terms
+  describe the KPM paper (Chebyshev, moments).
+- **nqs: fail ×3.** The RBM transfer is set aside as `off_target` every run.
+  The gate is a literal substring match: in run 2 the quantity is
+  "wave function" and the metric says "wave-function".
+- **negative control: pass, pass, not tested** (passes).
+- **positive control: fail ×3** (no expected card seeded).
+
+Next calibration candidates: normalise hyphens and plurals in the `off_target`
+match; give mapping terms per expected source; reconsider `kind`.
