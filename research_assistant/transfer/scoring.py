@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from research_assistant.config import TRANSFER_PRIOR_ART_BONUS
+from research_assistant.config import TRANSFER_CONTESTED_PENALTY, TRANSFER_PRIOR_ART_BONUS
 from research_assistant.transfer.models import (
     Bottleneck,
     Card,
@@ -38,7 +38,11 @@ def content_words(text: str) -> set[str]:
 
 
 def final_rows(transfer: Transfer) -> list[MappingRow]:
-    """Apply the critic's row statuses over the writer's."""
+    """Apply the critic's row statuses over the writer's.
+
+    A row the critic breaks becomes "contested" when the reviser answered the
+    objection on that row without conceding it.
+    """
     rows = [
         MappingRow(
             source_role=r.source_role,
@@ -51,12 +55,19 @@ def final_rows(transfer: Transfer) -> list[MappingRow]:
         for r in transfer.mapping
     ]
     if transfer.critique and transfer.critique.rows:
+        rebutted = {
+            o.get("row")
+            for o in transfer.critique.objections
+            if isinstance(o, dict) and o.get("answered") and not o.get("conceded")
+        }
         for cr in transfer.critique.rows:
             if not isinstance(cr, dict):
                 continue
             idx = cr.get("row")
             new_status = cr.get("status")
             if isinstance(idx, int) and 0 <= idx < len(rows) and new_status:
+                if new_status.strip().lower() == "breaks" and idx in rebutted:
+                    new_status = "contested"
                 rows[idx].status = new_status
     return rows
 
@@ -190,8 +201,12 @@ def score_transfer(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> Sc
     passed_count = sum(1.0 for ok in checks.values() if ok)
     depth = passed_count / len(DEPTH_CHECKS)
     set_aside = set_aside_reason(transfer, bottleneck, card)
-    rew = 0.0 if set_aside is not None else reward(depth, transfer.prior_art.status)
-    scores = Scores(depth=depth, checks=checks, reward=rew, set_aside=set_aside)
+    contested = sum(1 for r in final_rows(transfer) if r.core and r.status == "contested")
+    if set_aside is not None:
+        rew = 0.0
+    else:
+        rew = reward(depth, transfer.prior_art.status) * max(0.0, 1.0 - TRANSFER_CONTESTED_PENALTY * contested)
+    scores = Scores(depth=depth, checks=checks, reward=rew, set_aside=set_aside, contested=contested)
     transfer.scores = scores
     return scores
 

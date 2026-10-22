@@ -128,6 +128,7 @@ class Scores:
     checks: dict[str, bool]
     reward: float
     set_aside: str | None = None
+    contested: int = 0  # core rows whose break the reviser rebutted
 
 
 @dataclass

@@ -317,6 +317,8 @@ TRANSFER_OLLAMA_OPTIONS           = {"num_ctx": _env_int("CITATION_TRANSFER_NUM_
 TRANSFER_PRIOR_ART_DONE            = float(os.environ.get("CITATION_TRANSFER_PRIOR_ART_DONE", "0.85"))
 TRANSFER_PRIOR_ART_PARTIAL         = float(os.environ.get("CITATION_TRANSFER_PRIOR_ART_PARTIAL", "0.75"))
 TRANSFER_PRIOR_ART_BONUS           = float(os.environ.get("CITATION_TRANSFER_PRIOR_ART_BONUS", "0.25"))
+# Reward lost per core row the critic says breaks and the reviser rebuts without conceding.
+TRANSFER_CONTESTED_PENALTY         = float(os.environ.get("CITATION_TRANSFER_CONTESTED_PENALTY", "0.2"))
 
 
 

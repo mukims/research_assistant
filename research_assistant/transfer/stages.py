@@ -452,6 +452,26 @@ def develop(
             text = obj if isinstance(obj, str) else (obj.get("text", "") if isinstance(obj, dict) else str(obj))
             crit_objections.append({
                 "text": text,
+                "row": None,
+                "answered": False,
+                "response": "",
+                "conceded": False,
+            })
+        # Each row the critic breaks is also an objection, so the reviser must
+        # rebut it or concede it; scoring reads the answer by its row.
+        for cr in crit_dict.get("rows", []):
+            if not isinstance(cr, dict) or str(cr.get("status", "")).strip().lower() != "breaks":
+                continue
+            idx = cr.get("row")
+            if not (isinstance(idx, int) and 0 <= idx < len(mapping_list) and isinstance(mapping_list[idx], dict)):
+                continue
+            row = mapping_list[idx]
+            crit_objections.append({
+                "text": (
+                    f"Mapping row {idx} ({row.get('source_role', '')} -> {row.get('target_role', '')}) "
+                    f"breaks: {cr.get('reason', '')}"
+                ),
+                "row": idx,
                 "answered": False,
                 "response": "",
                 "conceded": False,

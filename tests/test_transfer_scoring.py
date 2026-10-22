@@ -1,5 +1,6 @@
 import unittest
 
+from research_assistant import config
 from research_assistant.transfer import scoring
 from tests.transfer_fixtures import good_transfer, premise
 
@@ -26,6 +27,26 @@ class TestScoring(unittest.TestCase):
             spoil(t, b, c)
             s = scoring.score_transfer(t, b, c)
             self.assertEqual((s.set_aside, s.reward), (reason, 0.0), reason)
+
+    def _break_row_0(self, t, conceded):
+        t.critique.rows.append({"row": 0, "status": "breaks", "reason": "2D has no order"})
+        t.critique.objections.append({
+            "text": "Row 0 breaks: 2D has no order", "row": 0, "answered": True,
+            "response": "The surrogate never assumes long-range order.", "conceded": conceded,
+        })
+
+    def test_a_broken_core_row_the_reviser_answers_is_contested_and_costs_reward(self):
+        t, b, c = good_transfer()
+        self._break_row_0(t, conceded=False)
+        s = scoring.score_transfer(t, b, c)
+        self.assertEqual(scoring.final_rows(t)[0].status, "contested")
+        self.assertEqual((s.set_aside, s.contested), (None, 1))
+        self.assertAlmostEqual(s.reward, 1.25 * (1 - config.TRANSFER_CONTESTED_PENALTY))
+
+    def test_a_broken_core_row_the_reviser_concedes_sets_the_transfer_aside(self):
+        t, b, c = good_transfer()
+        self._break_row_0(t, conceded=True)
+        self.assertEqual(scoring.score_transfer(t, b, c).set_aside, "core_assumption_breaks")
 
     def test_each_depth_item_fails_on_its_own(self):
         spoils = {

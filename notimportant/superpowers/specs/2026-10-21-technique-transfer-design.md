@@ -48,7 +48,7 @@ reuses the repo's shared core rather than rebuilding it:
 | S2 Techniques | each generic form searches the **technique-card index**; near-set and excluded documents are skipped, as are unverified cards; best 3 cards per bottleneck | 0 (embeddings only) |
 | S3 Write | one transfer per (bottleneck, card): mapping table, identifiability, steps, data, baseline, metric, prediction, refuting result, premises | 1 per transfer |
 | S4 Judge | every premise is judged against its own passage with the citer's rule (Supports with a verified span = 1.0, Partially supports with a verified span = 0.5, anything else = 0); results cached per (claim, chunk) | ~2–4 per transfer |
-| S5 Critique | an adversarial critic attacks the mapping rows and identifiability, ideally on a **different model**; then one revision call answers each objection or concedes it | 2 per transfer |
+| S5 Critique | an adversarial critic attacks the mapping rows and identifiability, ideally on a **different model**; then one revision call answers each objection or concedes it. Every row the critic marks `breaks` is also put to the reviser as an objection on that row | 2 per transfer |
 | S6 Prior art | OpenAlex and arXiv titles and abstracts for technique + target quantity, optionally only before a cutoff year | 0 (HTTP and embeddings) |
 | S7 Reward | gates, then the depth checklist, then the prior-art bonus (§4); rank | 0 |
 
@@ -91,7 +91,7 @@ gets one card-building call:
 | `ungrounded_bottleneck` | the bottleneck has no accepted or partial premise |
 | `unverified_technique` | the card's evidence premise did not pass |
 | `shape_mismatch` | the critic says the problem shapes do not match (`shape_match == "no"`) |
-| `core_assumption_breaks` | a core mapping row's final status (the critic overrides the writer) is `breaks` |
+| `core_assumption_breaks` | a core mapping row's final status (the critic overrides the writer) is `breaks`: the critic broke it and the reviser conceded or did not answer. A break the reviser rebutted is `contested`, which costs reward instead (see Reward) |
 | `not_identifiable` | the final identifiability verdict is `underdetermined` |
 | `off_target` | the metric names none of the bottleneck's quantities |
 | `done_before` | prior art found the same combination. The transfer is listed under "Already done", with references |
@@ -110,8 +110,9 @@ gets one card-building call:
 10. The critic raised at least one objection, and each one is answered or conceded in at least 5 words.
 
 **Reward.** `reward = depth × (1 + TRANSFER_PRIOR_ART_BONUS)` when prior art is
-`not_found`, otherwise `reward = depth`. The bonus defaults to 0.25. A transfer that
-is set aside scores 0.
+`not_found`, otherwise `reward = depth`. The bonus defaults to 0.25. Each contested
+core row then multiplies the reward by `1 − TRANSFER_CONTESTED_PENALTY × contested`
+(floored at 0; the penalty defaults to 0.2). A transfer that is set aside scores 0.
 
 Prior-art status:
 
@@ -229,3 +230,19 @@ Claude on the maintainer's behalf; the maintainer rated card 27 in run 1.
 - **Run 1's vague cards** came from papers with no transferable method: a database, two surveys, device handling and genome annotation. The judge passed all 40 evidence premises, because each quotes its own passage. That confirms the judge checks the quote, not the card.
 - **Run 2 cut precision problems, but recall too.** Of run 1's 22 specific cards, 11 survive. The lost ones include real techniques: masked pretraining and value binning (scBERT), GW corrections, serpentine strain gauges, LSH triplet mining, title-as-auxiliary-signal (TLDR), likelihood parameterisation and ancestral sampling (DeepAR), and impurity-pair reclassification. The likely cause is the prompt's "most papers have 0 to 2". If F2 misses an expected card, loosen that line first; keep the mechanism requirement.
 - **The corpus was repaired between the runs.** 4 of the 20 papers held a different PDF from their reference (13.7% across the corpus); they were relabelled to their real titles. Run 2's cards cite the right papers, e.g. RA-BLIP rather than "BLIP-2".
+
+### Task 12 smoke runs — the core-assumption gate (2026-10-22)
+
+Query: "Accelerating the forward problem in quantum transport for disordered
+nanostructures", over the full card build (1,490 papers, 1,193 cards), with
+`gemini-3.5-flash-lite` as generator, critic and judge.
+
+| run | rule | transfers | set aside | top reward |
+|---|---|---|---|---|
+| 1 | critic's `breaks` is final | 6 | 6, all `core_assumption_breaks` | 0 |
+| 2 | broken rows put to the reviser; "concede an objection that is right" | 9 | 8 (reviser conceded 19 of 23 plain objections) | 0.80 |
+| 3 | as 2; "concede only when no change to the transfer can save it" | 6 | 4: one each of `core_assumption_breaks` and `off_target`, two `not_identifiable` | 0.72 |
+
+- **Run 1:** a critic told to reject if it can broke a core row in every transfer, so the gate rejected everything. A rebutted break is now `contested` and costs `TRANSFER_CONTESTED_PENALTY` (0.2) per core row.
+- **Run 2:** the same model, asked to concede what is right, conceded and then repaired the transfer. The gate read each concession as fatal. The reviser's rule now says what a concession does.
+- **Run 3** is the first in which the gates discriminate. Calibrate the penalty and the concession rule at F3, ideally with a critic on a different model (`CITATION_TRANSFER_CRITIC_MODEL`).

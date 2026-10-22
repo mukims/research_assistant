@@ -237,7 +237,7 @@ Objections from critic:
 {objections}
 
 Rules:
-1. Each response addresses one objection by its 0-based index. State your response or concede the objection.
+1. Each response addresses one objection by its 0-based index. Rebut it by saying why the assumption holds in the target problem, or what change to the transfer enforces it; restating the claim is not a rebuttal. Concede only when the transfer cannot work on this point whatever is changed: a conceded objection on a core row rejects the transfer.
 2. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:

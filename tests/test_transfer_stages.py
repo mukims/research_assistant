@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from research_assistant.transfer import stages
@@ -95,6 +96,24 @@ class TestDevelop(unittest.TestCase):
         deps, log, g, seeds, s, ch = self._go(replies={("transfer", 1): ["nope", "still nope"]})
         self.assertIsNone(stages.develop(seeds[0], 1, g, deps, s, ch))
         self.assertTrue(any(w.startswith("B1.T1:") for w in g.warnings))
+
+    def test_a_row_the_critic_breaks_goes_to_the_reviser_as_an_objection_on_that_row(self):
+        revise = json.dumps({"responses": [
+            {"objection": 0, "response": "Addressed objection with concrete argument.", "concede": False},
+            {"objection": 1, "response": "The surrogate never assumes long-range order.", "concede": False},
+        ]})
+        deps, log, g, seeds, s, ch = self._go(replies={("revise", 1): revise})
+        deps.critic = lambda m: json.dumps({
+            "shape_match": "yes",
+            "rows": [{"row": 0, "status": "breaks", "reason": "2D has no order"}],
+            "objections": ["Sample critic objection"],
+        })
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)
+        row_objection = t.critique.objections[1]
+        self.assertEqual(row_objection["row"], 0)
+        self.assertIn("2D has no order", row_objection["text"])
+        self.assertEqual((row_objection["answered"], row_objection["conceded"]), (True, False))
+        self.assertIsNone(t.critique.objections[0]["row"])
 
     def test_a_failing_critic_leaves_an_empty_critique_not_a_crash(self):
         deps, log, g, seeds, s, ch = self._go()
