@@ -320,3 +320,17 @@ much.
 | kpm | pass (rank 1) | rank 5 > 3 | The FFTW auto-tuning card (1.00) outranks KPM (0.70) and the trace estimator (0.90): fix 7. |
 | negative control | no bottlenecks | no ML transfer proposed | Fix 4 (missing generic level) and fix 6 ("not tested"). |
 | positive control | expected card proposed, set aside `not_identifiable` | not proposed | The analytic-continuation ANN card reached a transfer for the first time; the critic judged the inversion underdetermined. A corpus copy of the user's p8 is filed under a DOI string with no title, so `copies_of` missed it. |
+
+### F3 with three runs, after fixes 4 and 6 and the NQS synonym groups (2026-10-22)
+
+Commit 8f76d86; the result is `data/eval/transfer/results/20261022-120405.json`.
+**F3 FAIL: 1 of 4 (spread 0.25).**
+
+| case | runs | what happened |
+|---|---|---|
+| negative control | not tested, pass, pass | **Passes** on its two tested runs. Fix 6 turned one empty run into "not tested" instead of a failure. |
+| kpm | pass, fail, fail | Run 2: FFTW auto-tuning (1.00) puts KPM at rank 4 (fix 7). Runs 2–3: **the same keyword problem NQS had.** Run 3's mapping is KPM itself ("expansion of spectral densities using Chebyshev polynomials"; "stochastic evaluation of traces using random start vectors") but scores 25%: "spectral" is not "spectrum", "random start vectors" is not "random vector", and "rescal" never appears. |
+| nqs | fail ×3 | Runs 1–2 never seeded an RBM card; run 3 seeded two and both were set aside (`off_target`, `core_assumption_breaks`). The engine's generic forms vary from run to run, and the rebuilt cards' wording moved too. |
+| positive control | fail ×3 | The expected ML-inversion cards were never seeded. Most transfers were set aside as `not_identifiable`. |
+
+Fix 4 removed the dropped-bottleneck warnings: no run lost a bottleneck.
