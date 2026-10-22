@@ -24,6 +24,23 @@ class TestBuildCaseCorpus(unittest.TestCase):
         )
         self.assertEqual([g["match_title"] is not None for g in got], [True, False])
 
+    def test_among_equal_titles_an_arxiv_pdf_then_the_earliest_year_wins(self):
+        hits = [
+            {"title": "Auto-Encoding Variational Bayes", "year": 2024, "pdf_url": "https://junk.example/33.pdf"},
+            {"title": "Auto-Encoding Variational Bayes", "year": 2013, "pdf_url": "https://uni.example/page.html"},
+            {"title": "Auto-Encoding Variational Bayes", "year": 2014, "pdf_url": "https://arxiv.org/pdf/1312.6114"},
+            {"title": "Auto-Encoding Variational Bayes", "year": 2012, "pdf_url": None},
+        ]
+        got = bcc.resolve_titles(["Auto-encoding variational Bayes"], search=lambda q, limit: hits)
+        self.assertEqual(got[0]["pdf_url"], "https://arxiv.org/pdf/1312.6114")
+
+    def test_the_default_search_asks_arxiv_and_openalex_even_when_arxiv_answers(self):
+        arxiv = [{"title": "Information Constraints on Auto-Encoding Variational Bayes", "pdf_url": "a"}]
+        openalex = [{"title": "Auto-Encoding Variational Bayes", "pdf_url": "b"}]
+        with patch.object(bcc.agent0_discoverer, "_search_arxiv", return_value=arxiv), \
+                patch.object(bcc.agent0_discoverer, "_search_openalex", return_value=openalex):
+            self.assertEqual(bcc.default_search("Auto-encoding variational Bayes"), arxiv + openalex)
+
     def test_hidden_papers_are_never_resolved(self):
         recorded = []
 

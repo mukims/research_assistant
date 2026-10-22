@@ -43,11 +43,22 @@ def _jaccard(t1: str, t2: str) -> float:
 
 
 def default_search(query: str, limit: int = 5) -> list[dict]:
-    """Default live search: arXiv first, then OpenAlex."""
-    hits = agent0_discoverer._search_arxiv(query, limit)
-    if not hits:
-        hits = agent0_discoverer._search_openalex(query, limit)
-    return hits
+    """Default live search: arXiv and OpenAlex together.
+
+    arXiv's relevance search often returns near-titles only, which would hide
+    the exact match OpenAlex has, so both are always asked.
+    """
+    return agent0_discoverer._search_arxiv(query, limit) + agent0_discoverer._search_openalex(query, limit)
+
+
+def _preference(hit: dict) -> tuple:
+    """Order equally close hits: an arXiv PDF first, then the earliest year."""
+    url = hit.get("pdf_url") or ""
+    try:
+        year = int(hit.get("year"))
+    except (TypeError, ValueError):
+        year = 9999
+    return ("arxiv.org" not in url, year)
 
 
 def resolve_titles(titles: list[str], search: Callable = default_search) -> list[dict]:
@@ -58,11 +69,13 @@ def resolve_titles(titles: list[str], search: Callable = default_search) -> list
         best_hit = None
         best_score = 0.0
         for h in hits:
-            h_title = h.get("title", "")
-            score = _jaccard(title, h_title)
+            score = _jaccard(title, h.get("title") or "")
             if score > best_score:
-                best_score = score
-                best_hit = h
+                best_score, best_hit = score, h
+        # Among hits as close as the best, take one with a PDF, preferring arXiv.
+        with_pdf = [h for h in hits if h.get("pdf_url") and _jaccard(title, h.get("title") or "") == best_score]
+        if with_pdf:
+            best_hit = min(with_pdf, key=_preference)
         if best_hit is not None and best_score >= 0.8 and best_hit.get("pdf_url"):
             results.append({
                 "title": title,
