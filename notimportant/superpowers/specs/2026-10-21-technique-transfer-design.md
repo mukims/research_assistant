@@ -261,3 +261,25 @@ nanostructures", over the full card build (1,490 papers, 1,193 cards), with
 - **The case corpora are too small for F2 to test much.** F2 ranks every card, and NQS has only 10, so a top-5 pass needs only half of them below the expected one. More distractor papers per case would make it a real test.
 - **The two control cases are tuned.** Their hand-written generic forms were reworded after the first F2 run. The new wordings name no method, but they were chosen from a few tries against F2. F3 is the honest check, because there the engine writes its own generic forms.
 - **F2 does not exclude a case's target papers, but a run does.** The engine never takes technique cards from the near papers, so F2 ranks against more competitors than a run faces.
+
+### F3 — full retrodiction runs (2026-10-22)
+
+Run with `--score --runs 2`. The result is
+`data/eval/transfer/results/20261022-105756.json`. **F3 FAIL: 0 of 4.** Each
+case failed for a different reason; none of the reasons is the idea itself.
+
+| case | expected card proposed? | what happened |
+|---|---|---|
+| nqs | yes, in 6 of 9 transfers per run | All were set aside, mostly `not_identifiable`. The critic overrode the writer's "determined" to "underdetermined" on a variational problem that has no measurements to invert. |
+| kpm | no | The relevance gate kept the KPM and trace-estimation papers as **near** papers, so they could not be sources. The FFTW auto-tuning card passed every gate at reward 1.25. |
+| positive control | no | The engine's own generic forms put the expected cards at ranks 16–200, and only 3 seeds per bottleneck are kept. The F2 tuning did not carry over. Copies of the near papers (duplicates in the corpus) came back as sources. |
+| negative control | no ML transfer was proposed | So "every matching transfer set aside" could not be tested. Run 1 had no bottlenecks, because both were dropped for incomplete generic levels. All six of run 2's transfers were set aside. |
+
+**Calibration needed before rerunning F3:**
+1. The identifiability gate should apply only to problems that infer unknowns from measurements.
+2. In case corpora, the near set should come from the case's target papers only.
+3. Every copy of a near paper should be excluded as a source; the corpus holds duplicates.
+4. A bottleneck with missing generic levels should be repaired, not dropped.
+5. The critic should run on a different model; every run warned that it shares the generator's.
+6. The negative case should report "not tested" when no matching transfer is proposed.
+7. The depth checklist checks form, not substance: the FFTW transfer scored the maximum.
