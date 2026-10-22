@@ -363,3 +363,24 @@ OpenAlex budget had run out.
 
 Next calibration candidates: normalise hyphens and plurals in the `off_target`
 match; give mapping terms per expected source; reconsider `kind`.
+
+### F3 after normalising off_target and per-source mapping terms (2026-10-22)
+
+Commit 67aa996; the result is `data/eval/transfer/results/20261022-140520.json`.
+**F3 FAIL: 1 of 4 (spread 2.50).** Prior art was `unchecked` throughout
+(OpenAlex budget).
+
+| case | runs | what happened |
+|---|---|---|
+| kpm | pass, pass, pass | **Passes.** Ranks 2, 1 and 1; mapped 75% each run. |
+| nqs | fail, pass, fail | Run 2 passes at rank 1. Run 3: the Product-of-Experts and Markov-random-field cards survive (0.90, 0.72), but neither card names "boltzmann", "rbm" or "neural network". |
+| negative control | fail, pass, pass | Run 1: a CNN inverting multi-terminal conductance into an impurity map survived. Writer and critic both said "under-determined", and the gate matches only `underdetermined`. |
+| positive control | fail ×3 | No expected card seeded. |
+
+**The identifiability verdict is free text, and the gate matches one exact
+spelling.** Across all F3 runs on 2026-10-22, the gate missed "undetermined"
+(44), "under-determined" (4), "indeterminate" (4) and "unidentifiable" (1).
+The critic's override field also holds sentences arguing non-uniqueness, and
+words like "no", "wrong" or "overridden". Fix: constrain both prompts to
+determined / underdetermined / overdetermined, map synonyms to them in code,
+and ignore an override that is not a verdict.
