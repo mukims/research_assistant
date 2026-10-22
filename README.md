@@ -202,9 +202,7 @@ Whether he finds the right technique is being measured by retrodiction. He is
 given problems whose answer is known (neural-network quantum states, the kernel
 polynomial method), plus held-out cases kept outside the repository, and checked
 for whether he finds it. `scripts/evaluate_transfer.py --retrieval-only` checks
-that the right card is retrieved; `--score --runs 3` runs the whole thing. The
-design and its evaluation gates are in
-[the technique-transfer design](notimportant/superpowers/specs/2026-10-21-technique-transfer-design.md).
+that the right card is retrieved; `--score --runs 3` runs the whole thing.
 Results will follow when there are some. He has not been told this is a promise.
 
 ## What he's worst at
@@ -333,7 +331,6 @@ the runner refuses to point at the persistent data directory.
 | `deploy/` | `local.sh`, which starts GROBID and the app on this machine only |
 | `tests/` | the test suite |
 | `data/` | everything the pipeline writes: indexes, PDFs, logs. Gitignored |
-| `notimportant/superpowers/` | dated design specs and plans, kept for history |
 
 The full tree, down to individual files, is in [PIPELINE.md](PIPELINE.md#layout).
 

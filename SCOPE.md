@@ -64,10 +64,10 @@ says its grades are "not verified against Crossref".
 **Coverage the design calls for but the code lacks.**
 There is no abstract-level fallback when a PDF is paywalled, no second hop
 through references, no expert-review queue, no tiering of judge models, and no
-detection of uncited claims in an uploaded paper. These are the open items in
-[the pitch gap analysis](notimportant/superpowers/specs/2026-09-13-pitch-gap-analysis.md);
-the source assessor, reliability policy, judge evaluation set and paywall
-upload flow it listed as missing have since been built.
+detection of uncited claims in an uploaded paper. These are the open items
+from the pitch gap analysis; the source assessor, reliability policy, judge
+evaluation set and paywall upload flow it listed as missing have since been
+built.
 
 **Discovery quality.**
 Several stored seeds have junk titles taken from PDF metadata ("PAPER • OPEN

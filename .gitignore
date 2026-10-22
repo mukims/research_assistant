@@ -37,3 +37,6 @@ TEST_READY.md
 interview_prep/
 scripts/compile_interview_guide.py
 
+
+# Design specs, plans and notes: kept on the maintainer's machine, not in the repository
+notimportant/

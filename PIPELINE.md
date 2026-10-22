@@ -186,7 +186,6 @@ research_assistant/                the checkout root
 ├── deploy/                         local.sh: run the app on this machine, loopback only (and its README)
 ├── tests/                          pytest suite (collects unittest.TestCase classes unchanged)
 ├── .github/workflows/tests.yml
-├── notimportant/superpowers/       design specs, implementation plans and findings, by date
 └── data/                           all runtime state (gitignored; CITATION_DATA_DIR overrides)
     ├── raw/                        PDFs to process; raw/grobid_output/ caches GROBID's TEI
     │   └── seed_audits/            cached seed audits, history/ of every run, runs/ (job results)
