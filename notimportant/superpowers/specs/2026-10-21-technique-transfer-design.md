@@ -384,3 +384,25 @@ The critic's override field also holds sentences arguing non-uniqueness, and
 words like "no", "wrong" or "overridden". Fix: constrain both prompts to
 determined / underdetermined / overdetermined, map synonyms to them in code,
 and ignore an override that is not a verdict.
+
+### F3 after normalising identifiability verdicts (2026-10-22)
+
+Commit 152a200; the result is `data/eval/transfer/results/20261022-144517.json`.
+**F3 FAIL: 1 of 3 passed, 1 not tested (spread 1.67).** Prior art was
+`unchecked` throughout (OpenAlex budget).
+
+| case | runs | what happened |
+|---|---|---|
+| kpm | pass ×3 | **Passes** (rank 1 every run), as in the previous F3. |
+| nqs | fail, fail, pass | Run 3 passes at rank 2. Run 2: rank 5 (the RBM transfer at 0.60, behind non-expected cards). Run 1: the only RBM transfer is `off_target`. |
+| negative control | not tested ×3 | No ML transfer was proposed, so there was nothing for the gates to catch. |
+| positive control | fail ×3 | No expected card seeded: six F3 runs in a row. |
+
+All verdicts now come back as one of the three words or null. The critic
+judges `underdetermined` often (60 of 76 transfers).
+
+**What blocks F3 now is retrieval, not gating.** The positive control has
+never seeded an expected ML-inversion card. Whether the negative control can
+be tested at all depends on an ML card being seeded. NQS passes or fails on
+which cards each run's generic forms reach. With 3 seeds per bottleneck, the
+cards each run reaches change with the wording of its generic forms.
