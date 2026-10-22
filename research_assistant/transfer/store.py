@@ -18,7 +18,8 @@ def save_result(result: RunResult, directory: str | None = None) -> str:
     json_path = os.path.join(target_dir, f"{result.run_id}.json")
     md_path = os.path.join(target_dir, f"{result.run_id}.md")
     atomic_write_json(json_path, result_to_dict(result))
-    atomic_write(md_path, render_markdown(result))
+    with atomic_write(md_path) as fh:
+        fh.write(render_markdown(result))
     return json_path
 
 

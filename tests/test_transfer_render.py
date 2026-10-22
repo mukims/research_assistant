@@ -28,3 +28,5 @@ class TestRender(unittest.TestCase):
             path = store.save_result(sample_result(), directory=d)
             self.assertEqual(path, os.path.join(d, "20261021-120000-abcdef12.json"))
             self.assertEqual(store.load_result(path), sample_result())
+            with open(path[:-5] + ".md", encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), render.render_markdown(sample_result()))
