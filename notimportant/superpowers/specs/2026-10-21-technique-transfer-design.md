@@ -246,3 +246,18 @@ nanostructures", over the full card build (1,490 papers, 1,193 cards), with
 - **Run 1:** a critic told to reject if it can broke a core row in every transfer, so the gate rejected everything. A rebutted break is now `contested` and costs `TRANSFER_CONTESTED_PENALTY` (0.2) per core row.
 - **Run 2:** the same model, asked to concede what is right, conceded and then repaired the transfer. The gate read each concession as fatal. The reviser's rule now says what a concession does.
 - **Run 3** is the first in which the gates discriminate. Calibrate the penalty and the concession rule at F3, ideally with a critic on a different model (`CITATION_TRANSFER_CRITIC_MODEL`).
+
+### F2 — card retrieval (2026-10-22)
+
+| case | corpus | first expected card |
+|---|---|---|
+| nqs | case: 10 papers, 10 cards | rank 3 |
+| kpm | case: 6 papers, 8 cards | rank 1 |
+| positive control | main: 1,490 papers, 1,193 cards | rank 1 (was 50) |
+| negative control | main | rank 1 (was 80) |
+
+**F2 PASS (4 of 4 in the top 5)**, with three caveats:
+
+- **The case corpora are too small for F2 to test much.** F2 ranks every card, and NQS has only 10, so a top-5 pass needs only half of them below the expected one. More distractor papers per case would make it a real test.
+- **The two control cases are tuned.** Their hand-written generic forms were reworded after the first F2 run. The new wordings name no method, but they were chosen from a few tries against F2. F3 is the honest check, because there the engine writes its own generic forms.
+- **F2 does not exclude a case's target papers, but a run does.** The engine never takes technique cards from the near papers, so F2 ranks against more competitors than a run faces.
