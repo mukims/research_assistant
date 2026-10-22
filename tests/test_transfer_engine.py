@@ -1,10 +1,11 @@
 import io
+import tempfile
 from contextlib import redirect_stderr
 import unittest
 from unittest.mock import patch
 
 from research_assistant import config
-from research_assistant.transfer import engine
+from research_assistant.transfer import engine, store
 from research_assistant.transfer.deps import TransferSettings
 from tests.transfer_fixtures import world
 
@@ -24,6 +25,12 @@ class TestEngine(unittest.TestCase):
         r = engine.run_best_of_n("q", deps, TransferSettings(exclude_documents=frozenset({"s1"})))
         self.assertNotIn("s1", {t.card_document for t in r.transfers})
         self.assertTrue(all("s1" in (excl or set()) for _, excl in log.searches))
+
+    def test_a_run_with_excluded_documents_saves_and_loads(self):
+        r = engine.run_best_of_n("q", world()[0], TransferSettings(exclude_documents=frozenset({"s1", "n9"})))
+        with tempfile.TemporaryDirectory() as d:
+            loaded = store.load_result(store.save_result(r, directory=d))
+        self.assertEqual(loaded.settings["exclude_documents"], ["n9", "s1"])
 
     def test_done_before_is_ranked_last_with_its_reason(self):
         r = engine.run_best_of_n("q", world(card_names={"s2": "known method"})[0])

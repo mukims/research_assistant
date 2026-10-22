@@ -212,7 +212,11 @@ def run_best_of_n(
         search="best_of_n",
         created_at=datetime.now(timezone.utc).isoformat(),
         models=models,
-        settings=dataclasses.asdict(settings),
+        # JSON has no sets: the saved run lists the excluded documents.
+        settings={
+            **dataclasses.asdict(settings),
+            "exclude_documents": sorted(settings.exclude_documents),
+        },
         near=grounding.near,
         passages=grounding.passages,
         bottlenecks=grounding.bottlenecks,
