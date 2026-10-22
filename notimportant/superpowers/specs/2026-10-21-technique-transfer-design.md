@@ -433,3 +433,21 @@ card indexes.
 - The control keys exclude the user's non-target papers and every copy of
   p1–p8.
 - Cards per query and seeds per bottleneck go from 3 to 5.
+
+### F3 after the retrieval change (2026-10-22)
+
+Commit 921d7b0; the result is `data/eval/transfer/results/20261022-154442.json`.
+**F3 FAIL: 1 of 3 passed, 1 not tested.** KPM passes (rank 1 ×3), NQS passes
+1 of 3 (run 3, rank 2), the negative control is not tested ×3 and the positive
+control fails ×3. The run took 1,534 s and made 612 model calls.
+
+**The simulation overstated the gain.** The model wrote `generic.inverse` for
+every inference bottleneck, but its sentences describe positions ("infer the
+spatial distribution of microscopic defects", "the local coordinates of
+scattering centers"), and two name the misfit method against the rule. Under
+the live sentences the controls' expected cards rank 20–165, against 5 under
+the fixed sentence used in the study. No expected card was seeded in either
+control.
+
+The open question for the controls is how the inverse form should be worded,
+or whether the bottleneck stage should write it at all.
