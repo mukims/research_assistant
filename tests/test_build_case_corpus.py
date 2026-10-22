@@ -1,9 +1,13 @@
 import io
-from contextlib import redirect_stderr
+import json
+import os
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 import unittest
 from unittest.mock import patch
 
 from research_assistant.eval import transfer_cases
+from research_assistant.shared.ingestion import pdf_key
 from scripts import build_case_corpus as bcc
 
 
@@ -40,6 +44,28 @@ class TestBuildCaseCorpus(unittest.TestCase):
         with patch.object(bcc.agent0_discoverer, "_search_arxiv", return_value=arxiv), \
                 patch.object(bcc.agent0_discoverer, "_search_openalex", return_value=openalex):
             self.assertEqual(bcc.default_search("Auto-encoding variational Bayes"), arxiv + openalex)
+
+    def test_titles_that_share_their_first_40_characters_get_different_files(self):
+        a = bcc.pdf_filename("The density-matrix renormalization group")
+        b = bcc.pdf_filename("The density-matrix renormalization group in the age of matrix product states")
+        self.assertNotEqual(a, b)
+        self.assertTrue(a.startswith("The_density-matrix_renormalization_group") and a.endswith(".pdf"))
+        self.assertEqual(a, bcc.pdf_filename("The density-matrix renormalization group"))
+
+    def test_resolved_names_match_the_document_ids_the_ingest_stores(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "resolution.json"), "w", encoding="utf-8") as fh:
+                json.dump([{"title": "The Kernel Polynomial Method", "pdf_url": "u"}], fh)
+            written = {}
+            with patch.object(bcc, "guard_data_dir", return_value=None), \
+                    patch.object(bcc, "case_data_dir", return_value=d), \
+                    patch.object(bcc, "download_pdf", return_value=(True, None)), \
+                    patch.object(bcc, "ingest_pdfs") as ingest, \
+                    patch.object(bcc, "atomic_write_json", side_effect=lambda p, data: written.update({p: data})), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(bcc.main(["--case", "kpm", "--confirm"]), 0)
+            stored = {pdf_key(p) for p in ingest.call_args.args[0]}
+            self.assertEqual(set(written[os.path.join(d, "resolved.json")].values()), stored)
 
     def test_hidden_papers_are_never_resolved(self):
         recorded = []

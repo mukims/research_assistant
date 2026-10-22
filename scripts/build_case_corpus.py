@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -18,7 +19,7 @@ from research_assistant.agents import agent0_discoverer
 from research_assistant.eval.transfer_cases import case_data_dir, load_cases
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import download_pdf
-from research_assistant.shared.ingestion import ingest_pdfs
+from research_assistant.shared.ingestion import ingest_pdfs, pdf_key
 
 
 def guard_data_dir(case_id: str) -> int | None:
@@ -28,6 +29,16 @@ def guard_data_dir(case_id: str) -> int | None:
         sys.stderr.write(f"set CITATION_DATA_DIR={target} to build this case\n")
         return 4
     return None
+
+
+def pdf_filename(title: str) -> str:
+    """A file name for a case paper: its title's start plus a hash of the whole title.
+
+    Titles can share their first 40 characters ("The density-matrix
+    renormalization group" and its "... in the age of matrix product states").
+    """
+    digest = hashlib.sha1(title.encode("utf-8")).hexdigest()[:8]
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:40] + f"_{digest}.pdf"
 
 
 def _normalize_title(t: str) -> str:
@@ -188,12 +199,13 @@ def main(argv=None) -> int:
             orig_title = item.get("title")
             if not pdf_url:
                 continue
-            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", orig_title)[:40] + ".pdf"
+            safe_name = pdf_filename(orig_title)
             dest = os.path.join(pulled_dir, safe_name)
             success, err = download_pdf(pdf_url, dest)
             if success:
                 downloaded_paths.append(dest)
-                resolved_map[orig_title] = safe_name
+                # The id the ingest stores, so F2/F3 can find the paper's cards.
+                resolved_map[orig_title] = pdf_key(dest)
 
         if downloaded_paths:
             ingest_pdfs(downloaded_paths, workers=1, rebuild_index=True, require_grobid=True)
