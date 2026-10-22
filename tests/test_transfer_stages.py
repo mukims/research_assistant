@@ -149,6 +149,12 @@ class TestDevelop(unittest.TestCase):
         self.assertEqual((row_objection["answered"], row_objection["conceded"]), (True, False))
         self.assertIsNone(t.critique.objections[0]["row"])
 
+    def test_the_critic_says_whether_the_transfer_replaces_augments_or_tunes(self):
+        deps, log, g, seeds, s, ch = self._go()
+        for said, kept in (("Tune", "tune"), ("replace", "replace"), ("rewrite", "unknown")):
+            deps.critic = lambda m, said=said: json.dumps({"shape_match": "yes", "kind": said, "rows": [], "objections": []})
+            self.assertEqual(stages.develop(seeds[0], 1, g, deps, s, ch).critique.kind, kept)
+
     def test_a_failing_critic_leaves_an_empty_critique_not_a_crash(self):
         deps, log, g, seeds, s, ch = self._go()
         deps.critic = lambda m: (_ for _ in ()).throw(RuntimeError("down"))

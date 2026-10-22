@@ -503,8 +503,10 @@ def develop(
                 "response": "",
                 "conceded": False,
             })
+        kind = str(crit_dict.get("kind", "")).strip().lower()
         critique = Critique(
             shape_match=crit_dict.get("shape_match", "unknown"),
+            kind=kind if kind in ("replace", "augment", "tune") else "unknown",
             rows=crit_dict.get("rows", []),
             identifiability=crit_dict.get("identifiability"),
             objections=crit_objections,

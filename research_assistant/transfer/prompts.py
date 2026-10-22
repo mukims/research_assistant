@@ -209,11 +209,13 @@ Refuting result: {refuting_result}
 
 Rules:
 1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); override the identifiability verdict if it is wrong; list your strongest objections.
-2. Reply with the JSON object only.
+2. kind says what the transfer does to the current method (the baseline): replace it with a different method, augment it with a new component, or tune it (its parameters, ordering, implementation or hardware use) while the method stays the same.
+3. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:
 {{
   "shape_match": "yes",
+  "kind": "replace",
   "rows": [
     {{
       "row": 0,

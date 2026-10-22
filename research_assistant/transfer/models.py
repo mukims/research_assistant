@@ -112,6 +112,7 @@ class Step:
 @dataclass
 class Critique:
     shape_match: str = "unknown"
+    kind: str = "unknown"  # replace, augment or tune the current method
     rows: list[dict] = field(default_factory=list)
     identifiability: str | None = None
     objections: list[dict] = field(default_factory=list)

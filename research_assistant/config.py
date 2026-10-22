@@ -319,6 +319,8 @@ TRANSFER_PRIOR_ART_PARTIAL         = float(os.environ.get("CITATION_TRANSFER_PRI
 TRANSFER_PRIOR_ART_BONUS           = float(os.environ.get("CITATION_TRANSFER_PRIOR_ART_BONUS", "0.25"))
 # Reward lost per core row the critic says breaks and the reviser rebuts without conceding.
 TRANSFER_CONTESTED_PENALTY         = float(os.environ.get("CITATION_TRANSFER_CONTESTED_PENALTY", "0.2"))
+# Reward lost by a transfer the critic says only tunes the current method.
+TRANSFER_TUNE_PENALTY              = float(os.environ.get("CITATION_TRANSFER_TUNE_PENALTY", "0.5"))
 
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from research_assistant.config import TRANSFER_CONTESTED_PENALTY, TRANSFER_PRIOR_ART_BONUS
+from research_assistant.config import TRANSFER_CONTESTED_PENALTY, TRANSFER_PRIOR_ART_BONUS, TRANSFER_TUNE_PENALTY
 from research_assistant.transfer.models import (
     Bottleneck,
     Card,
@@ -208,6 +208,9 @@ def score_transfer(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> Sc
         rew = 0.0
     else:
         rew = reward(depth, transfer.prior_art.status) * max(0.0, 1.0 - TRANSFER_CONTESTED_PENALTY * contested)
+        # A transfer that only tunes the current method is worth less than one that changes it.
+        if transfer.critique and transfer.critique.kind == "tune":
+            rew *= 1.0 - TRANSFER_TUNE_PENALTY
     scores = Scores(depth=depth, checks=checks, reward=rew, set_aside=set_aside, contested=contested)
     transfer.scores = scores
     return scores

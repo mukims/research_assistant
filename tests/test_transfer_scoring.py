@@ -57,6 +57,12 @@ class TestScoring(unittest.TestCase):
         self.assertIsNone(s.set_aside)
         self.assertTrue(s.checks["identifiability_argued"])
 
+    def test_a_transfer_that_only_tunes_the_current_method_loses_reward(self):
+        for kind, expected in (("tune", 1.25 * (1 - config.TRANSFER_TUNE_PENALTY)), ("augment", 1.25), ("replace", 1.25), ("unknown", 1.25)):
+            t, b, c = good_transfer()
+            t.critique.kind = kind
+            self.assertAlmostEqual(scoring.score_transfer(t, b, c).reward, expected, msg=kind)
+
     def test_each_depth_item_fails_on_its_own(self):
         spoils = {
             "data_quantified": ("data_requirement", "a lot of samples"),

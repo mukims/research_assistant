@@ -146,6 +146,7 @@ def render_markdown(result: RunResult) -> str:
         # Critique
         lines.append("#### Critique & Revision")
         lines.append(f"- **Problem shape match:** {t.critique.shape_match}")
+        lines.append(f"- **Kind (vs the current method):** {t.critique.kind}")
         if t.critique.identifiability:
             lines.append(f"- **Critic identifiability override:** {t.critique.identifiability}")
         for o in t.critique.objections:

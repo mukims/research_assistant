@@ -112,7 +112,10 @@ gets one card-building call:
 **Reward.** `reward = depth × (1 + TRANSFER_PRIOR_ART_BONUS)` when prior art is
 `not_found`, otherwise `reward = depth`. The bonus defaults to 0.25. Each contested
 core row then multiplies the reward by `1 − TRANSFER_CONTESTED_PENALTY × contested`
-(floored at 0; the penalty defaults to 0.2). A transfer that is set aside scores 0.
+(floored at 0; the penalty defaults to 0.2). The critic also says whether the
+transfer replaces, augments or tunes the current method; a `tune` transfer's
+reward is multiplied by `1 − TRANSFER_TUNE_PENALTY` (default 0.5). A transfer
+that is set aside scores 0.
 
 Prior-art status:
 
