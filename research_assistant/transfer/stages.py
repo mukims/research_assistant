@@ -173,7 +173,7 @@ def ground(
             statement=statement,
             quantities=quantities,
             current_method=current_method,
-            generic={lvl: generic[lvl].strip() for lvl in levels},
+            generic={lvl: generic[lvl].strip() for lvl in levels} | inverse_form(item),
             premises=resolved_p,
             # Anything but an explicit false keeps the identifiability gate on.
             inference=item.get("inference") is not False,
@@ -191,6 +191,19 @@ def ground(
         bottlenecks=bottlenecks,
         warnings=warnings,
     )
+
+
+def inverse_form(item: dict) -> dict[str, str]:
+    """{"inverse": sentence} for an inference bottleneck that gives one, else {}.
+
+    It states the problem's shape (what unobserved thing is inferred from what
+    measured one), which reaches inverse-problem techniques the three levels miss.
+    """
+    generic = item.get("generic") if isinstance(item.get("generic"), dict) else {}
+    text = generic.get("inverse")
+    if item.get("inference") is False or not isinstance(text, str) or not text.strip():
+        return {}
+    return {"inverse": text.strip()}
 
 
 def _title_key(title: str) -> str:
@@ -241,7 +254,7 @@ def candidate_cards(
     for b in grounding.bottlenecks:
         best_by_card: dict[str, tuple[Card, float, str, int]] = {}
 
-        for level in ("specific", "mid", "broad"):
+        for level in ("specific", "mid", "broad", "inverse"):
             generic_text = b.generic.get(level, "")
             if not generic_text:
                 continue

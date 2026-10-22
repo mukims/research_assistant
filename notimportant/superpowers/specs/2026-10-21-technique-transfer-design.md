@@ -44,8 +44,8 @@ reuses the repo's shared core rather than rebuilding it:
 | Stage | Does | Model calls |
 |---|---|---|
 | S0 Coverage | nearest summaries → relevance gate; fewer than 3 kept → refused | 1 (gate) |
-| S1 Bottlenecks | from the near passages: up to 3 bottlenecks, each with grounded premises, the quantities it limits, the current method, and **three generic forms** (specific, mid, broad) | 1 |
-| S2 Techniques | each generic form searches the **technique-card index**; near-set and excluded documents are skipped, as are unverified cards; best 3 cards per bottleneck | 0 (embeddings only) |
+| S1 Bottlenecks | from the near passages: up to 3 bottlenecks, each with grounded premises, the quantities it limits, the current method, and **three generic forms** (specific, mid, broad); an inference bottleneck adds a fourth, `inverse`, saying what unobserved thing is inferred from what measured thing | 1 |
+| S2 Techniques | each generic form searches the **technique-card index**; near-set documents, every copy of them and excluded documents are skipped, as are unverified cards; best 5 cards per bottleneck | 0 (embeddings only) |
 | S3 Write | one transfer per (bottleneck, card): mapping table, identifiability, steps, data, baseline, metric, prediction, refuting result, premises | 1 per transfer |
 | S4 Judge | every premise is judged against its own passage with the citer's rule (Supports with a verified span = 1.0, Partially supports with a verified span = 0.5, anything else = 0); results cached per (claim, chunk) | ~2–4 per transfer |
 | S5 Critique | an adversarial critic attacks the mapping rows and identifiability, ideally on a **different model**; then one revision call answers each objection or concedes it. Every row the critic marks `breaks` is also put to the reviser as an objection on that row | 2 per transfer |
@@ -184,8 +184,8 @@ before writing transfers.
 |---|---|---|
 | `TRANSFER_DIR` (code) | `DATA_DIR/transfer` | cards and runs |
 | `TRANSFER_BOTTLENECKS` | 3 | per run |
-| `TRANSFER_CARDS_PER_QUERY` | 3 | cards retrieved per generic form |
-| `TRANSFER_TECHNIQUES_PER_BOTTLENECK` | 3 | kept after merging the levels |
+| `TRANSFER_CARDS_PER_QUERY` | 5 | cards retrieved per generic form |
+| `TRANSFER_TECHNIQUES_PER_BOTTLENECK` | 5 | kept after merging the levels |
 | `TRANSFER_MIN_NEAR_PAPERS` | 3 | coverage gate |
 | `TRANSFER_NEAR_PASSAGES` / `_SOURCE_PASSAGES` | 8 / 3 | passages per prompt |
 | `TRANSFER_PASSAGE_MAX_CHARS` | 7000 | passage text per prompt |
@@ -406,3 +406,30 @@ never seeded an expected ML-inversion card. Whether the negative control can
 be tested at all depends on an ML card being seeded. NQS passes or fails on
 which cards each run's generic forms reach. With 3 seeds per bottleneck, the
 cards each run reaches change with the wording of its generic forms.
+
+### Retrieval study and change (2026-10-22)
+
+The question was where the expected cards rank under each saved F3 run's own
+generic forms. The study ran offline over all seven runs, against the current
+card indexes.
+
+- **NQS and KPM are not limited by retrieval.** At 3 seeds an expected card is
+  already a candidate in 18/18 NQS and 16/18 KPM runs.
+- **The controls are.** Their expected cards ranked at a median of 36
+  (positive) and 22 (negative). Neither 10 seeds, one card per paper, nor other
+  query texts (statement, statement plus current method, the run's query)
+  helped.
+- **Two causes.** The bottleneck forms describe the obstacle (combinatorial
+  search, noisy responses), not the problem's inverse shape. And copies of the
+  user's own papers took the top ranks: under an inverse-shape query, ranks 1–3
+  were p8 and its copies.
+- **Simulated on the saved runs,** an inverse-shape query plus excluding the
+  user's papers and copies gives positive 9/18 at 3 seeds and 18/18 at 5;
+  negative 7/18 and 10/18. Neither change alone helped. The simulation used one
+  fixed sentence; live, the model writes it per bottleneck.
+
+**Built:**
+- Inference bottlenecks write `generic.inverse`, searched as a fourth level.
+- The control keys exclude the user's non-target papers and every copy of
+  p1–p8.
+- Cards per query and seeds per bottleneck go from 3 to 5.

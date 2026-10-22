@@ -77,7 +77,7 @@ Rules:
 1. A bottleneck is what makes this problem expensive, ill-posed or data-starved, as the passages show it. List at most {n}.
 2. quantities are the quantities the bottleneck limits, as the field names them.
 3. current_method is how the passages solve it today.
-4. generic restates the bottleneck three ways — specific, mid and broad — naming no material, system, organism or field, so that a paper from another field could match it.
+4. generic restates the bottleneck three ways — specific, mid and broad — naming no material, system, organism or field, so that a paper from another field could match it. For an inference bottleneck, generic.inverse adds one sentence saying what unobserved thing is inferred from what measured thing, naming no material, system, field or method; leave it out otherwise.
 5. Each bottleneck has 1 to 3 premises: one sentence the cited passage states, citing exactly one key, written like C7.
 6. inference is true when the problem is to infer unknowns from measurements or observations (an inverse problem), and false when it is to compute, simulate, represent or optimise something.
 7. Reply with the JSON object only.
@@ -93,7 +93,8 @@ Format your response as a JSON object matching this schema:
       "generic": {{
         "specific": "Restatement without field nouns at specific level",
         "mid": "Restatement at mid level",
-        "broad": "Restatement at broad level"
+        "broad": "Restatement at broad level",
+        "inverse": "For an inference bottleneck: infer the unobserved X from the measured Y"
       }},
       "premises": [
         {{

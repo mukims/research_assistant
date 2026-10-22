@@ -19,3 +19,7 @@ if os.environ.get("CITATION_TEST_REAL_STORE") != "1" and "CITATION_DATA_DIR" not
     atexit.register(shutil.rmtree, _data_dir, True)
     os.environ["CITATION_DATA_DIR"] = _data_dir
 os.environ.setdefault("CITATION_CHROMA_SERVER", "")
+# The fixture world (tests/transfer_fixtures.py) is laid out for 3 cards per query
+# and 3 techniques per bottleneck; the live defaults are 5.
+os.environ.setdefault("CITATION_TRANSFER_CARDS_PER_QUERY", "3")
+os.environ.setdefault("CITATION_TRANSFER_TECHNIQUES_PER_BOTTLENECK", "3")

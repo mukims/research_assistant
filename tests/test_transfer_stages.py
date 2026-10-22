@@ -40,6 +40,19 @@ class TestGround(unittest.TestCase):
         g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
         self.assertEqual([b.inference for b in g.bottlenecks], [False, True])     # missing means inference
 
+    def test_only_an_inference_bottleneck_keeps_its_inverse_form(self):
+        reply = json.dumps({"bottlenecks": [
+            {"statement": "Inversion", "quantities": ["q"], "current_method": "m", "inference": True,
+             "generic": {"specific": "a", "mid": "b", "broad": "c", "inverse": "infer hidden causes from measured effects"},
+             "premises": [{"claim": "bottleneck fact one", "key": "C1"}]},
+            {"statement": "Representation", "quantities": ["q"], "current_method": "m", "inference": False,
+             "generic": {"specific": "a", "mid": "b", "broad": "c", "inverse": "should be ignored"},
+             "premises": [{"claim": "bottleneck fact two", "key": "C2"}]},
+        ]})
+        deps, _ = world(replies={("bottlenecks", 1): reply})
+        g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
+        self.assertEqual([b.generic.get("inverse") for b in g.bottlenecks], ["infer hidden causes from measured effects", None])
+
     def test_missing_generic_levels_are_repaired_not_dropped(self):
         reply = json.dumps({"bottlenecks": [
             {"statement": "Only mid", "quantities": ["q"], "current_method": "m",
@@ -75,6 +88,16 @@ class TestCandidates(unittest.TestCase):
         seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings())
         by_b = {b: sorted(s.card.document for s in seeds if s.bottleneck_id == b) for b in ("B1", "B2")}
         self.assertEqual(by_b, {"B1": ["s1", "s2", "s3"], "B2": ["s4", "s5", "s6"]})
+
+    def test_an_inverse_form_is_searched_as_a_fourth_level(self):
+        self.g.bottlenecks[0].generic["inverse"] = "g2-specific"      # points at s4, which B1's levels never reach
+        searched = []
+        embed = self.deps.embed_query
+        self.deps.embed_query = lambda text: searched.append(text) or embed(text)
+        seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings(techniques_per_bottleneck=4))
+        self.assertIn("g2-specific", searched)
+        b1 = next(s for s in seeds if s.bottleneck_id == "B1" and s.card.document == "s4")
+        self.assertEqual(b1.level, "inverse")
 
     def test_another_copy_of_a_near_paper_is_never_a_source(self):
         copy = next(c for c in self.deps.cards.cards if c.document == "s1")
