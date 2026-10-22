@@ -78,7 +78,8 @@ Rules:
 3. current_method is how the passages solve it today.
 4. generic restates the bottleneck three ways — specific, mid and broad — naming no material, system, organism or field, so that a paper from another field could match it.
 5. Each bottleneck has 1 to 3 premises: one sentence the cited passage states, citing exactly one key, written like C7.
-6. Reply with the JSON object only.
+6. inference is true when the problem is to infer unknowns from measurements or observations (an inverse problem), and false when it is to compute, simulate, represent or optimise something.
+7. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:
 {{
@@ -87,6 +88,7 @@ Format your response as a JSON object matching this schema:
       "statement": "What makes this problem difficult",
       "quantities": ["quantity1", "quantity2"],
       "current_method": "How it is solved today",
+      "inference": true,
       "generic": {{
         "specific": "Restatement without field nouns at specific level",
         "mid": "Restatement at mid level",

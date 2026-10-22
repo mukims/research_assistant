@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import subprocess
@@ -117,14 +118,31 @@ def run_retrieval_case(case: Case, deps: Deps) -> dict[str, Any]:
     }
 
 
+def near_from_targets(deps: Deps, target_docs: set[str]) -> Deps:
+    """Deps whose near set is exactly the case's target papers.
+
+    A case names the papers its problem lives in. Left to the relevance gate,
+    a small case corpus also offers its source papers (the KPM paper is about
+    densities of states), and a near paper can never be a technique source.
+    """
+    def shortlist(query: str, k: int) -> list[dict]:
+        return [r for r in deps.shortlist(query, 10_000) if r["document"] in target_docs]
+
+    return dataclasses.replace(deps, shortlist=shortlist, gate=lambda query, ranked: ranked)
+
+
 def run_score_case(case: Case, deps: Deps, run_idx: int = 0) -> dict[str, Any]:
     """Run full F3 retrodiction evaluation for a single case."""
+    resolved = get_case_resolved(case)
+    target_docs = {resolved[t] for t in case.papers.get("target", []) if t in resolved}
     settings = TransferSettings(
         exclude_documents=frozenset(case.exclude_documents),
         prior_art_before_year=case.cutoff_year,
     )
+    if target_docs:
+        deps = near_from_targets(deps, target_docs)
+        settings.min_near_papers = min(settings.min_near_papers, len(target_docs))
     result = engine.run_best_of_n(case.query, deps, settings)
-    resolved = get_case_resolved(case)
     expected_docs = transfer_metrics.expected_documents(case, resolved)
     eval_res = transfer_metrics.case_passed(result, case, expected_docs)
 

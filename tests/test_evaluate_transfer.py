@@ -40,6 +40,13 @@ class TestEvaluateTransfer(unittest.TestCase):
             self.assertEqual(log.critic_calls, 0)
             self.assertIn("F2", out.getvalue())
 
+    def test_a_case_with_target_papers_uses_exactly_them_as_its_near_set(self):
+        deps, _ = world()
+        case_deps = evaluate_transfer.near_from_targets(deps, {"n4", "n5"})
+        shortlist = case_deps.shortlist("q", 6)
+        self.assertEqual({r["document"] for r in shortlist}, {"n4", "n5"})
+        self.assertEqual(case_deps.gate("q", shortlist), shortlist)
+
     def test_score_runs_the_leak_guard_before_any_case(self):
         case = Case(
             id="test_leak",

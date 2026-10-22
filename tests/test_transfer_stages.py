@@ -27,6 +27,19 @@ class TestGround(unittest.TestCase):
         self.assertEqual(log.searches[0][0], {"n0", "n1", "n2"})
         self.assertEqual(log.judged.count("bottleneck fact two"), 1)
 
+    def test_a_bottleneck_says_whether_it_infers_unknowns_from_measurements(self):
+        reply = json.dumps({"bottlenecks": [
+            {"statement": "Representation", "quantities": ["energy"], "current_method": "DMRG",
+             "inference": False, "generic": {"specific": "a", "mid": "b", "broad": "c"},
+             "premises": [{"claim": "bottleneck fact one", "key": "C1"}]},
+            {"statement": "Inversion", "quantities": ["conductance"], "current_method": "misfit",
+             "generic": {"specific": "a", "mid": "b", "broad": "c"},
+             "premises": [{"claim": "bottleneck fact two", "key": "C2"}]},
+        ]})
+        deps, _ = world(replies={("bottlenecks", 1): reply})
+        g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
+        self.assertEqual([b.inference for b in g.bottlenecks], [False, True])     # missing means inference
+
     def test_excluded_documents_never_reach_the_gate_or_the_search(self):
         deps, log = world()
         stages.ground(
@@ -47,6 +60,12 @@ class TestCandidates(unittest.TestCase):
         seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings())
         by_b = {b: sorted(s.card.document for s in seeds if s.bottleneck_id == b) for b in ("B1", "B2")}
         self.assertEqual(by_b, {"B1": ["s1", "s2", "s3"], "B2": ["s4", "s5", "s6"]})
+
+    def test_another_copy_of_a_near_paper_is_never_a_source(self):
+        copy = next(c for c in self.deps.cards.cards if c.document == "s1")
+        copy.citation = "CITATION n-0"          # the same title as near paper n0, filed under another name
+        seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings())
+        self.assertNotIn("s1", {s.card.document for s in seeds})
 
     def test_every_seed_records_its_level_and_rank(self):
         seeds, _ = stages.candidate_cards(self.g, self.deps, TransferSettings())

@@ -48,6 +48,15 @@ class TestScoring(unittest.TestCase):
         self._break_row_0(t, conceded=True)
         self.assertEqual(scoring.score_transfer(t, b, c).set_aside, "core_assumption_breaks")
 
+    def test_identifiability_does_not_gate_a_problem_that_infers_nothing_from_measurements(self):
+        t, b, c = good_transfer()
+        b.inference = False
+        t.critique.identifiability = "underdetermined"
+        t.identifiability.measurements = ""
+        s = scoring.score_transfer(t, b, c)
+        self.assertIsNone(s.set_aside)
+        self.assertTrue(s.checks["identifiability_argued"])
+
     def test_each_depth_item_fails_on_its_own(self):
         spoils = {
             "data_quantified": ("data_requirement", "a lot of samples"),

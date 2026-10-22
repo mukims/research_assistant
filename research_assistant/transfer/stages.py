@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -168,6 +169,8 @@ def ground(
             current_method=current_method,
             generic={lvl: generic[lvl].strip() for lvl in levels},
             premises=resolved_p,
+            # Anything but an explicit false keeps the identifiability gate on.
+            inference=item.get("inference") is not False,
         )
         bottlenecks.append(b)
         all_premises_to_check.extend(resolved_p)
@@ -182,6 +185,24 @@ def ground(
         bottlenecks=bottlenecks,
         warnings=warnings,
     )
+
+
+def _title_key(title: str) -> str:
+    """Letters and digits only, lowercased: "MoS 2 films" and "MoS2 films" match."""
+    return re.sub(r"[^a-z0-9]", "", (title or "").lower())
+
+
+def copies_of(near: list[dict], cards: list[Card]) -> set[str]:
+    """Documents that hold another copy of a near paper, matched by title.
+
+    The corpus stores some papers more than once (a DOI copy and a title
+    copy); a near paper's other copies must not come back as technique sources.
+    """
+    near_docs = {r["document"] for r in near}
+    keys = {_title_key(r.get("citation", "")) for r in near}
+    keys |= {_title_key(c.citation) for c in cards if c.document in near_docs}
+    keys.discard("")
+    return {c.document for c in cards if _title_key(c.citation) in keys} - near_docs
 
 
 @dataclass
@@ -207,7 +228,7 @@ def candidate_cards(
     4. Warn if no verified cards found for a bottleneck.
     """
     near_docs = {r["document"] for r in grounding.near}
-    exclude = frozenset(near_docs | set(settings.exclude_documents))
+    exclude = frozenset(near_docs | copies_of(grounding.near, deps.cards.cards) | set(settings.exclude_documents))
     seeds: list[Seed] = []
     warnings: list[str] = []
 

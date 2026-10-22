@@ -60,6 +60,7 @@ class Bottleneck:
     current_method: str
     generic: dict[str, str]  # "specific", "mid", "broad"
     premises: list[Premise] = field(default_factory=list)
+    inference: bool = True  # infers unknowns from measurements, so identifiability applies
 
 
 @dataclass

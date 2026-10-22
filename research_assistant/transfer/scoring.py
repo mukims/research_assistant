@@ -106,8 +106,9 @@ def set_aside_reason(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> 
     if any(r.core and r.status.strip().lower() == "breaks" for r in f_rows):
         return "core_assumption_breaks"
 
-    # 6. not_identifiable: the final identifiability verdict is underdetermined
-    if final_identifiability(transfer).strip().lower() == "underdetermined":
+    # 6. not_identifiable: the final identifiability verdict is underdetermined,
+    #    for a bottleneck that infers unknowns from measurements
+    if bottleneck.inference and final_identifiability(transfer).strip().lower() == "underdetermined":
         return "not_identifiable"
 
     # 7. off_target: metric names none of the bottleneck's quantities (case-insensitively)
@@ -139,8 +140,9 @@ def depth_checks(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> dict
         and any(r.core for r in transfer.mapping)
     )
 
-    # 3. Identifiability argued: measurements & unknowns named, verdict != unclear, argument >= 10 words
-    checks["identifiability_argued"] = (
+    # 3. Identifiability argued: measurements & unknowns named, verdict != unclear, argument >= 10 words.
+    #    It does not apply when the bottleneck infers nothing from measurements.
+    checks["identifiability_argued"] = not bottleneck.inference or (
         bool(transfer.identifiability.measurements.strip())
         and bool(transfer.identifiability.unknowns.strip())
         and transfer.identifiability.verdict.strip().lower() != "unclear"

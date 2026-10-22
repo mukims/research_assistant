@@ -92,7 +92,7 @@ gets one card-building call:
 | `unverified_technique` | the card's evidence premise did not pass |
 | `shape_mismatch` | the critic says the problem shapes do not match (`shape_match == "no"`) |
 | `core_assumption_breaks` | a core mapping row's final status (the critic overrides the writer) is `breaks`: the critic broke it and the reviser conceded or did not answer. A break the reviser rebutted is `contested`, which costs reward instead (see Reward) |
-| `not_identifiable` | the final identifiability verdict is `underdetermined` |
+| `not_identifiable` | the final identifiability verdict is `underdetermined`, for a bottleneck marked `inference` (it infers unknowns from measurements). Computing, simulating, representing and optimising are not gated |
 | `off_target` | the metric names none of the bottleneck's quantities |
 | `done_before` | prior art found the same combination. The transfer is listed under "Already done", with references |
 
@@ -100,7 +100,7 @@ gets one card-building call:
 
 1. Mapping complete: at least 3 rows, each with a source role and a target role.
 2. Every row is classified as holds, breaks or enforce, and at least one row is core.
-3. Identifiability argued: the measurements and the unknowns are both named, the verdict is not `unclear`, and the argument runs to at least 10 words.
+3. Identifiability argued: the measurements and the unknowns are both named, the verdict is not `unclear`, and the argument runs to at least 10 words. It passes automatically when the bottleneck is not an inference problem.
 4. At least 3 steps, each naming an input, an output and a tool.
 5. The data requirement contains a number.
 6. The baseline shares a content word with the bottleneck's current method.
@@ -283,3 +283,8 @@ case failed for a different reason; none of the reasons is the idea itself.
 5. The critic should run on a different model; every run warned that it shares the generator's.
 6. The negative case should report "not tested" when no matching transfer is proposed.
 7. The depth checklist checks form, not substance: the FFTW transfer scored the maximum.
+
+Fixes 1–3 were made on 2026-10-22:
+- Bottlenecks carry `inference`, and only inference bottlenecks are gated on identifiability.
+- The F3 harness uses a case's target papers as its near set (`near_from_targets`).
+- `candidate_cards` excludes every copy of a near paper, matched by title (`copies_of`).
