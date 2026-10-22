@@ -25,17 +25,18 @@ Rules:
    - routine handling, measurement or characterisation;
    - "combining" or "integrating" two things, unless the paper says exactly how.
 3. mechanism gives 2 to 5 steps saying what is computed or done, in order, concretely enough to implement. Name the operation, such as "rescale the matrix so its spectrum lies in [-1, 1]", not a goal such as "improve accuracy". If you cannot write the steps from the passages, it is not a technique: leave it out.
-4. problem_solved states the problem the technique solves with no material, system, organism or field named.
-5. context says how this paper used it.
-6. evidence is one sentence the cited passage states, citing exactly one key, written like C7.
-7. If the paper uses no technique by rule 1, return an empty list. That is the right answer for surveys, databases and benchmarks.
-8. Reply with the JSON object only.
+4. name is the method's own name as its field knows it, including the model or object it works on, such as "restricted Boltzmann machine trained by contrastive divergence" or "kernel polynomial method with Jackson damping", not a paraphrase such as "truncated sampling gradient approximation".
+5. problem_solved states the problem the technique solves with no material, system, organism or field named.
+6. context says how this paper used it.
+7. evidence is one sentence the cited passage states, citing exactly one key, written like C7.
+8. If the paper uses no technique by rule 1, return an empty list. That is the right answer for surveys, databases and benchmarks.
+9. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:
 {{
   "techniques": [
     {{
-      "name": "Name of the technique",
+      "name": "The method's own name, with the model it uses",
       "problem_solved": "Generic statement of the problem solved without field-specific nouns",
       "context": "How this paper used it",
       "inputs": "What input data/structure it requires",
