@@ -193,6 +193,34 @@ class TestStoreAndIndex(unittest.TestCase):
             self.assertEqual(res["skipped"], 1)
             self.assertEqual(res["built"], 1)
 
+    def test_a_paper_whose_reply_never_parses_is_left_for_the_next_run_and_the_rest_continue(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = cards.CardStore(d)
+
+            def mock_chat(m):
+                if "Citation A" in m[1]["content"]:
+                    return "null"
+                return json.dumps({"techniques": []})
+
+            checker = premises.PremiseChecker(lambda c, e: {}, [], [])
+            res = cards.build_all(
+                [("a.pdf", "Citation A"), ("b.pdf", "Citation B")],
+                chat=mock_chat,
+                checker=checker,
+                embed_documents=lambda ts: [[1.0, 0.0] for _ in ts],
+                store=store,
+                texts=["text a", "text b"],
+                metadatas=[
+                    {"document": "a.pdf", "type": "text_chunk", "section": "methods", "section_raw": "M"},
+                    {"document": "b.pdf", "type": "text_chunk", "section": "methods", "section_raw": "M"},
+                ],
+                max_chars=10_000,
+            )
+            self.assertEqual(res["failed"], ["a.pdf"])
+            self.assertEqual(res["built"], 1)
+            self.assertTrue(any("a.pdf" in w for w in res["warnings"]))
+            self.assertEqual(store.done_documents(), {"b.pdf"})
+
 
 class TestCardRecords(unittest.TestCase):
     def test_a_card_stored_before_mechanism_existed_loads_with_no_steps(self):

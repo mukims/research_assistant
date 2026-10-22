@@ -315,6 +315,7 @@ def build_all(
     built = 0
     skipped = 0
     total_cards = 0
+    failed: list[str] = []
     all_warnings: list[str] = []
 
     total_docs = len(documents)
@@ -328,9 +329,15 @@ def build_all(
 
         progress(i, total_docs, f"Building cards for: {doc}")
         passages = select_card_passages(doc, cit, texts, metadatas, max_chars)
-        new_cards, warnings = build_card(
-            doc, cit, passages, chat=chat, checker=checker
-        )
+        try:
+            new_cards, warnings = build_card(
+                doc, cit, passages, chat=chat, checker=checker
+            )
+        except Exception as exc:
+            # Not recorded as done, so the next run retries this paper.
+            failed.append(doc)
+            all_warnings.append(f"{doc}: no cards built ({type(exc).__name__}: {exc})")
+            continue
         all_warnings.extend(warnings)
 
         if new_cards:
@@ -350,5 +357,6 @@ def build_all(
         "built": built,
         "skipped": skipped,
         "cards": total_cards,
+        "failed": failed,
         "warnings": all_warnings,
     }

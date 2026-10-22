@@ -110,6 +110,11 @@ def main(argv=None) -> int:
         f"Built technique cards: {results['built']} papers processed, "
         f"{results['skipped']} skipped, {results['cards']} cards created."
     )
+    if results["failed"]:
+        print(f"{len(results['failed'])} papers failed and will be retried on the next run:")
+        for warning in results["warnings"]:
+            if any(warning.startswith(f"{doc}: no cards built") for doc in results["failed"]):
+                print(f"  {warning}")
     return 0
 
 
