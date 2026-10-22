@@ -288,3 +288,20 @@ Fixes 1–3 were made on 2026-10-22:
 - Bottlenecks carry `inference`, and only inference bottlenecks are gated on identifiability.
 - The F3 harness uses a case's target papers as its near set (`near_from_targets`).
 - `candidate_cards` excludes every copy of a near paper, matched by title (`copies_of`).
+
+### F3 rerun after fixes 1–3 (2026-10-22)
+
+The result is `data/eval/transfer/results/20261022-112210.json`.
+**F3 FAIL: 2 of 4 (spread 0.50)**, up from 0 of 4.
+
+| case | run 1 | run 2 | note |
+|---|---|---|---|
+| kpm | pass (rank 3) | pass (rank 1) | The KPM card is now proposed and survives. The FFTW auto-tuning card still outscores it in run 1 (1.00 vs 0.80). |
+| negative control | pass | pass | Every transfer matching a technique term was set aside. The terms are loose: "encoder" matched a vision-encoder card. |
+| nqs | fail | fail | The RBM-paper transfers now pass the gates (rewards 0.48–0.80). In run 2, B2.T3 proposes a bipartite latent-variable model "such as Restricted Boltzmann Machines" as the state representation, at rank 3. It is not counted: its card (contrastive divergence) never names the RBM, and matching deliberately ignores the transfer's own prose. |
+| positive control | fail | fail | The expected ML-inversion cards are still never seeded. Two bottlenecks were set aside as `ungrounded_bottleneck`. |
+
+Open questions:
+1. Should NQS match on the card's own vocabulary ("contrastive divergence", "Markov chain")? Or should cards keep the model's name in `name`? Prose-based matching would invite answers recalled from the model's memory.
+2. The positive control's retrieval gap remains: either more seeds per bottleneck, or generic forms nearer "learn the inverse map".
+3. Fixes 4–7 from the first F3 run are still open.
