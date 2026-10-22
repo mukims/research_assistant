@@ -305,3 +305,18 @@ Open questions:
 1. Should NQS match on the card's own vocabulary ("contrastive divergence", "Markov chain")? Or should cards keep the model's name in `name`? Prose-based matching would invite answers recalled from the model's memory.
 2. The positive control's retrieval gap remains: either more seeds per bottleneck, or generic forms nearer "learn the inverse map".
 3. Fixes 4–7 from the first F3 run are still open.
+
+### F3 after the card-naming rule (2026-10-22)
+
+Cards now keep the method's own name (commit 0462b73), and the NQS case cards
+were rebuilt. The result is `data/eval/transfer/results/20261022-113642.json`.
+**F3 FAIL: 0 of 4 (spread 1.50).** Between this rerun and the last, KPM and the
+negative control flipped from pass to fail, so two runs per case do not measure
+much.
+
+| case | run 1 | run 2 | why it failed |
+|---|---|---|---|
+| nqs | rank 3, mapped 25% | rank 1, mapped 0% | **The naming fix worked: the RBM card is matched.** Run 1's mapping is the NQS result ("parameterizing complex quantum states and wave-functions with auxiliary hidden units"; "approximating quantum expectation values and gradient updates"), but it misses the mapping terms spin/amplitude/energy. Run 2 maps the RBM onto operator compression, a weaker transfer. |
+| kpm | pass (rank 1) | rank 5 > 3 | The FFTW auto-tuning card (1.00) outranks KPM (0.70) and the trace estimator (0.90): fix 7. |
+| negative control | no bottlenecks | no ML transfer proposed | Fix 4 (missing generic level) and fix 6 ("not tested"). |
+| positive control | expected card proposed, set aside `not_identifiable` | not proposed | The analytic-continuation ANN card reached a transfer for the first time; the critic judged the inversion underdetermined. A corpus copy of the user's p8 is filed under a DOI string with no title, so `copies_of` missed it. |
