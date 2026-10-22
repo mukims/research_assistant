@@ -144,7 +144,7 @@ def run_score_case(case: Case, deps: Deps, run_idx: int = 0) -> dict[str, Any]:
         settings.min_near_papers = min(settings.min_near_papers, len(target_docs))
     result = engine.run_best_of_n(case.query, deps, settings)
     expected_docs = transfer_metrics.expected_documents(case, resolved)
-    eval_res = transfer_metrics.case_passed(result, case, expected_docs)
+    eval_res = transfer_metrics.case_passed(result, case, expected_docs, resolved)
 
     return {
         "case_id": case.id,

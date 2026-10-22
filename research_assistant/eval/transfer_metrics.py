@@ -126,9 +126,13 @@ def found_rank(result: Any, case: Any, expected_docs: set[str]) -> int | None:
     return None
 
 
-def mapped_share(transfer: Any, case: Any) -> float:
-    """Return share of mapping_terms found in the text of the mapping rows."""
-    mapping_terms = _get_case_field(case, "mapping_terms", [])
+def mapped_share(transfer: Any, case: Any, mapping_terms: list | None = None) -> float:
+    """Return share of mapping_terms found in the text of the mapping rows.
+
+    mapping_terms defaults to the case's own; see terms_for_source for per-source terms.
+    """
+    if mapping_terms is None:
+        mapping_terms = _get_case_field(case, "mapping_terms", [])
     if not mapping_terms:
         return 1.0
 
@@ -212,19 +216,28 @@ def critiqued(transfer: Any, case: Any) -> bool:
     return any(term.lower() in combined for term in critic_terms)
 
 
-def case_passed(result: Any, case: Any, expected_docs: set[str]) -> dict[str, Any]:
+def terms_for_source(case: Any, document: str, resolved: dict[str, str] | None) -> list:
+    """Mapping terms for a transfer from document: its source's own terms if the case gives them."""
+    by_source = _get_case_field(case, "mapping_terms_by_source", {}) or {}
+    for title, terms in by_source.items():
+        if resolved and resolved.get(title) == document:
+            return terms
+    return _get_case_field(case, "mapping_terms", [])
+
+
+def case_passed(result: Any, case: Any, expected_docs: set[str], resolved: dict[str, str] | None = None) -> dict[str, Any]:
     """
     Evaluate whether a retrodiction case passed per spec §6 rules.
 
     Returns dict with keys: passed, tested, found_rank, mapped, critiqued, reason.
     A negative run in which no transfer matched the technique terms is not tested.
     """
-    res = _case_passed(result, case, expected_docs)
+    res = _case_passed(result, case, expected_docs, resolved)
     res.setdefault("tested", True)
     return res
 
 
-def _case_passed(result: Any, case: Any, expected_docs: set[str]) -> dict[str, Any]:
+def _case_passed(result: Any, case: Any, expected_docs: set[str], resolved: dict[str, str] | None = None) -> dict[str, Any]:
     kind = _get_case_field(case, "kind", "positive")
     technique_terms = _get_case_field(case, "technique_terms", [])
     transfers = (
@@ -357,7 +370,8 @@ def _case_passed(result: Any, case: Any, expected_docs: set[str]) -> dict[str, A
             matching_t = t
             break
 
-    mapped = mapped_share(matching_t, case)
+    doc = matching_t.get("card_document") if isinstance(matching_t, dict) else getattr(matching_t, "card_document", "")
+    mapped = mapped_share(matching_t, case, terms_for_source(case, doc, resolved))
     crit = critiqued(matching_t, case)
     passed = (rank <= 3) and (mapped >= 0.5) and crit
 

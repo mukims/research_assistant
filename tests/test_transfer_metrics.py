@@ -99,6 +99,17 @@ class TestTransferMetrics(unittest.TestCase):
         self.assertFalse(f3["all_passed"])
         self.assertTrue(m.score(records[:3])["f3"]["all_passed"])
 
+    def test_a_source_paper_may_have_its_own_mapping_terms(self):
+        case = _case(source_titles=["KPM", "Trace"], technique_terms=["estimator"], mapping_terms=["chebyshev"])
+        case["expected"]["mapping_terms_by_source"] = {"Trace": [["random vector", "probe vector"], "trace"]}
+        result = _result_with([{
+            "card_document": "t.pdf", "card_name": "randomized trace estimator", "set_aside": None,
+            "mapping": [{"source_role": "random probe vectors", "target_role": "trace of the resolvent"}],
+            "critique": {"objections": [], "rows": []},
+        }])
+        self.assertEqual(m.case_passed(result, case, {"t.pdf"}, resolved={"KPM": "k.pdf", "Trace": "t.pdf"})["mapped"], 1.0)
+        self.assertEqual(m.case_passed(result, case, {"t.pdf"})["mapped"], 0.0)
+
     def test_a_mapping_term_may_be_a_group_of_synonyms(self):
         case = _case(mapping_terms=[["spin", "quantum state"], ["amplitude", "wave function"], ["energy"]])
         transfer = {"mapping": [{"source_role": "hidden units", "target_role": "quantum state and wave function"}]}

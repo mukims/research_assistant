@@ -32,6 +32,19 @@ DIRECTION_RE = re.compile(
 )
 
 
+def _singular(word: str) -> str:
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def normalise_phrase(text: str) -> str:
+    """Lowercase words, hyphens as spaces, plurals made singular: "Wave-functions" -> "wave function"."""
+    return " ".join(_singular(w) for w in re.findall(r"[a-z0-9]+", text.lower()))
+
+
 def content_words(text: str) -> set[str]:
     """Extract lowercase words with letters only and length >= 4."""
     return {w.lower() for w in re.findall(r"[a-zA-Z]+", text) if len(w) >= 4}
@@ -111,9 +124,10 @@ def set_aside_reason(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> 
     if bottleneck.inference and final_identifiability(transfer).strip().lower() == "underdetermined":
         return "not_identifiable"
 
-    # 7. off_target: metric names none of the bottleneck's quantities (case-insensitively)
-    metric_lower = transfer.metric.lower()
-    if not any(q.strip().lower() in metric_lower for q in bottleneck.quantities if q.strip()):
+    # 7. off_target: metric names none of the bottleneck's quantities
+    #    (ignoring case, hyphens and plurals)
+    metric_norm = f" {normalise_phrase(transfer.metric)} "
+    if not any(f" {normalise_phrase(q)} " in metric_norm for q in bottleneck.quantities if q.strip()):
         return "off_target"
 
     # 8. done_before: prior art found the same combination

@@ -57,6 +57,17 @@ class TestScoring(unittest.TestCase):
         self.assertIsNone(s.set_aside)
         self.assertTrue(s.checks["identifiability_argued"])
 
+    def test_off_target_ignores_hyphens_and_plurals(self):
+        for quantity, metric in (("wave function", "KL divergence of the wave-function"),
+                                 ("correlation length", "error in correlation lengths"),
+                                 ("density of states", "error in the densities of states")):
+            t, b, c = good_transfer()
+            b.quantities, t.metric = [quantity], metric
+            self.assertIsNone(scoring.score_transfer(t, b, c).set_aside, quantity)
+        t, b, c = good_transfer()
+        b.quantities, t.metric = ["correlation length"], "error in state correlations"
+        self.assertEqual(scoring.score_transfer(t, b, c).set_aside, "off_target")
+
     def test_a_transfer_that_only_tunes_the_current_method_loses_reward(self):
         for kind, expected in (("tune", 1.25 * (1 - config.TRANSFER_TUNE_PENALTY)), ("augment", 1.25), ("replace", 1.25), ("unknown", 1.25)):
             t, b, c = good_transfer()
