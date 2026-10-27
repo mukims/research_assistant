@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from research_assistant.agents.agent8_verifier import assemble_evidence
+from research_assistant.judgement.evidence import assemble_evidence
 from research_assistant.config import (
     JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_NEIGHBOUR_WINDOW,

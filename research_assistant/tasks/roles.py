@@ -155,16 +155,95 @@ def get_all_roles() -> List[RoleSpec]:
     return list(ROLE_SPECS.values())
 
 
+def format_context_pack_section(
+    task: Task,
+    plan_path: Optional[str] = None,
+) -> str:
+    """
+    Renders the grounded `TaskContextPack` (seed passages, dereferenced cited protocols,
+    technique cards, unresolved citations) and live database query instructions.
+    """
+    pack = getattr(task, "context_pack", None)
+    lines: List[str] = []
+
+    if pack is not None and not pack.is_empty():
+        lines.append("## Grounded Reference Database Context Pack")
+
+        if pack.seed_passages:
+            lines.append("### Target Paper Grounded Passages")
+            for idx, p in enumerate(pack.seed_passages[:4], 1):
+                doc = p.get("document") or "target_paper"
+                sec = p.get("section") or "text"
+                page = p.get("page", "?")
+                txt = (p.get("text") or "").strip()
+                if txt:
+                    lines.append(f"- **[Passage {idx} | {doc} | p.{page} | {sec}]**: {txt}")
+
+        if pack.cited_protocols:
+            lines.append("\n### Dereferenced Cited Protocols & External Baselines")
+            for idx, c in enumerate(pack.cited_protocols[:4], 1):
+                cite_marker = c.get("cite_text") or f"Ref #{idx}"
+                role = c.get("role") or "method"
+                c_title = c.get("cited_title") or c.get("cited_doc_key") or "Cited Reference"
+                c_doc = c.get("cited_doc_key") or ""
+                page = c.get("page", "?")
+                sec = c.get("section") or "text"
+                citing_sent = (c.get("citing_sentence") or "").strip()
+                txt = (c.get("text") or "").strip()
+                lines.append(
+                    f"- **[{cite_marker} ({role}) -> {c_title} ({c_doc}, p.{page}, {sec})]**:"
+                )
+                if citing_sent:
+                    lines.append(f"  - _Citing Context_: \"{citing_sent}\"")
+                if txt:
+                    lines.append(f"  - _Protocol Detail_: {txt}")
+
+        if pack.technique_cards:
+            lines.append("\n### Verified Technique Cards from Corpus")
+            for tc in pack.technique_cards[:3]:
+                t_name = tc.get("name") or "Technique"
+                t_doc = tc.get("document") or ""
+                t_prob = tc.get("problem_solved") or ""
+                t_in = tc.get("inputs") or ""
+                t_out = tc.get("outputs") or ""
+                lines.append(
+                    f"- **{t_name}** (`{t_doc}`): {t_prob} | Inputs: {t_in} | Outputs: {t_out}"
+                )
+
+        if pack.unresolved_citations:
+            lines.append("\n### Unresolved External Citations (Not in Local Corpus)")
+            for u in pack.unresolved_citations[:4]:
+                u_cite = u.get("cite_text") or "?"
+                u_title = u.get("title") or "External Reference"
+                u_role = u.get("role") or "method"
+                lines.append(f"- `[{u_cite}]` ({u_role}): {u_title}")
+
+    plan_arg = plan_path or "plan.json"
+    lines.append("\n## Live Reference Database Query Access")
+    lines.append(
+        "If you need additional equations, hyperparameters, or cited paper protocols from the "
+        "paper's reference subgraph during execution, query the database directly via CLI:"
+    )
+    lines.append(
+        f"`python orchestrate_tasks.py query {plan_arg} --task-id {task.task_id} "
+        f"--query \"<your specific methodological or equation question>\" --scope subgraph`"
+    )
+
+    return "\n".join(lines).strip() + "\n\n"
+
+
 def format_subagent_prompt(
     task: Task,
     role_spec: Optional[RoleSpec] = None,
     workspace_dir: str = ".",
     context_notes: Optional[str] = None,
     upstream_artifacts: Optional[Dict[str, Any]] = None,
+    plan_path: Optional[str] = None,
 ) -> str:
     """
     Constructs an execution prompt for a subagent assigned to a specific task,
-    embedding formal artifact contracts, schemas, and executable test harness instructions.
+    embedding formal artifact contracts, schemas, grounded database context packs,
+    and executable test harness instructions.
     """
     from research_assistant.tasks.harness import generate_task_test_script
 
@@ -173,6 +252,7 @@ def format_subagent_prompt(
     outputs_str = ", ".join(task.outputs) if task.outputs else "Standard execution artifacts"
     criteria_str = "\n".join(f"- {c}" for c in task.acceptance_criteria) if task.acceptance_criteria else "- Task finishes with returncode 0"
     paper_ctx = "\n".join(f"> {p}" for p in task.paper_context_excerpts) if task.paper_context_excerpts else "N/A"
+    context_pack_section = format_context_pack_section(task, plan_path=plan_path)
 
     # 1. Format formal artifact contracts & schemas
     contracts_section = ""
@@ -233,7 +313,7 @@ def format_subagent_prompt(
 ## Context Excerpts from Paper
 {paper_ctx}
 
-## Prerequisites & Input Artifacts
+{context_pack_section}## Prerequisites & Input Artifacts
 {inputs_str}
 
 {upstream_section}## Required Deliverables
@@ -244,9 +324,10 @@ def format_subagent_prompt(
 
 {harness_section}{notes_section}## Execution Instructions
 1. Inspect the workspace and confirm all input prerequisites exist.
-2. Produce all required deliverables strictly conforming to the schemas in Formal Artifact Contracts.
-3. Verify that your implementation satisfies every acceptance criterion above.
-4. Run the Automated Acceptance Test Harness before marking completion; exit code must be 0.
+2. Review and maintain `rationale.md` in the workspace documenting your Problem Knowledge, Scientific Insight, and Implementation Strategy (AUTOMAT idea.md protocol).
+3. Produce all required deliverables strictly conforming to the schemas in Formal Artifact Contracts and complexity bounds.
+4. Verify that your implementation satisfies every acceptance criterion above.
+5. Run the Automated Acceptance Test Harness before marking completion; exit code must be 0.
 """
 
 

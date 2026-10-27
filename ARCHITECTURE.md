@@ -899,3 +899,76 @@ The interactive user interface is structured into five distinct, specialized wor
    - Features query condensation (resolving pronouns and implicit references into standalone queries), multi-lens perspective selectors (Methodology, Contradictions, Hypotheses, Gaps, Explore), and persistent evidence scratchpad.
 5. **📖 Tab 5: How to Use (`tab_help`)**:
    - Comprehensive interactive documentation (`HOW_TO_USE.md`) rendering workflows, troubleshooting guides, and system architecture directly within the interface.
+
+---
+
+## 13. Scientific Paper-to-Agent Task Decomposition & Replication Architecture (Pipeline 2)
+
+### 13.1 Philosophy & Design Rationale
+Scientific replication cannot rely on monolithic, unconstrained LLM prompts. A single prompt asking a model to "reproduce this paper" inevitably produces generic scripts, hallucinations, or unexecutable snippets.
+
+Pipeline 2 (`research_assistant/tasks/`) decomposes scientific manuscripts into structured, dependency-ordered **Directed Acyclic Graphs (DAGs)** where:
+1. **Every Task Has a Strict Role**: Mapped to specialized agent personas (`devops_agent`, `data_engineer`, `model_architect`, `experiment_runner`, `evaluation_agent`, `audit_agent`).
+2. **Every Deliverable Has a Contract**: Formally defined by `ArtifactContract` schemas (tensor shapes, dtypes, tabular columns, metrics JSON keys).
+3. **Execution is Scheduled in Parallel Waves**: Independent prerequisites run concurrently, while dependent tasks block until inputs exist and pass checksum validation.
+4. **Hardware CPU Limits are Enforced**: Single-threaded execution (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`) prevents CPU core oversubscription and thrashing.
+
+### 13.2 The 6 Mandatory Scientific Replication Phases
+To eliminate generic or truncated workflows, `MacroCritic` enforces that every scientific replication DAG spans the six canonical phases:
+1. **Environment Setup (`environment_setup`)**: Python version, virtualenv, package pinning (`requirements.txt`, lockfiles), CUDA checks, hardware thread limits.
+2. **Data Acquisition & Preprocessing (`data_preprocessing`, `data_acquisition`)**: Downloading datasets, train/val/test splits, normalization, or generating physical configurations (e.g. stealthy hyperuniform disorder via Fourier spectral cutoffs).
+3. **Model Implementation (`model_implementation`)**: Architecture synthesis, loss formulations, Hamiltonian matrices, variational states, or differential operators.
+4. **Sanity Smoke-Test (`sanity_smoke_test`)**: Mini-batch forward/backward pass, tensor dimension assertions, gradient check, and memory verification.
+5. **Training or Simulation (`training_or_simulation`, `ablation_study`)**: Full training loop or Monte Carlo / tight-binding simulation with checkpointing.
+6. **Metric Evaluation & Audit (`metric_evaluation`, `verification_audit`)**: Test evaluation, replication metric tables, claim verification, and compilation of the formal replication scorecard.
+
+### 13.3 Two-Level Hierarchical Critic & Quantitative Rubric Scorecards
+Rather than relying on vague qualitative assessments, the workflow is scored against a quantitative rubric (0–100) by two complementary critics:
+* **MacroCritic (Global Topology & Structure)**:
+  - Cycle detection using depth-first search (DFS).
+  - Identification of dangling or self-referential dependencies.
+  - Phase completeness check against the 6 mandatory scientific phases.
+  - Wave serialization warnings if independent tasks are unnecessarily sequential.
+  - Deliverable collision prevention: flags `macro_duplicate_output_*` as `BLOCKING` if two tasks claim the same file path.
+  - Workflow fragmentation warning: flags `macro_graph_complexity_bloat` as `WARNING` if the graph exceeds 12 tasks.
+* **MicroCritic (Task-Level Contracts & Operational Rigor)**:
+  - Instruction specificity: flags vague descriptions (<60 characters) and requires explicit mathematical algorithm formulation (e.g. reciprocal wavevectors and spectral cutoffs for stealthy hyperuniform disorder).
+  - Deliverable completeness: requires concrete file extensions (`.pt`, `.h5`, `.csv`, `.json`).
+  - Formal `ArtifactContract` verification: validates tensor shapes, numerical dtypes, tabular columns, and JSON required keys.
+  - Intra-task duplicate prevention: flags `micro_contract_duplicate_out_*` as `BLOCKING`.
+  - Deliverable bloat cap: flags `micro_contract_bloat_*` as `WARNING` if a task declares >8 deliverables.
+  - Tensor dimensionality bloat cap: flags `micro_tensor_dim_bloat_*` as `WARNING` if tensor dimensions exceed 50,000 without complexity caps.
+  - Hardware thread bounds: flags `cpu_oversubscription` as `BLOCKING` if compute tasks omit single-threaded CPU bounds.
+
+### 13.4 AUTOMAT Autoresearch Principles (Cobelli & Sanvito 2026)
+Incorporating key takeaways from the AUTOMAT autoresearch framework:
+1. **Hypothesis Logging Protocol (`idea.md` / `rationale.md`)**:
+   Before code execution, `runner.py` materializes an inspectable scientific rationale document `<workspace>/rationales/<task_id>_rationale.md` and updates `<workspace>/rationale.md` with three structured sections:
+   - *1. Problem Knowledge*: Task objective, upstream prerequisites, and paper grounding anchors.
+   - *2. Scientific Insight*: Theoretical formulation, physical invariants, reality conditions, and symmetries.
+   - *3. Implementation Strategy & Complexity Bounds*: Planned deliverables, formal artifact contracts, thread caps, and acceptance criteria.
+2. **Complexity and Redundancy Control**:
+   Guards against runaway feature proliferation by strictly enforcing single ownership of deliverables, capping task deliverables at 8, and warning against unpruned tensor dimensions (>50,000).
+
+### 13.5 Dedicated Paper Workspaces & Automatic Markdown Bundle Materialization
+Paper workflows are completely decoupled from persistent databases (`DATA_DIR` and `VECTORDB_PATH`).
+Managed by `research_assistant/tasks/workspace.py`:
+- Every uploaded or deconstructed paper receives a dedicated root directory: `workspace_runs/<paper_id>/`.
+- The system automatically generates and saves the full Markdown suite:
+  - `README.md`: Master directory manifest, metadata, waves summary, and links.
+  - `plan.md`: Human-readable and agent-executable replication DAG plan.
+  - `dag.md`: Interactive Mermaid flowchart.
+  - `scorecard.md`: Two-level critic rubric scorecard and identified flaws.
+  - `paper_summary.md`: Extracted abstract, theoretical methodology sections, equations, and tables.
+  - `rationale.md`: Master hypothesis and execution rationale.
+  - `rationales/<task_id>_rationale.md`: Individual task rationales for each subagent.
+  - `plan.json` & `antigravity_specs.json`: Machine-readable specifications for agent dispatch.
+
+### 13.6 Two-Cycle Reflexion Runner & Automated Test Harnesses
+During autonomous execution (`ExecutionMode.AUTONOMOUS`):
+1. **Subprocess Isolation**: Each task executes in an isolated Python subprocess, protecting the orchestrator from memory leaks, segfaults, or CUDA crashes.
+2. **Test Harness Generation (`harness.py`)**: A deterministic test harness (`harness_<task_id>.py`) verifies exit code 0, artifact presence, minimum file size, and tensor/tabular schemas.
+3. **Structured Failure Diagnostics**: If a test harness fails, `parse_execution_error` parses the exit code, error classification (`AssertionError`, `ImportError`, `TimeoutExpired`), failing assertion line, missing files, and stack trace.
+4. **Reflective Refinement**: The agent receives structured diagnostics and the previous code response, entering a second reflection cycle to refine the deliverables before re-testing.
+5. **Execution Scorecard**: Upon completion, `runner.py` compiles `execution_scorecard.md` recording task durations, SHA-256 artifact hashes, and certification status (`CERTIFIED_REPLICABLE` at 99%+, `PARTIALLY_REPLICATED` at 70%+).
+

@@ -166,6 +166,14 @@ def render_planner_tab():
                     f.write(uploaded.getvalue())
                 paper_title = None
 
+                # Automatically make root dir for uploaded paper and drop initial markdown files
+                try:
+                    from research_assistant.tasks.workspace import materialize_paper_upload
+                    paper_ws = materialize_paper_upload(uploaded.getvalue(), filename=safe_name)
+                    st.caption(f"📁 Staged paper workspace: `{paper_ws}`")
+                except Exception as exc:
+                    pass
+
     with col_opts:
         st.markdown("##### Configuration")
         heuristic_mode = st.checkbox(
@@ -205,7 +213,10 @@ def render_planner_tab():
                 )
                 st.session_state["planner_active_graph"] = graph
                 st.session_state["planner_last_report"] = None
+                from research_assistant.tasks.workspace import get_paper_workspace_dir
+                ws_dir = get_paper_workspace_dir(graph.paper_id)
                 st.success(f"Successfully synthesized DAG for '{graph.paper_title}' with {len(graph.tasks)} tasks!")
+                st.info(f"📁 Created paper root directory at `{ws_dir}` with all Markdown files (`plan.md`, `dag.md`, `scorecard.md`, `paper_summary.md`, `rationale.md`, `rationales/*.md`, `README.md`).")
             except Exception as e:
                 st.error(f"Failed to deconstruct paper: {e}")
 
@@ -297,7 +308,8 @@ def render_planner_tab():
 
         with col_run_btn:
             if st.button("🚀 Execute Task Graph Now", type="primary", use_container_width=True, key="planner_btn_exec"):
-                workspace = os.path.join(config.DATA_DIR, "workspace_runs", graph.paper_id)
+                from research_assistant.tasks.workspace import get_paper_workspace_dir
+                workspace = get_paper_workspace_dir(graph.paper_id)
                 mode = ExecutionMode.AUTONOMOUS if exec_mode_choice == "autonomous" else ExecutionMode.SIMULATION
 
                 prog_bar = st.progress(0.0, text="Initializing wave dispatch...")

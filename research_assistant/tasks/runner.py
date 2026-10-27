@@ -204,6 +204,52 @@ def _compute_sha256(filepath: str) -> str:
     return h.hexdigest()[:16]
 
 
+def generate_task_rationale(task: Task, workspace_dir: str = ".") -> str:
+    """
+    Constructs an inspectable hypothesis and scientific rationale document for a task,
+    adapting the AUTOMAT (Cobelli & Sanvito, 2026) idea.md protocol:
+    1. Problem Knowledge (objective, upstream context, inputs)
+    2. Scientific Insight (physical/mathematical formulation, constraints)
+    3. Implementation Strategy & Complexity Bounds (deliverables, contracts, thread safety, acceptance bounds)
+    """
+    inputs_str = ", ".join(f"`{i}`" for i in task.inputs) if task.inputs else "None (initial environment)"
+    outputs_str = ", ".join(f"`{o}`" for o in task.outputs) if task.outputs else "Standard execution artifacts"
+    contracts_str = "\n".join(
+        f"- `{c.path}`: type=`{c.artifact_type.value if hasattr(c.artifact_type, 'value') else c.artifact_type}`, shape=`{c.shape}`, dtype=`{c.dtype}`"
+        for c in (task.artifact_contracts or [])
+    ) or "- Standard artifacts"
+    excerpts_str = "\n".join(f"> {p}" for p in (task.paper_context_excerpts or [])) or "> No verbatim excerpts attached."
+    criteria_str = "\n".join(f"- {c}" for c in (task.acceptance_criteria or [])) or "- Exit code 0"
+
+    role_val = task.assigned_role.value if hasattr(task.assigned_role, "value") else str(task.assigned_role)
+    cat_val = task.category.value if hasattr(task.category, "value") else str(task.category)
+
+    return f"""# Scientific Rationale & Execution Plan: {task.title}
+**Task ID**: `{task.task_id}`  
+**Assigned Role**: `{role_val}`  
+**Category**: `{cat_val}`  
+**Workspace**: `{workspace_dir}`
+
+## 1. Problem Knowledge
+- **Task Objective**: {task.description}
+- **Prerequisites & Upstream Dependencies**: {inputs_str}
+- **Paper Grounding Anchors**:
+{excerpts_str}
+
+## 2. Scientific Insight
+- **Mathematical & Theoretical Formulation**: Implement rigorous physical formulations matching the paper specifications.
+- **Physical Invariants & Symmetries**: Preserve reality conditions, conservation laws, and dimensional consistency across operations.
+
+## 3. Implementation Strategy & Complexity Bounds
+- **Planned Output Deliverables**: {outputs_str}
+- **Formal Artifact Contracts**:
+{contracts_str}
+- **Resource & Thread Limits**: Single-threaded CPU execution enforced (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`).
+- **Deterministic Acceptance Criteria**:
+{criteria_str}
+"""
+
+
 class TaskRunner:
     """
     Coordinates topological wave execution of TaskGraphs with Two-Cycle Reflexion.
@@ -329,6 +375,18 @@ class TaskRunner:
         task.status = TaskStatus.RUNNING
         if self.on_task_update:
             self.on_task_update(task, TaskStatus.RUNNING)
+
+        # Materialize persistent scientific rationale (AUTOMAT idea.md protocol)
+        try:
+            rationales_dir = os.path.join(self.workspace_dir, "rationales")
+            os.makedirs(rationales_dir, exist_ok=True)
+            rationale_text = generate_task_rationale(task, self.workspace_dir)
+            with open(os.path.join(rationales_dir, f"{task.task_id}_rationale.md"), "w", encoding="utf-8") as f:
+                f.write(rationale_text)
+            with open(os.path.join(self.workspace_dir, "rationale.md"), "w", encoding="utf-8") as f:
+                f.write(rationale_text)
+        except Exception as exc:
+            logger.debug("Could not write task rationale: %s", exc)
 
         t_start = time.time()
 

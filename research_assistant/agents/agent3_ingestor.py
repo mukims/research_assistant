@@ -43,6 +43,35 @@ def _pdfs_from_manifest(downloaded: dict) -> dict[str, str]:
     return pdfs
 
 
+def resolve_labels_for_pdfs(
+    pdf_paths: list[str],
+    manifest_path: str = DOWNLOADED_JSON_PATH,
+) -> dict[str, str]:
+    """Turn a list of PDF paths into a {pdf_path: citation_label} mapping.
+
+    Prefers the parsed title or reference from the download manifest,
+    matching on exact path or basename. Falls back to filename stem.
+    """
+    downloaded = {}
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                downloaded = json.load(fh)
+        except Exception as exc:
+            logger.warning("Could not read manifest %s: %s", manifest_path, exc)
+
+    by_path = _pdfs_from_manifest(downloaded) if downloaded else {}
+    by_base = {os.path.basename(p): label for p, label in by_path.items()}
+    return {
+        path: (
+            by_path.get(path)
+            or by_base.get(os.path.basename(path))
+            or os.path.splitext(os.path.basename(path))[0]
+        )
+        for path in pdf_paths
+    }
+
+
 def run_ingestor(workers: int = 1, force: bool = False):
     """Ingest every PDF Agent 2 successfully downloaded.
 

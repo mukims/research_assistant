@@ -56,18 +56,47 @@ The left sidebar provides persistent visibility and control over background oper
 
 ### Tab 0 — Agent task planner (Scientific Paper-to-Agent Task Decomposition)
 
-Tab 0 deconstructs scientific papers into structured Directed Acyclic Graphs (DAGs) of executable tasks for autonomous AI agents.
+Tab 0 deconstructs complex scientific papers into structured Directed Acyclic Graphs (DAGs) of executable tasks assigned to specialized AI subagents for autonomous replication.
 
-#### 1. Input Options
+#### 1. Input Options & Automatic Workspace Creation
 * **Select Ingested Paper**: Pick an existing paper from your local library or TEI extraction directory.
 * **Upload New Paper**: Upload a new `.pdf`, GROBID `.tei.xml`, or plain text `.txt` methodology notes.
+* **📁 Instant Workspace Materialization**: As soon as a paper is uploaded or deconstructed, the system automatically creates a dedicated root directory at `workspace_runs/<paper_id>/` (anchored safely outside persistent databases). It copies the manuscript and immediately drops:
+  - `README.md`: Workspace overview and execution waves manifest.
+  - `paper_summary.md`: Extracted abstract, theoretical methodology sections, and tables.
 
 #### 2. Configuration & Synthesis
-* **⚡ Fast Heuristic Mode**: Instantly generates an authentic 5-task replication graph without querying an external LLM (ideal for offline use and fast CI).
-* **Execution Mode**: Choose between **🧪 Dry-Run Simulation** (checks prerequisites and produces mock deliverables) or **🤖 Autonomous Agent Execution** (calls AI agents to generate code and run replication procedures).
+* **⚡ Fast Heuristic Mode**: Instantly generates an authentic replication graph covering all scientific phases without querying an external LLM (ideal for offline use and fast CI).
+* **Execution Mode**: Choose between:
+  - **🧪 Dry-Run Simulation**: Validates graph acyclicity, generates task rationales, checks prerequisite inputs, and writes deterministic dummy deliverables.
+  - **🤖 Autonomous Agent Execution**: Uses specialized coding subagents to synthesize code, executes tasks against generated test harnesses in a subprocess, and applies Two-Cycle Reflexion with structured failure diagnostics if an assertion fails.
 * Click **⚡ Deconstruct into Task Graph**.
 
-#### 3. Deliverables & Views
+#### 3. Complete Markdown Bundle Materialization
+Upon deconstruction, the paper's root directory (`workspace_runs/<paper_id>/`) is automatically populated with a full suite of Markdown files:
+- [`plan.md`](#): The complete replication DAG specification with wave sequencing, inputs, deliverables, and acceptance criteria.
+- [`dag.md`](#): Interactive Mermaid flowchart dependency diagram.
+- [`scorecard.md`](#): Quantitative rubric scorecard from the Two-Level Critic Engine.
+- [`paper_summary.md`](#): Formatted abstract, methodology, equations, and tables extracted from the paper.
+- [`rationale.md`](#): Master scientific hypothesis, physical invariants, and complexity bounds.
+- [`rationales/<task_id>_rationale.md`](#): Individual task rationales documenting *Problem Knowledge*, *Scientific Insight*, and *Implementation Strategy & Complexity Bounds*.
+- [`plan.json`](#) & [`antigravity_specs.json`](#): Machine-readable execution specifications.
+
+#### 4. The Two-Level Critic Engine & Quantitative Rubric
+Before any task executes, the graph is scrutinized by a Two-Level Critic:
+* **MacroCritic**:
+  - Checks for DAG cycles, self-loops, and missing upstream dependencies.
+  - Enforces mandatory coverage across the **6 Scientific Replication Phases**: `environment_setup`, `data_preprocessing`, `model_implementation`, `sanity_smoke_test`, `training_or_simulation`, and `metric_evaluation` / `verification_audit`.
+  - Flags **cross-task deliverable collisions** (`macro_duplicate_output_*` as `BLOCKING`) to prevent output ownership conflicts.
+  - Warns against over-fragmented graph bloat (>12 tasks).
+* **MicroCritic**:
+  - Enforces operational instruction specificity (mathematical formulations, cutoff wavevectors).
+  - Enforces formal `ArtifactContract` schemas (tensor shapes, dtypes, tabular columns, JSON keys).
+  - Enforces single-threaded CPU safety (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`).
+  - Flags intra-task duplicate outputs (`BLOCKING`), deliverable bloat (>8 deliverables), and unpruned tensor dimensionality bloat (>50,000 dimensions).
+* **Rubric Scorecard (0–100)**: Computes quantitative scores for topology, contracts, and testability.
+
+#### 5. Deliverables & Views
 * **📊 Interactive DAG Flowchart**: Dynamic pan/zoom Mermaid diagram color-coded by task category and agent role.
 * **📑 Execution Schedule & Tasks**: Tasks grouped into parallel execution waves with expandable task cards showing objectives, required input artifacts, deliverables, acceptance criteria checkboxes, and context excerpts from the paper.
 * **🤖 Antigravity Agent Specs**: Formatted subagent invocation specs ready for multi-agent delegation.

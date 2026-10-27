@@ -257,6 +257,43 @@ class MacroCritic:
             except Exception as e:
                 logger.debug("Wave calculation in MacroCritic encountered: %s", e)
 
+        # 4. Cross-task output deliverable collision and redundancy check (AUTOMAT complexity control)
+        claimed_outputs: Dict[str, List[str]] = {}
+        for t_id, task in graph.tasks.items():
+            for out in task.outputs:
+                clean_out = out.strip().lower()
+                if clean_out:
+                    claimed_outputs.setdefault(clean_out, []).append(t_id)
+
+        for out, claimants in claimed_outputs.items():
+            if len(claimants) > 1:
+                clean_flaw_id = re.sub(r"[^a-zA-Z0-9_]", "_", out)
+                flaws.append(
+                    CritiqueFlaw(
+                        flaw_id=f"macro_duplicate_output_{clean_flaw_id}",
+                        task_id=claimants[0],
+                        critic_level="macro",
+                        severity=FlawSeverity.BLOCKING.value,
+                        category="contract",
+                        description=f"Multiple tasks ({', '.join(claimants)}) claim the same output deliverable '{out}'. Deliverables must have unique, non-overlapping ownership.",
+                        suggestion=f"Assign unique output file paths to separate deliverables between {', '.join(claimants)}.",
+                    )
+                )
+
+        # 5. Graph complexity bloat check (AUTOMAT complexity control)
+        if len(graph.tasks) > 12:
+            flaws.append(
+                CritiqueFlaw(
+                    flaw_id="macro_graph_complexity_bloat",
+                    task_id=None,
+                    critic_level="macro",
+                    severity=FlawSeverity.WARNING.value,
+                    category="topology",
+                    description=f"Task graph contains {len(graph.tasks)} tasks (>12 recommended limit), indicating potential workflow over-fragmentation.",
+                    suggestion="Consolidate related sub-steps into focused phase tasks to maintain a compact, maintainable replication graph.",
+                )
+            )
+
         return flaws
 
     def compute_topology_score(self, graph: TaskGraph, flaws: List[CritiqueFlaw]) -> float:
@@ -317,6 +354,52 @@ class MicroCritic:
                     suggestion="Provide a concrete, imperative title representing the task's scientific objective.",
                 )
             )
+        else:
+            GENERIC_BOILERPLATE_TITLES = {
+                "implement core model architecture & algorithms",
+                "preprocess data & generate canonical splits",
+                "execute training & simulation protocol",
+                "compute benchmark metrics & evaluate results",
+                "acquire raw scientific datasets & benchmarks",
+                "acquire and preprocess evaluation datasets",
+                "execute baseline and proposed experiments",
+                "compute metrics and validate claims",
+                "replication verification & target audit",
+            }
+            is_template_title = (
+                title.lower() in GENERIC_BOILERPLATE_TITLES
+                or bool(re.match(
+                    r"(?i)^(?:preprocess data & splits|implement architecture & solvers|sanity smoke-test.*forward pass|execute.*training & simulation protocol|compute.*evaluation metrics|audit replication scorecard)\s+for\s+.+$",
+                    title,
+                ))
+            )
+            if is_template_title:
+                flaws.append(
+                    CritiqueFlaw(
+                        flaw_id=f"micro_title_template_{t_id}",
+                        task_id=t_id,
+                        critic_level="micro",
+                        severity=FlawSeverity.WARNING.value,
+                        category="generic_title",
+                        description=f"Task '{t_id}' has a generic template title ('{task.title}').",
+                        suggestion="Specialize the title to name the paper's specific model, equation, algorithm, or dataset.",
+                    )
+                )
+
+        # 0b. Excerpt Paragraph Dump Check
+        for e_idx, exc in enumerate(getattr(task, "paper_context_excerpts", []) or [], 1):
+            if isinstance(exc, str) and len(exc) > 400:
+                flaws.append(
+                    CritiqueFlaw(
+                        flaw_id=f"micro_excerpt_dump_{t_id}_{e_idx}",
+                        task_id=t_id,
+                        critic_level="micro",
+                        severity=FlawSeverity.WARNING.value,
+                        category="context_excerpt",
+                        description=f"Task '{t_id}' contains an unedited paragraph dump ({len(exc)} chars) in paper_context_excerpts.",
+                        suggestion="Condense excerpt to a concise 1-2 sentence verbatim anchor or formula (<250 chars).",
+                    )
+                )
 
         # 1. Instruction Specificity
         desc = (task.description or "").strip()
@@ -344,6 +427,21 @@ class MicroCritic:
                     suggestion="Elaborate on operational parameters, mathematical formulations, or tools required.",
                 )
             )
+        elif task.category in (TaskCategory.DATA_PREPROCESSING, TaskCategory.DATA_ACQUISITION):
+            context_str = desc.lower() + " " + title.lower()
+            if any(k in context_str for k in ("hyperuniform", "stealthy")):
+                if not any(k in desc.lower() for k in ("fourier", "s(k)", "cutoff", "wavevector", "heaviside", "w_k", "w k")):
+                    flaws.append(
+                        CritiqueFlaw(
+                            flaw_id=f"micro_data_algorithm_missing_{t_id}",
+                            task_id=t_id,
+                            critic_level="micro",
+                            severity=FlawSeverity.WARNING.value,
+                            category="vague_instruction",
+                            description=f"Task '{t_id}' for stealthy hyperuniform disorder does not reveal how to calculate the disorder configurations from first principles.",
+                            suggestion="Detail the exact mathematical generation algorithm: reciprocal wavevectors k_n=2*pi*n/N, spectral cutoff K=2*pi*chi with S(k)=Theta(|k|-K), complex Gaussian Fourier amplitudes w_k=W*sqrt(S(k))*eta_k, Hermitian symmetry w_{-k}=w_k*, and inverse FFT to real-space on-site potential w_j.",
+                        )
+                    )
 
         # 2. Output Deliverables & Artifact Contracts
         contracts = getattr(task, "artifact_contracts", []) or []
@@ -361,6 +459,34 @@ class MicroCritic:
                 )
             )
         else:
+            # Intra-task duplicate deliverables & complexity bloat check (AUTOMAT complexity control)
+            clean_outs = [str(o).strip() for o in task.outputs if o and str(o).strip()]
+            if len(clean_outs) != len(set(clean_outs)):
+                flaws.append(
+                    CritiqueFlaw(
+                        flaw_id=f"micro_contract_duplicate_out_{t_id}",
+                        task_id=t_id,
+                        critic_level="micro",
+                        severity=FlawSeverity.BLOCKING.value,
+                        category="contract",
+                        description=f"Task '{t_id}' lists duplicate output paths: {clean_outs}.",
+                        suggestion="Remove duplicate output paths so every deliverable has a unique file destination.",
+                    )
+                )
+
+            if len(clean_outs) > 8:
+                flaws.append(
+                    CritiqueFlaw(
+                        flaw_id=f"micro_contract_bloat_{t_id}",
+                        task_id=t_id,
+                        critic_level="micro",
+                        severity=FlawSeverity.WARNING.value,
+                        category="contract",
+                        description=f"Task '{t_id}' declares {len(clean_outs)} outputs (> 8), risking deliverable complexity bloat.",
+                        suggestion="Decompose task into smaller modular subtasks or consolidate deliverables.",
+                    )
+                )
+
             # Check for file extension completeness on raw outputs
             for out in task.outputs:
                 if out and "." not in out.split("/")[-1]:
@@ -433,6 +559,18 @@ class MicroCritic:
                                 category="contract",
                                 description=f"Tensor contract '{c_path}' in task '{t_id}' lacks explicit shape specification.",
                                 suggestion=f"Specify expected tensor dimensions in contract.shape (e.g. ['batch_size', 'channels', 224, 224]).",
+                            )
+                        )
+                    elif any(isinstance(d, int) and d > 50000 for d in c.shape):
+                        flaws.append(
+                            CritiqueFlaw(
+                                flaw_id=f"micro_tensor_dim_bloat_{t_id}_{idx}",
+                                task_id=t_id,
+                                critic_level="micro",
+                                severity=FlawSeverity.WARNING.value,
+                                category="contract",
+                                description=f"Tensor contract '{c_path}' in task '{t_id}' specifies dimension > 50,000 in shape {c.shape}, risking unpruned feature bloat.",
+                                suggestion="Introduce dimensionality reduction, feature selection, or a complexity cap to prevent descriptor bloat.",
                             )
                         )
                     if c.dtype is None:

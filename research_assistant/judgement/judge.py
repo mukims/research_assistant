@@ -19,12 +19,14 @@ from pathlib import Path
 from research_assistant.config import (
     GEMINI_API_KEY,
     LLM_BACKEND,
+    LLM_MODEL,
     JUDGEMENT_MODEL,
     JUDGEMENT_OLLAMA_OPTIONS,
     JUDGEMENT_TEMPERATURE,
 )
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.retry import retry
 
 logger = get_logger("judgement")
 
@@ -406,3 +408,20 @@ def judge(
     if not result.content:
         raise JudgementParseError("LLM returned an empty response.", raw="")
     return enforce_rubric(parse_judgement(result.content), citation_evidence, claim=claim)
+
+
+_JUDGE_ATTEMPTS = 2
+
+
+@retry(max_retries=_JUDGE_ATTEMPTS, backoff=1.0)
+def _judge_once(claim: str, evidence: str, context: str | None = None, model: str | None = None):
+    return judge(claim, evidence, context=context, model=model)
+
+
+def _judgement_model() -> str:
+    """The model that actually produces the verdicts."""
+    return JUDGEMENT_MODEL or LLM_MODEL
+
+
+judge_once = _judge_once
+

@@ -157,6 +157,16 @@ def render_markdown_plan(graph: TaskGraph) -> str:
                 lines.append(f"> \"{excerpt.strip()}\"")
             lines.append("")
 
+        if getattr(task, "context_pack", None) and not task.context_pack.is_empty():
+            if task.context_pack.cited_protocols:
+                lines.append("#### Dereferenced Cited Protocols")
+                for cp in task.context_pack.cited_protocols[:3]:
+                    c_cite = cp.get("cite_text") or "Ref"
+                    c_title = cp.get("cited_title") or cp.get("cited_doc_key") or ""
+                    c_txt = (cp.get("text") or "").strip()
+                    lines.append(f"- **[{c_cite}] {c_title}**: {c_txt[:400]}")
+                lines.append("")
+
         lines.append("---")
         lines.append("")
 
@@ -168,7 +178,10 @@ def export_antigravity_specs(graph: TaskGraph) -> List[Dict[str, Any]]:
     Transforms the TaskGraph into a list of Subagent invocation specifications
     compatible with the Antigravity / AGY subagent framework.
     """
+    from research_assistant.tasks.roles import format_context_pack_section
+
     specs = []
+    subgraph_keys = graph.subgraph_doc_keys()
     for task in graph.tasks.values():
         role_label = task.assigned_role.value.replace("_", " ").title()
         prompt_parts = [
@@ -196,6 +209,8 @@ def export_antigravity_specs(graph: TaskGraph) -> List[Dict[str, Any]]:
             for ex in task.paper_context_excerpts:
                 prompt_parts.append(f"> {ex}")
 
+        prompt_parts.append("\n" + format_context_pack_section(task).strip())
+
         specs.append({
             "TypeName": "self",
             "Role": role_label,
@@ -205,6 +220,7 @@ def export_antigravity_specs(graph: TaskGraph) -> List[Dict[str, Any]]:
                 "dependencies": task.dependencies,
                 "inputs": task.inputs,
                 "outputs": task.outputs,
+                "subgraph_doc_keys": subgraph_keys,
             },
         })
     return specs

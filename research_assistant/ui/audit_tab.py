@@ -63,6 +63,12 @@ def render_audit_tab():
             from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
 
             staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
+            for item in staged:
+                try:
+                    from research_assistant.tasks.workspace import materialize_paper_upload
+                    materialize_paper_upload(item["path"], filename=os.path.basename(item["path"]))
+                except Exception as exc:
+                    logger.debug("Could not materialize workspace for staged paper: %s", exc)
             if not staged:
                 st.error(
                     "No valid PDF documents found in the uploaded files. Check that files contain valid PDF headers (%PDF-).",

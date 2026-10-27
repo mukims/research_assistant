@@ -20,7 +20,7 @@ def _generate_suggestion(system_prompt, user_prompt):
     ])
 
 
-def suggest_citation(text, top_k=DEFAULT_TOP_K, search_resources=None):
+def suggest_citation(text, top_k=DEFAULT_TOP_K, search_resources=None, verify: bool = False):
     """Retrieve context for *text* and ask the LLM to cite it.
 
     Args:
@@ -29,10 +29,12 @@ def suggest_citation(text, top_k=DEFAULT_TOP_K, search_resources=None):
         search_resources: Optional (collection, bm25, texts, metadatas) tuple
                           from load_search_resources(), so a caller running
                           several queries loads the index once.
+        verify:           When True, runs the auditor judge gate to verify that
+                          retrieved evidence actually supports the citation.
 
     Returns:
         dict with ``suggestion`` (str), ``citations`` (list[str]), ``passages``
-        (the retrieved hybrid-search hits) and ``response`` (the ChatResult),
+        (the retrieved hybrid-search hits) and ``response`` (the ChatResult or CiteResult),
         or None when retrieval found nothing.
     """
     collection, bm25, texts, metadatas = search_resources or load_search_resources()
@@ -42,6 +44,25 @@ def suggest_citation(text, top_k=DEFAULT_TOP_K, search_resources=None):
     if not results:
         logger.info("No related passages found in the database.")
         return None
+
+    if verify:
+        from research_assistant.agents.agent5_batch_citer import cite_sentence
+
+        key_registry = {}
+        res = cite_sentence(
+            text,
+            (collection, bm25, texts, metadatas),
+            key_registry,
+            judge_gate=True,
+        )
+        return {
+            "suggestion": res.cited_text,
+            "citations": [c.get("citation") for c in res.candidates if c.get("citation")],
+            "passages": results,
+            "response": res,
+            "verified": res.cited,
+            "verdicts": res.verdicts,
+        }
 
     context = ""
     citations_pool = []
@@ -70,10 +91,11 @@ def main():
     parser = argparse.ArgumentParser(description="Agent 4 — Assistant (Research Assistant)")
     parser.add_argument("--text", type=str, required=True, help="Draft text you want to cite.")
     parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K, help="Number of retrieved components.")
+    parser.add_argument("--verify", action="store_true", help="Run auditor judge to verify citation.")
     args = parser.parse_args()
 
     try:
-        result = suggest_citation(args.text, top_k=args.top_k)
+        result = suggest_citation(args.text, top_k=args.top_k, verify=args.verify)
     except Exception as e:
         logger.error("Error generating suggestion: %s", e)
         return
@@ -86,10 +108,11 @@ def main():
         print(f" > {cit}")
 
     chat_result = result["response"]
-    print(
-        f"\n[Token Stats] Submitted: {chat_result.prompt_tokens} | "
-        f"Generated: {chat_result.completion_tokens}"
-    )
+    if hasattr(chat_result, "prompt_tokens") and hasattr(chat_result, "completion_tokens"):
+        print(
+            f"\n[Token Stats] Submitted: {chat_result.prompt_tokens} | "
+            f"Generated: {chat_result.completion_tokens}"
+        )
 
     print("\n=== AI ASSISTANT SUGGESTION ===")
     print(result["suggestion"])

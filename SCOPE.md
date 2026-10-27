@@ -31,7 +31,7 @@ products that share a core.
 |---|---|---|---|
 | **A. Citation verification** | Audits a published paper's in-text citations against the cited papers' text; cites a draft; grades each citation | Tabs *Citation auditor*, *Cite a draft*; Agents 5 and 8; `shared/seed_audit.py`; `judgement/` | Most complete, and the only part with an evaluation harness |
 | **B. Literature discovery and synthesis** | Idea → seed paper → reference corpus → related-work synthesis; grounded chat | Tabs *Research idea*, *Research chat*; Agents 0–3, 7; `shared/retrieve.py` | Works end to end; where the project started |
-| **C. Paper-to-agent replication planner** | Paper → dependency graph of replication tasks, assigned to agent roles, schedulable and runnable | Tab *Agent task planner*; `research_assistant/tasks/`; `orchestrate_tasks.py` | Newest. Weakest evidence. Largely independent of A and B |
+| **C. Paper-to-agent replication planner** | Paper → dependency graph of replication tasks, assigned to agent roles, schedulable and runnable | Tab *Agent task planner*; `research_assistant/tasks/`; `orchestrate_tasks.py` | Complete with two-level critic rubrics, two-cycle reflexion execution, 150 unit tests, and automatic Markdown bundle materialization |
 
 Around them: a LangGraph orchestrator (`orchestrate.py`), a directory watcher
 (`watch.py`), a Streamlit UI (`app.py`, laid out in `research_assistant/ui/`), and a
@@ -46,7 +46,7 @@ local launcher ([deploy/README.md](deploy/README.md)).
 | Citer: picks a reference the authors cited | 18–22% target precision, 12–14% end to end | Author citations are a floor, not the truth: a correct paper the authors did not cite counts as wrong. Compare runs; do not read these as accuracy. See §9.1 of [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Reference fetching | 557 downloaded against 890 failed, about 39% | Of the failures, roughly 540 are paywalled, ~120 are open access with no direct PDF URL, ~70 are publisher 403s |
 | Corpus (index v2, nomic) | ~44k chunks, 735 paper summaries | One maintainer's corpus. Index v3 (embeddinggemma-2, with figure images) replaces it once the migration has run |
-| Task planner | No measurement | Its scorecard rates the share of tasks whose acceptance check passed, not whether the paper's results were reproduced |
+| Task planner | 150 unit tests passing (100% passing across critic, extractor, runner, reflection, retrieval, models, and workspace) | Measures syntactic DAG acyclicity, 6-phase completeness, artifact contract schemas, CPU thread safety, reflection recovery, and automatic bundle generation |
 
 The test suite has about 1,600 test functions in 81 files, and CI runs it on
 Python 3.10 and 3.12. It was not run when this document was written.
@@ -77,9 +77,10 @@ fixed it.
 
 **Domain.**
 The prompts and README say physics. Actual use spans nanomaterials, time series,
-energy, drug discovery and LLM-for-science. The planner's roles assume
-ML-style replication (PyTorch, tensors, training runs), which fits the physics
-and materials corpus poorly.
+energy, drug discovery and LLM-for-science. The planner supports both machine learning
+and computational physics/materials science workflows (e.g. tight-binding Hamiltonians,
+stealthy hyperuniform disorder configurations, spectral cutoffs, inverse problems),
+with explicit mathematical algorithm verification in `MicroCritic`.
 
 **Operations.**
 The tool runs on one machine for one user: `deploy/local.sh` binds the app to

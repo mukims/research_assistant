@@ -159,6 +159,53 @@ class TestTaskUI(unittest.TestCase):
             render_planner_tab()
             self.assertTrue(mock_err.called)
 
+    def test_render_planner_tab_execute_button_workspace_safety(self):
+        import streamlit as st
+        from research_assistant import config
+        from research_assistant.tasks.models import AgentRole, Task, TaskCategory, TaskGraph
+        from research_assistant.tasks.ui import render_planner_tab
+
+        graph = TaskGraph(paper_id="2608_11188v1", paper_title="Sample Physics Paper")
+        t1 = Task(task_id="t1", title="Setup", category=TaskCategory.ENVIRONMENT_SETUP, assigned_role=AgentRole.DEVOPS_AGENT)
+        graph.add_task(t1)
+
+        st.session_state.clear()
+        st.session_state["planner_active_graph"] = graph
+
+        def mock_button(label, *args, **kwargs):
+            if kwargs.get("key") == "planner_btn_exec":
+                return True
+            return False
+
+        with patch("streamlit.button", side_effect=mock_button), \
+             patch("streamlit.rerun"), \
+             patch("research_assistant.tasks.ui.TaskRunner") as mock_runner_cls:
+            mock_runner = MagicMock()
+            mock_report = MagicMock()
+            mock_report.scorecard = {
+                "rating": "CERTIFIED_REPLICABLE",
+                "replication_rate": 1.0,
+                "total_tasks": 1,
+                "completed_tasks": 1,
+                "failed_tasks": 0,
+                "blocked_tasks": 0,
+            }
+            mock_runner.execute.return_value = mock_report
+            mock_runner_cls.return_value = mock_runner
+
+            render_planner_tab()
+
+            mock_runner_cls.assert_called_once()
+            called_ws = mock_runner_cls.call_args.kwargs.get("workspace_dir")
+            self.assertIsNotNone(called_ws)
+            abs_data = os.path.abspath(config.DATA_DIR)
+            abs_ws = os.path.abspath(called_ws)
+            self.assertFalse(
+                abs_ws == abs_data or abs_ws.startswith(abs_data + os.sep),
+                f"Workspace '{abs_ws}' must not be inside DATA_DIR '{abs_data}'",
+            )
+            self.assertIn("2608_11188v1", abs_ws)
+
 
 if __name__ == "__main__":
     unittest.main()
