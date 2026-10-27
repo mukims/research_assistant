@@ -448,7 +448,11 @@ def rebuild_bm25():
     chroma_client = open_store()
     collection = chroma_client.get_collection(name=COLLECTION_NAME)
 
-    # Use larger page size to reduce round-trips
+    if getattr(collection, "is_lancedb", False):
+        logger.info("LanceDB active; refreshing Tantivy FTS index…")
+        collection.create_fts_index("text")
+        pipeline_status.add_event("📚 Refreshed LanceDB Tantivy FTS index")
+        return
     paired, limit, offset = [], 5000, 0
     while True:
         batch = collection.get(include=["documents", "metadatas"], limit=limit, offset=offset)

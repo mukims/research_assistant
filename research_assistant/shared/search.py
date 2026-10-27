@@ -83,6 +83,19 @@ def hybrid_search(
     if embeddings_model is None:
         embeddings_model = _get_embeddings()
 
+    # Fast path: Native LanceDB hybrid search (zero-RAM paging, native Tantivy FTS + vector RRF)
+    if getattr(collection, "is_lancedb", False):
+        query_emb = embeddings_model.embed_query(query)
+        return collection.search_hybrid(
+            query=query,
+            query_vector=query_emb,
+            top_k=top_k,
+            rrf_k=rrf_k,
+            doc_filter=doc_filter,
+            exclude_types=exclude_types,
+            exclude_docs=exclude_docs,
+        )
+
     # k_cand is the dense side's candidate count (Chroma filters before it ranks).
     k_cand = max(60, top_k * 10) if (doc_filter or exclude_docs) else max(15, top_k * 3)
 
@@ -194,6 +207,29 @@ def expand_neighbours(results, texts, metadatas, window: int = 1):
     are skipped: they are stored beside their caption and would otherwise reach
     the judge as its context.
     """
+    table_adapter = getattr(texts, "table_adapter", None)
+    if table_adapter is not None:
+        for r in results:
+            doc = (r.get("metadata") or {}).get("document")
+            stored_form = (
+                (r.get("metadata") or {}).get("stored_form")
+                or (r.get("metadata") or {}).get("type")
+                or "text_chunk"
+            )
+            seq = (r.get("metadata") or {}).get("seq")
+            if seq is None and isinstance(r.get("chunk_index"), int):
+                seq = r.get("chunk_index")
+            if doc and seq is not None and window > 0:
+                b, a = table_adapter.get_neighbours(
+                    doc, stored_form, seq, window=window, exclude_types=EXCLUDED_FROM_EVIDENCE
+                )
+                r["context_before"] = b
+                r["context_after"] = a
+            else:
+                r["context_before"] = ""
+                r["context_after"] = ""
+        return results
+
     def _meta(i):
         return metadatas[i] if 0 <= i < len(metadatas) else None
 
@@ -219,3 +255,60 @@ def expand_neighbours(results, texts, metadatas, window: int = 1):
         r["context_before"] = "\n".join(before)
         r["context_after"] = "\n".join(after)
     return results
+
+
+_CROSS_ENCODER = None
+_CROSS_ENCODER_TRIED = False
+
+
+def get_cross_encoder():
+    """Lazily load cross-encoder model for candidate re-ranking if enabled."""
+    global _CROSS_ENCODER, _CROSS_ENCODER_TRIED
+    if _CROSS_ENCODER_TRIED:
+        return _CROSS_ENCODER
+    _CROSS_ENCODER_TRIED = True
+
+    try:
+        from research_assistant.config import USE_CROSS_ENCODER
+        if not USE_CROSS_ENCODER:
+            _CROSS_ENCODER = None
+            return None
+    except Exception:
+        pass
+
+    try:
+        from sentence_transformers import CrossEncoder
+        _CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    except Exception as exc:
+        logger.debug("CrossEncoder not available (%s); using original ranking.", exc)
+        _CROSS_ENCODER = None
+    return _CROSS_ENCODER
+
+
+def rerank_candidates(query: str, candidates: list[dict], top_k: int = DEFAULT_TOP_K) -> list[dict]:
+    """
+    Re-ranks candidates using a neural Cross-Encoder when available,
+    falling back cleanly to the existing RRF score.
+    """
+    if not candidates:
+        return []
+    if len(candidates) <= 1:
+        return candidates[:top_k]
+
+    model = get_cross_encoder()
+    if model is None:
+        return candidates[:top_k]
+
+    try:
+        pairs = [[query, c.get("text", "")] for c in candidates]
+        scores = model.predict(pairs)
+        ranked = []
+        for cand, score in zip(candidates, scores):
+            item = dict(cand)
+            item["cross_encoder_score"] = float(score)
+            ranked.append(item)
+        ranked.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
+        return ranked[:top_k]
+    except Exception as exc:
+        logger.debug("Cross-encoder re-ranking failed (%s); returning original candidates.", exc)
+        return candidates[:top_k]

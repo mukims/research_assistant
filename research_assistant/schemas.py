@@ -108,12 +108,16 @@ class Reference(_Record):
 
 @dataclass(frozen=True)
 class DownloadedPaper(_Record):
-    """A reference whose full text was retrieved. Agent 2 → Agent 3."""
+    """A reference whose full text (or abstract) was retrieved. Agent 2 → Agent 3."""
 
     key: str                              # source_key — the primary identity
-    path: str
-    provider: str                         # unpaywall | europepmc | arxiv
+    provider: str                         # unpaywall | europepmc | arxiv | openalex | crossref
     fetched_at: str
+    path: str | None = None
+    evidence_tier: str = "full_text"      # full_text | abstract_only
+    abstract: str | None = None
+    is_retracted: bool = False
+    citation_count: int | None = None
     title: str | None = None
     raw_reference: str | None = None
     doi: str | None = None
@@ -122,6 +126,10 @@ class DownloadedPaper(_Record):
     authoritative: bool | None = None     # whether the source key came from a real identifier
     cited_by: str | None = None           # source_file of the paper that cited this one
     xml_id: str | None = None             # GROBID biblStruct id of the originating reference
+
+    def __post_init__(self):
+        if self.evidence_tier == "full_text" and not self.path:
+            raise SchemaError("DownloadedPaper: missing required field(s): path")
 
 
 @dataclass(frozen=True)

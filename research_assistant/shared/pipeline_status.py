@@ -105,6 +105,20 @@ _thread_lock = threading.RLock()
 _lock_depth = 0
 _lock_handle: Optional[Any] = None
 
+# Per-canonical-path re-entrant locks for multi-job concurrency
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_MUTEX = threading.Lock()
+_PATH_DEPTHS: dict[str, int] = {}
+_PATH_HANDLES: dict[str, Any] = {}
+
+
+def _get_path_lock(canonical_path: str) -> threading.RLock:
+    with _PATH_LOCKS_MUTEX:
+        if canonical_path not in _PATH_LOCKS:
+            _PATH_LOCKS[canonical_path] = threading.RLock()
+        return _PATH_LOCKS[canonical_path]
+
+
 # Progress callback support
 _local = threading.local()
 _global_callbacks: list[Callable[[dict[str, Any]], None]] = []
@@ -113,10 +127,14 @@ _global_callbacks_lock = threading.Lock()
 
 def _reset_at_fork() -> None:
     """Reset lock state in forked child processes so they acquire independent locks."""
-    global _lock_depth, _lock_handle, _thread_lock
+    global _lock_depth, _lock_handle, _thread_lock, _PATH_LOCKS, _PATH_DEPTHS, _PATH_HANDLES
     _lock_depth = 0
     _lock_handle = None
     _thread_lock = threading.RLock()
+    with _PATH_LOCKS_MUTEX:
+        _PATH_LOCKS.clear()
+        _PATH_DEPTHS.clear()
+        _PATH_HANDLES.clear()
 
 
 if hasattr(os, "register_at_fork"):
@@ -180,10 +198,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def get_status_path() -> str:
-    """Return the filesystem path to pipeline_status.json."""
+def get_job_status_dir(job_id: str) -> str:
+    """Return the filesystem directory for a specific job's status."""
+    try:
+        from research_assistant import config
+        base = getattr(config, "DATA_DIR", "data")
+    except Exception:
+        base = "data"
+    return os.path.join(base, "jobs", job_id)
+
+
+def get_job_status_path(job_id: str) -> str:
+    """Return the filesystem path for a specific job's status.json ledger."""
+    return os.path.join(get_job_status_dir(job_id), "status.json")
+
+
+def get_status_path(job_id: Optional[str] = None) -> str:
+    """Return the filesystem path to pipeline_status.json (or job-scoped status.json)."""
     if STATUS_PATH_OVERRIDE is not None:
         return STATUS_PATH_OVERRIDE
+    target_job = job_id or getattr(_local, "current_job_id", None)
+    if target_job:
+        return get_job_status_path(target_job)
     try:
         from research_assistant import config
 
@@ -194,6 +230,17 @@ def get_status_path() -> str:
         )
     except Exception:
         return os.path.join("data", "pipeline_status.json")
+
+
+@contextlib.contextmanager
+def job_status_context(job_id: str):
+    """Context manager binding current thread to a job-scoped status ledger."""
+    prev_job = getattr(_local, "current_job_id", None)
+    _local.current_job_id = job_id
+    try:
+        yield
+    finally:
+        _local.current_job_id = prev_job
 
 
 def set_status_path(path: Optional[str]) -> None:
@@ -207,45 +254,63 @@ def _get_lock_path() -> str:
 
 
 @contextlib.contextmanager
-def _status_lock():
+def _status_lock(custom_path: Optional[str] = None):
     """Acquire thread and process locks for reading/modifying status state.
 
-    Fully re-entrant across both thread and process boundaries within the
-    same process.
+    Per-canonical-path locking prevents cross-job serialization while guaranteeing
+    re-entrancy for nested status operations on the same ledger.
     """
     global _lock_depth, _lock_handle
-    with _thread_lock:
-        if _lock_depth == 0:
-            lock_file = _get_lock_path()
-            os.makedirs(os.path.dirname(os.path.abspath(lock_file)) or ".", exist_ok=True)
-            if fcntl is not None:
-                try:
-                    _lock_handle = open(lock_file, "a")
-                    fcntl.flock(_lock_handle, fcntl.LOCK_EX)
-                except BaseException:
-                    if _lock_handle is not None:
-                        try:
-                            _lock_handle.close()
-                        except OSError:
-                            pass
-                    _lock_handle = None
-                    raise
-        _lock_depth += 1
+    raw_lock_file = custom_path or _get_lock_path()
+    canonical_lock = os.path.realpath(os.path.abspath(raw_lock_file))
+    t_lock = _get_path_lock(canonical_lock)
+
+    with t_lock:
+        with _PATH_LOCKS_MUTEX:
+            depth = _PATH_DEPTHS.get(canonical_lock, 0)
+            if depth == 0:
+                os.makedirs(os.path.dirname(canonical_lock) or ".", exist_ok=True)
+                if fcntl is not None:
+                    handle = None
+                    try:
+                        handle = open(canonical_lock, "a")
+                        fcntl.flock(handle, fcntl.LOCK_EX)
+                        _PATH_HANDLES[canonical_lock] = handle
+                        _lock_handle = handle
+                    except BaseException:
+                        if handle is not None:
+                            try:
+                                handle.close()
+                            except OSError:
+                                pass
+                        _PATH_HANDLES.pop(canonical_lock, None)
+                        raise
+            _PATH_DEPTHS[canonical_lock] = depth + 1
+            _lock_depth = _PATH_DEPTHS[canonical_lock]
+
         try:
             yield
         finally:
-            _lock_depth -= 1
-            if _lock_depth == 0 and _lock_handle is not None:
-                if fcntl is not None:
-                    try:
-                        fcntl.flock(_lock_handle, fcntl.LOCK_UN)
-                    except OSError:
-                        pass
-                try:
-                    _lock_handle.close()
-                except OSError:
-                    pass
-                _lock_handle = None
+            with _PATH_LOCKS_MUTEX:
+                cur_depth = _PATH_DEPTHS.get(canonical_lock, 1) - 1
+                if cur_depth <= 0:
+                    _PATH_DEPTHS.pop(canonical_lock, None)
+                    handle = _PATH_HANDLES.pop(canonical_lock, None)
+                    if handle is not None:
+                        if fcntl is not None:
+                            try:
+                                fcntl.flock(handle, fcntl.LOCK_UN)
+                            except OSError:
+                                pass
+                        try:
+                            handle.close()
+                        except OSError:
+                            pass
+                    _lock_depth = 0
+                    _lock_handle = None
+                else:
+                    _PATH_DEPTHS[canonical_lock] = cur_depth
+                    _lock_depth = cur_depth
 
 
 def _is_ingest_locked() -> bool:
@@ -341,6 +406,18 @@ def _persist_status_locked(status: dict[str, Any]) -> None:
     path = get_status_path()
     atomic_write_json(path, status, ensure_ascii=False, default=str)
 
+    # If writing to a job-scoped status file, also update global aggregate ledger
+    active_job = getattr(_local, "current_job_id", None)
+    if active_job and STATUS_PATH_OVERRIDE is None:
+        try:
+            from research_assistant import config
+            global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(config.DATA_DIR, "pipeline_status.json"))
+            summary_status = dict(status)
+            summary_status["current_job_id"] = active_job
+            atomic_write_json(global_path, summary_status, ensure_ascii=False, default=str)
+        except Exception as exc:
+            logger.debug("Failed updating global summary ledger from job status: %s", exc)
+
 
 def _check_and_resolve_stale(status: dict[str, Any]) -> dict[str, Any]:
     """Detect and reset stale active status if the process died or timed out."""
@@ -412,8 +489,12 @@ def _check_and_resolve_stale(status: dict[str, Any]) -> dict[str, Any]:
     return status
 
 
-def get_status() -> dict[str, Any]:
-    """Return the current pipeline status, handling missing/corrupt files and staleness."""
+def get_status(job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return pipeline status (for current or specified job_id), handling missing/corrupt files and staleness."""
+    if job_id:
+        with job_status_context(job_id):
+            status = _load_status_from_disk()
+            return _check_and_resolve_stale(status)
     status = _load_status_from_disk()
     return _check_and_resolve_stale(status)
 

@@ -290,20 +290,60 @@ def format_faceted_context(facets: Dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
+def budget_context_blocks(
+    blocks: List[Dict[str, Any]],
+    max_tokens: int = 6000,
+    chars_per_token: float = 3.5,
+) -> List[Dict[str, Any]]:
+    """
+    Dynamically budgets evidence blocks to fit within model context limits.
+    Prioritizes highest-scoring / most relevant passages and truncates when budget is exceeded.
+    """
+    if not blocks:
+        return []
+
+    max_chars = int(max_tokens * chars_per_token)
+    accumulated_chars = 0
+    budgeted: List[Dict[str, Any]] = []
+
+    # Sort blocks by score descending if scores exist, preserving order otherwise
+    sorted_blocks = sorted(blocks, key=lambda b: float(b.get("score") or b.get("rrf_score") or 0.0), reverse=True) if any(b.get("score") is not None or b.get("rrf_score") is not None for b in blocks) else blocks
+
+    for b in sorted_blocks:
+        b_text = b.get("text") or b.get("content") or ""
+        b_len = len(b_text)
+        if accumulated_chars + b_len <= max_chars:
+            budgeted.append(b)
+            accumulated_chars += b_len
+        else:
+            remaining = max_chars - accumulated_chars
+            if remaining > 200:
+                truncated_b = dict(b)
+                truncated_b["text"] = b_text[:remaining] + "... [truncated to fit context budget]"
+                budgeted.append(truncated_b)
+                accumulated_chars += remaining
+            break
+
+    return budgeted
+
+
 def format_untruncated_context(
     facet_results: Dict[str, Any],
     corpus_fallback: Optional[List[Dict[str, Any]]] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """
     Formats an un-truncated markdown string preserving all extracted passages,
     mathematical formulas, architecture tables, and hyperparameter grids without
-    the 10k character truncation barrier.
+    the 10k character truncation barrier. Applies dynamic context budgeting when max_tokens is specified.
     """
     sections = []
     for facet_name, label in FACET_LABELS.items():
         facet_data = facet_results.get(facet_name, {})
         chunks = facet_data.get("chunks", [])
         if chunks:
+            if max_tokens is not None:
+                chunks = budget_context_blocks(chunks, max_tokens=max_tokens)
             sections.append(f"## Facet: {label}")
             for idx, chunk in enumerate(chunks, 1):
                 meta = chunk.get("metadata", {})

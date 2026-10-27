@@ -409,24 +409,66 @@ def fetch_papers():
                 logger.exception("Unhandled error on %s", key)
                 reasons.append(str(exc))
 
+            biblio = {}
+            if not saved and not any(_is_retryable(r) for r in reasons):
+                try:
+                    from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
+                    biblio = fetch_bibliometrics_and_abstract(doi or ref.get("title") or key)
+                    abstract_cand = (biblio.get("abstract") or "").strip()
+                    if len(abstract_cand) >= 50:
+                        downloaded[key] = DownloadedPaper(
+                            key=key,
+                            path=None,
+                            evidence_tier="abstract_only",
+                            abstract=abstract_cand,
+                            is_retracted=bool(biblio.get("is_retracted", False)),
+                            citation_count=biblio.get("citation_count") if biblio.get("citation_count") is not None else 0,
+                            provider="openalex" if biblio.get("doi") else "abstract_only",
+                            fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            title=ref.get("title") or biblio.get("title") or "",
+                            raw_reference=ref.get("raw_reference") or "",
+                            doi=doi or biblio.get("doi"),
+                            arxiv_id=ref.get("arxiv_id"),
+                            doi_source=how,
+                            authoritative=is_authoritative(key),
+                            cited_by=ref.get("source_file"),
+                            xml_id=ref.get("xml_id"),
+                        ).to_dict()
+                        saved = True
+                        failed.pop(key, None)
+                        logger.info("    saved abstract-only -> %s", label[:50])
+                        pipeline_status.add_event(f"📄 Abstract-only: {label[:50]}")
+                except Exception as exc:
+                    logger.debug("Abstract fallback check failed for %s: %s", key, exc)
+
             if saved:
-                downloaded[key] = DownloadedPaper(
-                    key=key,
-                    path=dest,
-                    provider=provider,
-                    fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    title=ref.get("title"),
-                    raw_reference=ref.get("raw_reference"),
-                    doi=doi,
-                    arxiv_id=ref.get("arxiv_id"),
-                    doi_source=how,
-                    authoritative=is_authoritative(key),
-                    cited_by=ref.get("source_file"),
-                    xml_id=ref.get("xml_id"),
-                ).to_dict()
-                failed.pop(key, None)   # a retry that worked is no longer a failure
-                logger.info("    saved -> %s", os.path.basename(dest))
-                pipeline_status.add_event(f"✅ Downloaded ({provider or 'oa'}): {label[:50]}")
+                if key not in downloaded:
+                    try:
+                        from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
+                        biblio = fetch_bibliometrics_and_abstract(doi or ref.get("title") or key)
+                    except Exception:
+                        biblio = {}
+                    downloaded[key] = DownloadedPaper(
+                        key=key,
+                        path=dest,
+                        provider=provider,
+                        fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        title=ref.get("title"),
+                        raw_reference=ref.get("raw_reference"),
+                        doi=doi,
+                        arxiv_id=ref.get("arxiv_id"),
+                        doi_source=how,
+                        authoritative=is_authoritative(key),
+                        cited_by=ref.get("source_file"),
+                        xml_id=ref.get("xml_id"),
+                        abstract=ref.get("abstract") or biblio.get("abstract") or "",
+                        citation_count=ref.get("citation_count") if ref.get("citation_count") is not None else (biblio.get("citation_count") if biblio.get("citation_count") is not None else 0),
+                        is_retracted=bool(ref.get("is_retracted", False) or biblio.get("is_retracted", False)),
+                        evidence_tier="full_text",
+                    ).to_dict()
+                    failed.pop(key, None)   # a retry that worked is no longer a failure
+                    logger.info("    saved -> %s", os.path.basename(dest))
+                    pipeline_status.add_event(f"✅ Downloaded ({provider or 'oa'}): {label[:50]}")
                 pipeline_status.update_progress(
                     item_current=i,
                     item_total=len(remaining),

@@ -430,6 +430,20 @@ class TestTaskRetrieval(unittest.TestCase):
             self.assertEqual(q_res["results"][0]["document"], "param_shift_2021.pdf")
             self.assertIn("Exact parameter-shift rule", q_res["results"][0]["text"])
 
+    def test_budget_context_blocks_enforces_token_limits(self):
+        from research_assistant.tasks.retrieval import budget_context_blocks
+
+        blocks = [
+            {"text": "A" * 1000, "score": 0.95},
+            {"text": "B" * 2000, "score": 0.85},
+            {"text": "C" * 3000, "score": 0.70},
+        ]
+        # 1000 chars ~ 285 tokens. With max_tokens=600 (~2100 chars), block C must be truncated/excluded
+        budgeted = budget_context_blocks(blocks, max_tokens=600, chars_per_token=3.5)
+        total_len = sum(len(b["text"]) for b in budgeted)
+        self.assertLessEqual(total_len, 2200)
+        self.assertGreaterEqual(len(budgeted), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

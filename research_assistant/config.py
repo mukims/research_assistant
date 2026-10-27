@@ -115,9 +115,9 @@ EMBED_IMAGES    = EMBED_BACKEND == "ollama" and EMBED_MODEL.startswith("embeddin
 
 # ─── Chat Model Runtime Options ──────────────────────────────────────────────
 CHAT_OLLAMA_OPTIONS = {
-    "num_ctx": 4096,           # Context window
+    "num_ctx": _env_int("CITATION_CHAT_NUM_CTX", 4096),           # Context window
 }
-TASK_OLLAMA_OPTIONS = {"num_ctx": 4096}
+TASK_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_TASK_NUM_CTX", 4096)}
 CHAT_WINDOW_TOKENS          = _env_int(
     "CITATION_CHAT_WINDOW_TOKENS",
     32768 if LLM_BACKEND == "openai" else CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096),
@@ -140,11 +140,16 @@ CHAT_TEMPERATURE            = float(os.environ.get("CITATION_CHAT_TEMPERATURE", 
 INDEX_VERSION = _env_int("CITATION_INDEX_VERSION", 3)
 _INDEX_SUFFIX = "" if INDEX_VERSION == 1 else f"_v{INDEX_VERSION}"
 
-# ─── Vector Database ──────────────────────────────────────────────────────────
+# ─── Vector & Columnar Database ──────────────────────────────────────────────
 VECTORDB_PATH    = os.path.join(DATA_DIR, "physics_vectordb")
 COLLECTION_NAME  = f"physics_papers{_INDEX_SUFFIX}"       # detail chunks (stage-2 retrieval)
 SUMMARY_COLLECTION_NAME = f"physics_summaries{_INDEX_SUFFIX}"   # one summary per document (stage 1)
 BM25_INDEX_PATH  = os.path.join(DATA_DIR, f"bm25_index{_INDEX_SUFFIX}.pkl")
+LANCEDB_PATH     = os.environ.get("CITATION_LANCEDB_PATH", os.path.join(DATA_DIR, "lancedb"))
+LANCE_TABLE_NAME = f"physics_papers{_INDEX_SUFFIX}"
+LANCE_SUMMARY_TABLE_NAME = f"physics_summaries{_INDEX_SUFFIX}"
+QUARANTINE_TABLE_NAME    = f"quarantine_chunks{_INDEX_SUFFIX}"
+USE_LANCEDB      = _env_bool("CITATION_USE_LANCEDB", True)
 
 
 def chroma_server_from(environ) -> str:
@@ -293,7 +298,7 @@ SYNTHESIS_MODE                = os.environ.get("CITATION_SYNTHESIS_MODE", "map_r
 SYNTHESIS_PER_PAPER_CHUNKS    = _env_int("CITATION_SYNTHESIS_PER_PAPER_CHUNKS", 4)
 SYNTHESIS_PER_PAPER_MAX_CHARS = _env_int("CITATION_SYNTHESIS_PER_PAPER_MAX_CHARS", 5000)
 SYNTHESIS_TEMPERATURE         = float(os.environ.get("CITATION_SYNTHESIS_TEMPERATURE", "0.1"))
-SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": 4096}
+SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": _env_int("CITATION_SYNTHESIS_NUM_CTX", 8192)}
 
 
 # ─── Technique transfer ───────────────────────────────────────────────────────
@@ -352,6 +357,7 @@ SEARCH_PROVIDERS  = os.environ.get(
     "CITATION_SEARCH_PROVIDERS", "arxiv,openalex,semanticscholar"
 ).split(",")
 SEARCH_LIMIT      = 15    # Candidates to rank through looking for an OA PDF
+USE_CROSS_ENCODER = os.environ.get("CITATION_USE_CROSS_ENCODER", "0") == "1"
 
 OPENALEX_URL      = "https://api.openalex.org/works"
 # OpenAlex gives requests that supply a contact address the faster "polite"

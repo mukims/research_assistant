@@ -108,7 +108,38 @@ def run_ingestor(workers: int = 1, force: bool = False):
             logger.info("--force: re-processing all PDFs regardless of ingestion status.")
 
         pdfs = _pdfs_from_manifest(downloaded)
+
+        # Ingest abstract-only tier fallbacks
+        abstract_corpus = []
+        for key, record in downloaded.items():
+            if record.get("evidence_tier") == "abstract_only" and record.get("abstract"):
+                label = record.get("title") or record.get("raw_reference") or key
+                doc_key = record.get("key") or key
+                abstract_corpus.append({
+                    "document": doc_key,
+                    "citation": label,
+                    "page": 1,
+                    "type": "text_chunk",
+                    "content": record["abstract"],
+                    "embed_text": f"Title: {label}\nAbstract: {record['abstract']}",
+                    "meta": {
+                        "stored_form": "abstract_only",
+                        "tier": "abstract_only",
+                        "section": "abstract",
+                        "seq": 0,
+                        "is_retracted": bool(record.get("is_retracted", False)),
+                        "citation_count": record.get("citation_count"),
+                    },
+                })
+        if abstract_corpus:
+            logger.info("Ingesting %d abstract-only paper(s)...", len(abstract_corpus))
+            from research_assistant.shared.ingestion import upsert_corpus
+            upsert_corpus(abstract_corpus)
+
         if not pdfs:
+            if abstract_corpus:
+                logger.info("Ingested %d abstract-only papers (no PDF files to ingest).", len(abstract_corpus))
+                return {"processed": len(abstract_corpus), "skipped": 0, "inserted": len(abstract_corpus), "failed": []}
             logger.info("No usable PDF paths in the download manifest — nothing to ingest.")
             pipeline_status.update_progress(detail="No usable PDF paths in download manifest")
             return

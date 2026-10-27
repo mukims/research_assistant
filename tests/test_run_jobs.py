@@ -170,6 +170,21 @@ class TestNoStreamlitInTheModule(unittest.TestCase):
         self.assertNotIn("import streamlit", src)
         self.assertIsNone(re.search(r"\bst\.", src))
 
+    def test_job_scoped_status_ledger(self):
+        from research_assistant.shared import pipeline_status
+
+        def runner():
+            pipeline_status.set_status(active=True, stage="extract", detail="testing job status")
+            return {"status": "ok"}
+
+        job = run_jobs.start_job("job_xyz123", "test.pdf", runner, origin="audit")
+        job.thread.join(timeout=5)
+        self.assertEqual(job.state, "done")
+
+        status = pipeline_status.get_status(job_id="job_xyz123")
+        self.assertEqual(status.get("stage"), "extract")
+        self.assertEqual(status.get("detail"), "testing job status")
+
 
 if __name__ == "__main__":
     unittest.main()

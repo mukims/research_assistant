@@ -689,13 +689,34 @@ def run_extractor() -> dict:
                 _file_away(pdf, failed_dir, name)
 
         reference_dicts = [r.to_dict() for r in all_references]
+
+        # Merge with existing extracted citations to prevent wiping earlier seed papers
+        merged_refs = list(reference_dicts)
+        merged_articles = list(articles)
+        if os.path.exists(EXTRACTED_CITATIONS_PATH):
+            try:
+                with open(EXTRACTED_CITATIONS_PATH, "r", encoding="utf-8") as f:
+                    old_payload = json.load(f)
+                    seen_ref_keys = {
+                        (r.get("source_file"), r.get("raw_reference"), r.get("doi"))
+                        for r in reference_dicts
+                    }
+                    for old_ref in old_payload.get("references") or []:
+                        k = (old_ref.get("source_file"), old_ref.get("raw_reference"), old_ref.get("doi"))
+                        if k not in seen_ref_keys:
+                            merged_refs.append(old_ref)
+                            seen_ref_keys.add(k)
+                    seen_art_dois = {a.get("doi") for a in articles if a.get("doi")}
+                    for old_art in old_payload.get("articles") or []:
+                        if old_art.get("doi") not in seen_art_dois:
+                            merged_articles.append(old_art)
+            except Exception as e:
+                logger.warning("Could not read existing extracted citations to merge: %s", e)
+
         payload = {
-            # Citing papers' own title/DOI/authors from parse_article_metadata().
-            # Nothing downstream reads this today, but recorded data should not
-            # be dropped silently just because it is not yet consumed.
-            "articles": articles,
-            "references": reference_dicts,
-            "summary": summarise(reference_dicts),
+            "articles": merged_articles,
+            "references": merged_refs,
+            "summary": summarise(merged_refs),
             "extraction": by_method,
         }
         # Atomic: Agent 2 reads this back as its work list, and a truncated write
