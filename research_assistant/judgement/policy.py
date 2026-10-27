@@ -52,6 +52,7 @@ def evaluate_reliability(
     rubric_mismatch: bool = False,
     outcome: str = "judged",
     span_cites_others: bool | None = None,
+    evidence_tier: str = "full_text",
 ) -> dict[str, Any]:
     """Derive scientific reliability from the relation verdict and source grade.
 
@@ -77,6 +78,13 @@ def evaluate_reliability(
 
     # 1. The judge could not decide from what it saw.
     if rel == "Unclear / insufficient evidence":
+        if evidence_tier == "abstract_only":
+            return {
+                "rating": ReliabilityRating.UNRESOLVED.value,
+                "badge": "⚪ Unresolved (Paywalled Full Text)",
+                "rating_label": "Unverifiable from Abstract Alone",
+                "explanation": "Evidence is insufficient in the abstract alone; verification requires the full-text paywalled body.",
+            }
         return {
             "rating": ReliabilityRating.UNRESOLVED.value,
             "badge": "⚪ Unresolved",
@@ -149,6 +157,14 @@ def evaluate_reliability(
 
     # 6. Supported Claims
     if rel == "Supports":
+        if evidence_tier == "abstract_only":
+            return {
+                "rating": ReliabilityRating.MODERATE.value,
+                "badge": "🟡 Moderate Reliability",
+                "rating_label": "Verified via Abstract Only",
+                "explanation": "Supported by the cited paper's peer-reviewed abstract (full-text PDF is paywalled).",
+            }
+
         if source_grade == SourceGrade.PREPRINT_UNREVIEWED.value:
             return {
                 "rating": ReliabilityRating.MODERATE.value,

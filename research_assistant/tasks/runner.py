@@ -8,16 +8,21 @@ Includes Two-Cycle Reflexion Runner and safety guardrails.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
 import os
+import py_compile
+import re
+import subprocess
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from research_assistant.config import DATA_DIR, LLM_MODEL, VECTORDB_PATH
+from research_assistant.config import DATA_DIR, LLM_MODEL, TASK_OLLAMA_OPTIONS, VECTORDB_PATH
 from research_assistant.shared.log import get_logger
 from research_assistant.tasks.harness import generate_task_test_script, run_task_test_script
 from research_assistant.tasks.models import (
@@ -407,24 +412,77 @@ class TaskRunner:
                 info[inp] = "Pending / Not found on disk"
         return info
 
+    @staticmethod
+    def _extract_code_blocks(content: str) -> Tuple[Dict[str, str], List[str]]:
+        """Extract code blocks from LLM markdown, returning (named_blocks, unnamed_blocks)."""
+        named: Dict[str, str] = {}
+        unnamed: List[str] = []
+        if not content:
+            return named, unnamed
+
+        pattern = re.compile(r"```(?:python)?(?:\s+(?:path=|file=)?([^\n]+))?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+        matches = pattern.findall(content)
+        if not matches:
+            if "```python" in content:
+                body = content.split("```python", 1)[1].split("```", 1)[0]
+                unnamed.append(body.strip())
+            elif "```" in content:
+                body = content.split("```", 1)[1].split("```", 1)[0]
+                unnamed.append(body.strip())
+            else:
+                unnamed.append(content.strip())
+            return named, unnamed
+
+        for tag, body in matches:
+            tag = (tag or "").strip()
+            body_stripped = body.strip()
+            named_path = None
+            if tag and not tag.startswith("{") and not tag.startswith(":"):
+                candidate = tag.split()[0].strip("\"':")
+                if candidate and "." in candidate:
+                    named_path = os.path.basename(candidate)
+
+            if not named_path:
+                for line in body_stripped.splitlines()[:3]:
+                    m = re.match(r"^#\s*(?:file|path|filename):\s*([^\s]+)", line.strip(), re.IGNORECASE)
+                    if m:
+                        named_path = os.path.basename(m.group(1).strip("\"'"))
+                        break
+
+            if named_path:
+                named[named_path] = body_stripped
+            else:
+                unnamed.append(body_stripped)
+
+        return named, unnamed
+
     def _materialize_deliverables(
         self,
         task: Task,
         content: str,
         role_name: str,
         overwrite: bool = False,
+        is_simulation: bool = False,
     ) -> List[str]:
         """Materializes deliverables into workspace according to artifact contracts."""
         output_files = []
         contracts_by_path = {c.path: c for c in getattr(task, "artifact_contracts", [])}
+        named_blocks, unnamed_blocks = self._extract_code_blocks(content)
+        code_output_idx = 0
 
         for out in task.outputs:
             out_path = os.path.join(self.workspace_dir, out)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             contract = contracts_by_path.get(out)
 
+            is_tensor = contract and (contract.artifact_type == ArtifactType.TENSOR or out.endswith((".pt", ".pth", ".npy", ".npz", ".safetensors")))
+            if is_tensor and not is_simulation:
+                # In authentic autonomous mode, binary tensors must be produced by code execution, never fabricated
+                output_files.append(out)
+                continue
+
             if not os.path.exists(out_path) or overwrite or os.path.getsize(out_path) == 0:
-                if contract and (contract.artifact_type == ArtifactType.TENSOR or out.endswith((".pt", ".pth", ".npy", ".npz", ".safetensors"))):
+                if is_tensor and is_simulation:
                     if out.endswith(".npy"):
                         try:
                             import numpy as np
@@ -456,15 +514,20 @@ class TaskRunner:
                     with open(out_path, "w", encoding="utf-8") as f:
                         if contract and (contract.artifact_type == ArtifactType.METRICS_JSON or out.endswith(".json")):
                             wrote_json = False
-                            if content and content.strip().startswith("{") and content.strip().endswith("}"):
+                            if content and "{" in content and "}" in content:
                                 try:
-                                    parsed = json.loads(content)
+                                    json_str = content
+                                    if "```json" in content:
+                                        json_str = content.split("```json")[1].split("```")[0]
+                                    elif "```" in content:
+                                        json_str = content.split("```")[1].split("```")[0]
+                                    parsed = json.loads(json_str.strip())
                                     if isinstance(parsed, dict):
                                         json.dump(parsed, f, indent=2)
                                         wrote_json = True
                                 except Exception:
                                     pass
-                            if not wrote_json:
+                            if not wrote_json and is_simulation:
                                 req_keys = contract.required_keys or ["accuracy", "loss", "metric"]
                                 dummy_data = {k: 0.95 for k in req_keys}
                                 json.dump(dummy_data, f, indent=2)
@@ -473,20 +536,121 @@ class TaskRunner:
                             if content and "," in content:
                                 f.write(content[:5000])
                                 wrote_csv = True
-                            if not wrote_csv:
+                            if not wrote_csv and is_simulation:
                                 cols = list(contract.columns.keys()) if contract.columns else ["id", "feature", "label"]
                                 f.write(",".join(cols) + "\n")
                                 f.write(",".join(["1"] * len(cols)) + "\n")
                         elif contract and (contract.artifact_type == ArtifactType.CODE or out.endswith(".py")):
-                            if content and ("def " in content or "class " in content or "import " in content or "broken" in content or "syntax" in content or ":" in content):
-                                f.write(content)
+                            out_base = os.path.basename(out)
+                            if out_base in named_blocks:
+                                code_to_write = named_blocks[out_base]
+                            elif out in named_blocks:
+                                code_to_write = named_blocks[out]
+                            elif code_output_idx < len(unnamed_blocks):
+                                code_to_write = unnamed_blocks[code_output_idx]
+                            elif unnamed_blocks:
+                                code_to_write = unnamed_blocks[0]
                             else:
+                                code_to_write = content
+
+                            code_output_idx += 1
+
+                            if code_to_write and ("def " in code_to_write or "class " in code_to_write or "import " in code_to_write or ":" in code_to_write):
+                                f.write(code_to_write)
+                            elif is_simulation:
                                 f.write(f"# Deliverable for {task.task_id} generated by {role_name}\n")
                                 f.write(content[:3000] if content else "def execute_pipeline():\n    return True\n")
+                            else:
+                                f.write(content if content else "# Synthesized module\n")
                         else:
                             f.write(content if content else f"# Simulated artifact for {task.task_id} ({task.title})\n")
             output_files.append(out)
         return output_files
+
+    def _run_entrypoint_subprocess(
+        self,
+        task: Task,
+        timeout_seconds: int = 30,
+    ) -> Tuple[int, str]:
+        """
+        Executes synthesized Python script deliverables in an isolated subprocess
+        so that downstream deliverables (tensors, tables, jsons) are authentically produced.
+        Validates library modules with py_compile and only executes entrypoint scripts.
+        """
+        py_scripts = [out for out in task.outputs if out.endswith(".py")]
+        if not py_scripts:
+            return 0, ""
+
+        # Identify executable entrypoint scripts; pure library modules are tested via test harness
+        entrypoint_candidates = []
+        for script_name in py_scripts:
+            script_path = os.path.join(self.workspace_dir, script_name)
+            if not os.path.exists(script_path) or os.path.getsize(script_path) == 0:
+                continue
+            try:
+                with open(script_path, "r", encoding="utf-8") as f:
+                    script_content = f.read()
+            except Exception:
+                continue
+            is_entrypoint = bool(
+                re.search(r"if\s+__name__\s*==\s*['\"]__main__['\"]:", script_content)
+                or re.match(r"^(run.*|train.*|main.*|cli.*|entrypoint.*|benchmark.*)\.py$", os.path.basename(script_name), re.IGNORECASE)
+            )
+            if is_entrypoint:
+                entrypoint_candidates.append((script_name, script_path, script_content))
+
+        if not entrypoint_candidates:
+            return 0, ""
+
+        env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = "1"
+        env["MKL_NUM_THREADS"] = "1"
+        env["OPENBLAS_NUM_THREADS"] = "1"
+        env["VECLIB_MAXIMUM_THREADS"] = "1"
+        env["NUMEXPR_NUM_THREADS"] = "1"
+        env["TORCH_NUM_THREADS"] = "1"
+
+        all_output = []
+        for script_name, script_path, script_content in entrypoint_candidates:
+            # First verify AST parses without syntax errors
+            try:
+                ast.parse(script_content, filename=script_path)
+            except SyntaxError as se:
+                return 1, f"SyntaxError in {script_name}: {se}"
+
+            try:
+                proc = subprocess.run(
+                    [sys.executable, script_path],
+                    cwd=self.workspace_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    env=env,
+                )
+                if proc.returncode != 0:
+                    out = (proc.stderr or proc.stdout).strip()
+                    # If it exited because required CLI args were not passed, test with --help
+                    if "usage:" in out.lower() or "required" in out.lower() or "unrecognized" in out.lower():
+                        help_proc = subprocess.run(
+                            [sys.executable, script_path, "--help"],
+                            cwd=self.workspace_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout_seconds,
+                            env=env,
+                        )
+                        if help_proc.returncode == 0:
+                            all_output.append(f"{script_name}: CLI interface valid (--help passed)")
+                            continue
+                    return proc.returncode, f"Execution failed for {script_name}:\n{out}"
+                if proc.stdout.strip():
+                    all_output.append(proc.stdout.strip())
+            except subprocess.TimeoutExpired:
+                return 124, f"Execution timed out for {script_name} after {timeout_seconds}s"
+            except Exception as e:
+                return 1, f"Failed to execute {script_name}: {e}"
+
+        return 0, "\n".join(all_output)
 
     def _execute_harness_subprocess(
         self,
@@ -534,7 +698,7 @@ class TaskRunner:
             f"[RUNNER] Verifying {len(task.inputs)} input artifacts...",
         ]
 
-        output_files = self._materialize_deliverables(task, "", role_spec.name, overwrite=False)
+        output_files = self._materialize_deliverables(task, "", role_spec.name, overwrite=False, is_simulation=True)
         hashes = {}
         for out in output_files:
             out_path = os.path.join(self.workspace_dir, out)
@@ -611,7 +775,7 @@ class TaskRunner:
                         ],
                         model=LLM_MODEL,
                         temperature=0.2,
-                        options={"num_ctx": 4096},
+                        options=TASK_OLLAMA_OPTIONS,
                     )
                     last_llm_response = res_c1.content
                     logs.append(f"[AGENT] Cycle 1 LLM response received ({len(res_c1.content)} chars).")
@@ -619,10 +783,14 @@ class TaskRunner:
                     logger.warning("Cycle 1 LLM chat call failed: %s; using deliverable stub", exc)
                     last_llm_response = f"# Deliverable for {task.task_id} ({task.title})\n"
 
-                self._materialize_deliverables(task, last_llm_response, role_spec.name, overwrite=True)
+                self._materialize_deliverables(task, last_llm_response, role_spec.name, overwrite=True, is_simulation=False)
 
-                # ─── CYCLE 1: TEST ───────────────────────────────────────────────
-                returncode, output = self._execute_harness_subprocess(test_harness, task=task)
+                # ─── CYCLE 1: RUN ENTRYPOINT & TEST ──────────────────────────────
+                ep_code, ep_output = self._run_entrypoint_subprocess(task)
+                if ep_code != 0:
+                    returncode, output = ep_code, ep_output
+                else:
+                    returncode, output = self._execute_harness_subprocess(test_harness, task=task)
 
                 if returncode == 0:
                     logs.append("[AGENT] Cycle 1 Acceptance Harness: PASSED cleanly.")
@@ -662,7 +830,7 @@ class TaskRunner:
                         ],
                         model=LLM_MODEL,
                         temperature=0.1,
-                        options={"num_ctx": 4096},
+                        options=TASK_OLLAMA_OPTIONS,
                     )
                     last_llm_response = res_c2.content
                     logs.append(f"[AGENT] Cycle 2 Refinement response received ({len(res_c2.content)} chars).")
@@ -670,10 +838,14 @@ class TaskRunner:
                     logger.warning("Cycle 2 LLM chat call failed: %s; using deliverable stub", exc)
                     last_llm_response = f"# Refined Deliverable for {task.task_id} ({task.title})\n"
 
-                self._materialize_deliverables(task, last_llm_response, role_spec.name, overwrite=True)
+                self._materialize_deliverables(task, last_llm_response, role_spec.name, overwrite=True, is_simulation=False)
 
-                # ─── CYCLE 2: RETEST ─────────────────────────────────────────────
-                returncode_c2, output_c2 = self._execute_harness_subprocess(test_harness, task=task)
+                # ─── CYCLE 2: RETEST ENTRYPOINT & HARNESS ────────────────────────
+                ep_code_c2, ep_output_c2 = self._run_entrypoint_subprocess(task)
+                if ep_code_c2 != 0:
+                    returncode_c2, output_c2 = ep_code_c2, ep_output_c2
+                else:
+                    returncode_c2, output_c2 = self._execute_harness_subprocess(test_harness, task=task)
 
                 if returncode_c2 == 0:
                     logs.append("[AGENT] Cycle 2 Acceptance Harness: PASSED on retest.")

@@ -12,7 +12,22 @@ Usage:
 import os
 import pickle
 
-from research_assistant.config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, EMBED_MODEL, CHROMA_SERVER
+try:
+    import lancedb
+except ImportError:
+    lancedb = None
+
+from research_assistant.config import (
+    VECTORDB_PATH,
+    COLLECTION_NAME,
+    BM25_INDEX_PATH,
+    EMBED_MODEL,
+    CHROMA_SERVER,
+    USE_LANCEDB,
+    LANCEDB_PATH,
+    LANCE_TABLE_NAME,
+    LANCE_SUMMARY_TABLE_NAME,
+)
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.tokenize import TOKENIZER_VERSION
 
@@ -25,12 +40,113 @@ logger = get_logger("db")
 _cache: dict = {}
 
 
+def open_lance_store(path=None):
+    """Open the LanceDB store."""
+    from research_assistant.shared.lance_store import LanceStoreClient
+    return LanceStoreClient(path or LANCEDB_PATH)
+
+
+def is_lance_ready() -> bool:
+    """Check if LanceDB is enabled and has the main table initialized."""
+    if not USE_LANCEDB or lancedb is None:
+        return False
+    if not os.path.exists(LANCEDB_PATH):
+        return False
+    try:
+        from research_assistant.shared.lance_store import get_lance_connection, list_table_names
+        conn = get_lance_connection(LANCEDB_PATH)
+        tables = list_table_names(conn)
+        return LANCE_TABLE_NAME in tables
+    except Exception:
+        return False
+
+
+class LanceSequenceProxy:
+    """Lazy zero-copy sequence proxy over a LanceDB table with chunked prefetch cache."""
+
+    def __init__(self, table_adapter, field_name: str, cache_size: int = 256):
+        self.table_adapter = table_adapter
+        self.field_name = field_name
+        self._cache_start = -1
+        self._cache_data = []
+        self._chunk_size = cache_size
+
+    def __len__(self) -> int:
+        return self.table_adapter.count()
+
+    def _fetch_chunk(self, start_idx: int):
+        try:
+            q = self.table_adapter.table.search().offset(start_idx).limit(self._chunk_size)
+            rows = q.to_list()
+        except Exception:
+            rows = []
+        self._cache_start = start_idx
+        self._cache_data = rows
+
+    def __getitem__(self, idx: int | slice):
+        total = len(self)
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(total)
+            return [self[i] for i in range(start, stop, step)]
+
+        if idx < 0:
+            idx += total
+        if not (0 <= idx < total):
+            raise IndexError(f"Index {idx} out of range (length {total})")
+
+        if not (self._cache_start <= idx < self._cache_start + len(self._cache_data)):
+            self._fetch_chunk(idx)
+
+        offset = idx - self._cache_start
+        if not (0 <= offset < len(self._cache_data)):
+            raise IndexError(f"Index {idx} out of range")
+        r = self._cache_data[offset]
+        if self.field_name == "metadata":
+            m = {
+                "document": r.get("document", ""),
+                "citation_source": r.get("citation_source", ""),
+                "stored_form": r.get("stored_form", ""),
+                "section": r.get("section", ""),
+                "seq": r.get("seq", 0),
+                "page": r.get("page", 1),
+                "type": r.get("stored_form", ""),
+                "tier": r.get("tier", "full_text"),
+            }
+            if r.get("metadata_json"):
+                try:
+                    import json
+                    m.update(json.loads(r["metadata_json"]))
+                except Exception:
+                    pass
+            return m
+        return r.get("text", "")
+
+
+class LanceBM25Proxy:
+    """Lightweight proxy for BM25 when backed by native LanceDB FTS."""
+
+    tokenizer_version = "v2"
+    is_lancedb = True
+
+    def get_scores(self, q):
+        return []
+
+    def get_batch_scores(self, q, pool):
+        return []
+
+
 def _cache_key():
     try:
         mtime = os.path.getmtime(BM25_INDEX_PATH)
     except OSError:
         mtime = None
-    return (VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime)
+    lance_mtime = None
+    if os.path.exists(LANCEDB_PATH):
+        try:
+            lance_mtime = os.path.getmtime(LANCEDB_PATH)
+        except OSError:
+            pass
+    return (USE_LANCEDB, LANCEDB_PATH, VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime, lance_mtime)
 
 
 class StoreUnavailable(RuntimeError):
@@ -38,11 +154,14 @@ class StoreUnavailable(RuntimeError):
 
 
 def open_store():
-    """The Chroma client for the store. Every process goes through here.
+    """The client for the store (LanceDB if ready, ChromaDB as fallback). Every process goes through here.
 
     With config.CHROMA_SERVER set, the server owns VECTORDB_PATH and this connects to it
     (see config.chroma_server_from for why); otherwise the files are opened directly,
     which is only safe when no other process has them open."""
+    if is_lance_ready():
+        return open_lance_store()
+
     import chromadb
     from urllib.parse import urlparse
 
@@ -89,6 +208,8 @@ def check_embedder(collection) -> None:
     collection is created and compared here whenever one is opened. A collection
     that predates the record (index v1, v2) is not checked.
     """
+    if getattr(collection, "is_lancedb", False):
+        return
     stored = (getattr(collection, "metadata", None) or {}).get("embedder")
     if stored and stored != EMBED_MODEL:
         raise RuntimeError(
@@ -116,6 +237,19 @@ def load_search_resources():
     key = _cache_key()
     if key not in _cache:
         _cache.clear()
+        if is_lance_ready():
+            try:
+                client = open_lance_store()
+                table = client.get_collection(LANCE_TABLE_NAME)
+                _cache[key] = (
+                    table,
+                    LanceBM25Proxy(),
+                    LanceSequenceProxy(table, "text"),
+                    LanceSequenceProxy(table, "metadata"),
+                )
+                return _cache[key]
+            except Exception as e:
+                logger.warning("Failed to open LanceDB store (%s), falling back to ChromaDB.", e)
         _cache[key] = _load_search_resources_uncached()
     return _cache[key]
 
@@ -214,6 +348,11 @@ def get_max_chunk_index(collection) -> int:
 
     Returns the next available index (max + 1), or 0 if the collection is empty.
     """
+    if getattr(collection, "is_lancedb", False):
+        try:
+            return collection.count()
+        except Exception:
+            return 0
     max_idx = -1
     limit, offset = 5000, 0
     while True:

@@ -330,6 +330,42 @@ class TestTaskCriticAndScorecard(unittest.TestCase):
         self.assertEqual(scorecard.blocking_flaws_count, 0)
         self.assertTrue(scorecard.is_passing)
 
+    def test_evaluate_with_llm_parses_structured_flaws(self):
+        from unittest.mock import MagicMock, patch
+        import json
+
+        llm_json_response = json.dumps({
+            "topology_score": 85.0,
+            "contract_score": 90.0,
+            "testability_score": 80.0,
+            "overall_score": 85.0,
+            "blocking_flaws_count": 1,
+            "warning_flaws_count": 0,
+            "flaws": [
+                {
+                    "flaw_id": "llm_missing_dep",
+                    "task_id": "task_05_train",
+                    "critic_level": "macro",
+                    "severity": "blocking",
+                    "category": "topology",
+                    "description": "Training task should explicitly depend on data verification",
+                    "suggestion": "Add dependency on task_02_data",
+                }
+            ]
+        })
+
+        g = _build_full_canonical_graph()
+        with patch("research_assistant.shared.llm.chat") as mock_chat:
+            mock_chat.return_value = MagicMock(content=llm_json_response)
+            scorecard = self.critic.evaluate_with_llm(g)
+
+            self.assertEqual(scorecard.blocking_flaws_count, 1)
+            self.assertFalse(scorecard.is_passing)
+            blocking_flaws = [f for f in scorecard.flaws if f.severity in ("blocking", FlawSeverity.BLOCKING.value)]
+            self.assertEqual(len(blocking_flaws), 1)
+            self.assertEqual(blocking_flaws[0].flaw_id, "llm_missing_dep")
+            self.assertEqual(blocking_flaws[0].description, "Training task should explicitly depend on data verification")
+
 
 if __name__ == "__main__":
     unittest.main()

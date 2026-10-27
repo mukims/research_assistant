@@ -457,6 +457,17 @@ class TestExpandNeighbours(unittest.TestCase):
         out = expand_neighbours([{"chunk_index": 99, "text": "x", "metadata": {"document": "z"}}], texts, metas)
         self.assertEqual((out[0]["context_before"], out[0]["context_after"]), ("", ""))
 
+    def test_rerank_candidates_preserves_clean_fallback(self):
+        from research_assistant.shared.search import rerank_candidates
+        candidates = [
+            {"text": "irrelevant text", "score": 0.5},
+            {"text": "quantum computing superconductor", "score": 0.9},
+        ]
+        reranked = rerank_candidates("quantum physics", candidates, top_k=2)
+        self.assertEqual(len(reranked), 2)
+        # Should have cross_encoder_score or keep original items
+        self.assertTrue("text" in reranked[0])
+
 
 if __name__ == "__main__":
     unittest.main()

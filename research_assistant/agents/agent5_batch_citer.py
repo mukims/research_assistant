@@ -29,7 +29,7 @@ from research_assistant.shared.claim_text import (  # re-exported: seed_audit, a
     sentence_context,
     split_into_sentences,
 )
-from research_assistant.shared.search import expand_neighbours, hybrid_search
+from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
 from research_assistant.shared.retry import retry
 from research_assistant.shared.llm import chat
 from research_assistant.shared import seed_audit
@@ -190,7 +190,8 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
     """
     collection, bm25, texts, metadatas = resources
     query = query or sentence
-    results = hybrid_search(query, collection, bm25, texts, metadatas, top_k=3, exclude_docs=exclude_docs)
+    raw_results = hybrid_search(query, collection, bm25, texts, metadatas, top_k=6, exclude_docs=exclude_docs)
+    results = rerank_candidates(query, raw_results, top_k=3)
     if not results:
         return CiteResult(original=sentence, cited_text=sentence, query=query,
                           skip_reason="no relevant context found in database")

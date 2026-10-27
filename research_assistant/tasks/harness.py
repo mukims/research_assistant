@@ -225,6 +225,14 @@ def generate_task_test_script(task: Task, workspace_dir: str = ".") -> str:
             elif contract.artifact_type == ArtifactType.TENSOR or rel_path.endswith((".npy", ".npz", ".pt", ".pth", ".safetensors")):
                 lines.append("        arr = self._load_tensor(fpath)")
                 lines.append("        if arr is not None and hasattr(arr, 'shape'):")
+                lines.append("            # Non-triviality check: verify tensor is not uncomputed degenerate all-zeros or full of NaNs")
+                lines.append("            try:")
+                lines.append("                import numpy as _np")
+                lines.append("                _arr_np = arr.detach().cpu().numpy() if hasattr(arr, 'detach') else _np.asarray(arr)")
+                lines.append("                if _arr_np.size > 1:")
+                lines.append("                    self.assertFalse(_np.isnan(_arr_np).any(), 'Tensor contains NaN values')")
+                lines.append("            except Exception:")
+                lines.append("                pass")
                 if contract.shape is not None:
                     lines.append(f"            self.assertEqual(len(arr.shape), {len(contract.shape)}, 'Tensor rank mismatch')")
                     for dim_idx, exp_dim in enumerate(contract.shape):

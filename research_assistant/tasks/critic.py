@@ -12,6 +12,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from research_assistant.config import LLM_MODEL, TASK_OLLAMA_OPTIONS
 from research_assistant.shared.log import get_logger
 from research_assistant.tasks.models import (
     AgentRole,
@@ -780,34 +781,116 @@ class TaskCritic:
 
     def evaluate_with_llm(self, graph: TaskGraph, model: Optional[str] = None) -> RubricScorecard:
         """
-        Evaluates graph using LLM against the structured rubrics.
+        Evaluates graph using LLM against structured replication rubrics.
         Falls back to rule-based evaluate(graph) if LLM call fails or returns non-JSON.
+        Parses structured flaw reports and merges with rule-based structural checks.
         """
         import json
         from research_assistant.config import LLM_MODEL
         from research_assistant.shared.llm import chat
 
+        task_summaries = []
+        for t in graph.tasks.values():
+            contracts_desc = [
+                f"{c.path} (type={c.artifact_type.value if hasattr(c.artifact_type, 'value') else c.artifact_type}"
+                + (f", shape={c.shape}" if c.shape else "")
+                + (f", req_keys={c.required_keys}" if c.required_keys else "")
+                + ")"
+                for c in (t.artifact_contracts or [])
+            ]
+            task_summaries.append({
+                "task_id": t.task_id,
+                "title": t.title,
+                "category": t.category.value if hasattr(t.category, "value") else str(t.category),
+                "role": t.assigned_role.value if hasattr(t.assigned_role, "value") else str(t.assigned_role),
+                "dependencies": t.dependencies,
+                "inputs": t.inputs,
+                "outputs": t.outputs,
+                "artifact_contracts": contracts_desc,
+                "acceptance_criteria": t.acceptance_criteria,
+                "description": t.description[:300] if t.description else "",
+            })
+
         prompt = (
-            f"Evaluate this task decomposition graph for paper '{graph.paper_title}'.\n"
-            f"Tasks: {[t.task_id for t in graph.tasks.values()]}.\n"
-            "Return JSON with topology_score, contract_score, testability_score, overall_score, "
-            "blocking_flaws_count, warning_flaws_count."
+            f"You are an adversarial replication critic evaluating a scientific task graph for paper '{graph.paper_title}'.\n"
+            f"The task graph has {len(graph.tasks)} tasks.\n\n"
+            f"Task Specifications:\n{json.dumps(task_summaries, indent=2)}\n\n"
+            "Evaluate this graph strictly on 3 dimensions:\n"
+            "1. Topology (DAG acyclicity, 6 scientific phases present, valid dependency ordering, wave parallelizability).\n"
+            "2. Contracts & I/O Continuity (outputs must feed into downstream inputs, no broken file paths, explicit contracts).\n"
+            "3. Deterministic Testability & Hardware Safety (CPU thread limits OMP_NUM_THREADS=1, deterministic criteria).\n\n"
+            "Return a JSON object with this exact structure:\n"
+            "{\n"
+            '  "topology_score": 85.0,\n'
+            '  "contract_score": 90.0,\n'
+            '  "testability_score": 88.0,\n'
+            '  "overall_score": 87.7,\n'
+            '  "blocking_flaws_count": 0,\n'
+            '  "warning_flaws_count": 0,\n'
+            '  "flaws": [\n'
+            '    {\n'
+            '      "flaw_id": "macro_or_micro_code",\n'
+            '      "task_id": "task_id_or_null",\n'
+            '      "critic_level": "macro",\n'
+            '      "severity": "blocking",\n'
+            '      "category": "topology",\n'
+            '      "description": "Concrete description of the flaw",\n'
+            '      "suggestion": "Remediation step"\n'
+            '    }\n'
+            '  ]\n'
+            "}"
         )
+
         try:
-            res = chat([{"role": "user", "content": prompt}], model=model or LLM_MODEL, options={"num_ctx": 4096})
+            res = chat([{"role": "user", "content": prompt}], model=model or LLM_MODEL, options=TASK_OLLAMA_OPTIONS)
             content = res.content.strip() if hasattr(res, "content") else str(res).strip()
             if content.startswith("```"):
                 content = re.sub(r"^```(?:json)?\s*", "", content)
                 content = re.sub(r"\s*```$", "", content)
             data = json.loads(content)
+
+            parsed_flaws: List[CritiqueFlaw] = []
+            raw_flaws = data.get("flaws", [])
+            if isinstance(raw_flaws, list):
+                for f_item in raw_flaws:
+                    if isinstance(f_item, dict):
+                        f_id = f_item.get("flaw_id") or f"llm_flaw_{len(parsed_flaws)+1}"
+                        parsed_flaws.append(
+                            CritiqueFlaw(
+                                flaw_id=f_id,
+                                task_id=f_item.get("task_id"),
+                                critic_level=f_item.get("critic_level", "macro"),
+                                severity=f_item.get("severity", "warning"),
+                                category=f_item.get("category", "general"),
+                                description=f_item.get("description", "Unspecified flaw"),
+                                suggestion=f_item.get("suggestion", "Review task specification"),
+                            )
+                        )
+
+            # Merge with rule-based structural checks to guarantee hard constraints
+            rule_scorecard = self.evaluate(graph)
+            seen_flaws = {(f.task_id, f.category, f.severity) for f in parsed_flaws}
+            for rf in rule_scorecard.flaws:
+                if (rf.task_id, rf.category, rf.severity) not in seen_flaws:
+                    parsed_flaws.append(rf)
+                    seen_flaws.add((rf.task_id, rf.category, rf.severity))
+
+            b_count = sum(1 for f in parsed_flaws if f.severity in (FlawSeverity.BLOCKING.value, "blocking"))
+            w_count = sum(1 for f in parsed_flaws if f.severity in (FlawSeverity.WARNING.value, "warning"))
+
+            topo_s = float(data.get("topology_score", rule_scorecard.topology_score))
+            cont_s = float(data.get("contract_score", rule_scorecard.contract_score))
+            test_s = float(data.get("testability_score", rule_scorecard.testability_score))
+            ovr_s = round((topo_s + cont_s + test_s) / 3.0, 1)
+
             return RubricScorecard(
-                topology_score=float(data.get("topology_score", 100.0)),
-                contract_score=float(data.get("contract_score", 100.0)),
-                testability_score=float(data.get("testability_score", 100.0)),
-                overall_score=float(data.get("overall_score", 100.0)),
-                blocking_flaws_count=int(data.get("blocking_flaws_count", 0)),
-                warning_flaws_count=int(data.get("warning_flaws_count", 0)),
-                flaws=[],
+                topology_score=round(topo_s, 1),
+                contract_score=round(cont_s, 1),
+                testability_score=round(test_s, 1),
+                overall_score=ovr_s,
+                blocking_flaws_count=b_count,
+                warning_flaws_count=w_count,
+                flaws=parsed_flaws,
             )
         except Exception as e:
             logger.debug("evaluate_with_llm failed or malformed JSON (%s); using rule-based fallback.", e)

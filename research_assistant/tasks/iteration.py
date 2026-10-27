@@ -6,6 +6,7 @@ terminating early as soon as zero blocking flaws remain, and attaching the criti
 trace and final rubric scorecard to the task graph metadata.
 """
 
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +37,26 @@ from research_assistant.tasks.prompts import (
 
 logger = get_logger("task_iteration")
 
+
+@dataclass
+class OptimizationSpec:
+    """Domain-agnostic specification for parameter sweeps, calibration, and optimization tasks."""
+    parameter_bounds: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    objective_metrics: List[str] = field(default_factory=list)
+    search_algorithm: str = "grid"  # "grid", "bayesian", "random"
+    max_evaluations: int = 100
+    target_tolerances: Dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "parameter_bounds": self.parameter_bounds,
+            "objective_metrics": self.objective_metrics,
+            "search_algorithm": self.search_algorithm,
+            "max_evaluations": self.max_evaluations,
+            "target_tolerances": self.target_tolerances,
+        }
+
+
 REFINEMENT_PROMPT_TEMPLATE = """You are refining a scientific task decomposition DAG following an adversarial critique.
 The previous iteration of the task graph contained the following flaws that MUST be resolved:
 
@@ -57,12 +78,12 @@ The previous iteration of the task graph contained the following flaws that MUST
    - Training / Simulation (`training_or_simulation`, `experiment_runner`)
    - Metric Evaluation (`metric_evaluation`, `evaluation_agent`)
    - Verification Audit (`verification_audit`, `audit_agent`)
-4. PAPER-SPECIFIC TITLES AND DELIVERABLES: Every task title MUST explicitly name the physical model, equation, algorithm, or dataset from the paper (e.g. 'Synthesize Stealthy Hyperuniform Disorder Configurations', 'Implement Tight-Binding Hamiltonian & Recursive Green's Function Solver', 'Map Misfit Cost Landscape F(W, chi)'). NEVER use generic template titles like 'Preprocess Data & Generate Canonical Splits' or 'Implement Core Model Architecture & Algorithms'.
+4. PAPER-SPECIFIC TITLES AND DELIVERABLES: Every task title MUST explicitly name the model, equation, algorithm, or dataset from the paper (e.g. naming the specific algorithm, architecture, loss, or metric). NEVER use generic placeholder titles.
 5. CONCISE VERBATIM EXCERPTS: "paper_context_excerpts" must contain ONLY 1-2 sentence verbatim anchors or formulas under 250 characters. DO NOT paste full paragraphs or introductory prose.
 6. Explicit artifact deliverables with file extensions (.pt, .h5, .json, .csv, .lock).
 7. Concrete, deterministic acceptance criteria (pass/fail thresholds, exit codes, quantitative bounds; no subjective phrasing).
 8. CPU-safe bounds: single-threaded execution, torch.set_num_threads(1), OMP_NUM_THREADS=1.
-9. ALGORITHMIC DATA SYNTHESIS & MATHEMATICAL DERIVATION: For papers relying on synthetic, simulated, disordered, or physical datasets (e.g. stealthy hyperuniform disorder), the data task description MUST specify the exact mathematical algorithm to calculate the data: lattice grid (N=10^4 sites, k_n=2*pi*n/N), spectral cutoff K=2*pi*chi with S(k)=Theta(|k|-K), complex Gaussian Fourier amplitudes w_k=W*sqrt(S(k))*eta_k, Hermitian symmetry w_(-k)=w_k* and w_0=0 to ensure real potential, and inverse FFT to compute on-site energies w_j. NEVER output generic descriptions like 'Download raw datasets and synthesize configurations'.
+9. ALGORITHMIC DATA SYNTHESIS & MATHEMATICAL DERIVATION: For papers relying on synthetic, simulated, or algorithmic datasets, the data task description MUST specify the exact mathematical algorithm, generation procedure, parameter bounds, and validation criteria. NEVER output generic descriptions like 'Download raw datasets and synthesize configurations'.
 
 Return ONLY a valid JSON object matching the standard task graph schema with 'paper_title' and 'tasks' list.
 """
@@ -77,12 +98,6 @@ def _build_heuristic_7phase_fallback(paper_id: str, paper_title: str, context: O
     domain_data = extract_grounded_excerpts_and_domain(paper_title, ctx)
     domain = domain_data["domain_label"]
     excerpts = domain_data["excerpts"]
-
-    is_hyperuniform = any(
-        k in s.lower()
-        for k in ("hyperuniform", "stealthy", "tight-binding disorder")
-        for s in [paper_title, domain, str(ctx.get("abstract", "")), str(ctx.get("title", ""))]
-    )
 
     # 1. Environment Setup
     t1 = Task(
@@ -105,331 +120,161 @@ def _build_heuristic_7phase_fallback(paper_id: str, paper_title: str, context: O
         ],
     )
 
-    if is_hyperuniform:
-        t2 = Task(
-            task_id="task_02_data",
-            title="Synthesize 1D Stealthy Hyperuniform Disorder Configurations & Structure Factor S(k)",
-            category=TaskCategory.DATA_PREPROCESSING,
-            description="Synthesize 1D stealthy hyperuniform disorder configurations w_j via Fourier filtering: (1) Discretize tight-binding chain of N=10^4 sites with wavevectors k_n = 2*pi*n/N for n in [-N/2, N/2 - 1]; (2) Impose spectral cutoff K = 2*pi*chi (chi in (0, 0.5)) with structure factor S(k) = Theta(|k| - K); (3) Generate random complex Gaussian Fourier amplitudes w_k = W * sqrt(S(k)) * eta_k with Hermitian symmetry w_{-k} = w_k* and w_0 = 0 to enforce real-space potential; (4) Apply inverse FFT to obtain real-space on-site disorder potential w_j = (1/sqrt(N)) sum_n w_{kn} exp(i k_n j) for N_conf realizations (N_conf=1000 target, N_conf=200 trial).",
-            assigned_role=AgentRole.DATA_ENGINEER,
-            dependencies=["task_01_env"],
-            inputs=["env_ready.lock", "data_spec.yaml"],
-            outputs=["data/train.pt", "data/val.pt", "data/test.pt", "data/disorder_configurations.h5"],
-            acceptance_criteria=[
-                "Structure factor S(k) strictly vanishes (S(k) = 0) for all |k| < 2*pi*chi",
-                "Generated on-site potential w_j is strictly real-valued with imaginary component norm < 1e-12",
-                "Disorder configurations tensor verified non-empty with zero NaN/Inf entries",
-            ],
-            paper_context_excerpts=excerpts.get("data", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="data/train.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["N_train", "features"],
-                    dtype="float32",
-                    description=f"Deterministic training split tensor for {domain}",
-                ),
-                ArtifactContract(
-                    path="data/val.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["N_val", "features"],
-                    dtype="float32",
-                    description=f"Validation split tensor for {domain}",
-                ),
-                ArtifactContract(
-                    path="data/test.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["N_test", "features"],
-                    dtype="float32",
-                    description=f"Held-out evaluation split tensor for {domain}",
-                ),
-            ],
-        )
+    # 2. Data Splits & Acquisition
+    t2 = Task(
+        task_id="task_02_data",
+        title=f"Acquire & Preprocess {domain} Data",
+        category=TaskCategory.DATA_PREPROCESSING,
+        description=f"Download raw scientific datasets and synthesize configurations for {domain}, apply normalization, and partition into reproducible train, validation, and test splits with fixed random seed 42.",
+        assigned_role=AgentRole.DATA_ENGINEER,
+        dependencies=["task_01_env"],
+        inputs=["env_ready.lock", "data_spec.yaml"],
+        outputs=["data/train.pt", "data/val.pt", "data/test.pt"],
+        acceptance_criteria=["Train/Val/Test splits verified non-empty", "Zero missing values or NaN entries detected"],
+        paper_context_excerpts=excerpts.get("data", []),
+        artifact_contracts=[
+            ArtifactContract(
+                path="data/train.pt",
+                artifact_type=ArtifactType.TENSOR,
+                shape=["N_train", "features"],
+                dtype="float32",
+                description=f"Deterministic training split tensor for {domain}",
+            ),
+            ArtifactContract(
+                path="data/val.pt",
+                artifact_type=ArtifactType.TENSOR,
+                shape=["N_val", "features"],
+                dtype="float32",
+                description=f"Validation split tensor for {domain}",
+            ),
+            ArtifactContract(
+                path="data/test.pt",
+                artifact_type=ArtifactType.TENSOR,
+                shape=["N_test", "features"],
+                dtype="float32",
+                description=f"Held-out evaluation split tensor for {domain}",
+            ),
+        ],
+    )
 
-        t3 = Task(
-            task_id="task_03_model",
-            title="Implement Tight-Binding Hamiltonian & Recursive Green's Function (RGF) Solver",
-            category=TaskCategory.MODEL_IMPLEMENTATION,
-            description="Construct the 1D tight-binding Hamiltonian H = H_C + H_coupling + H_L + H_R with nearest-neighbor hopping amplitude t=1 and on-site energies w_j. Implement the Recursive Green's Function (RGF) algorithm and Caroli-Meir-Wingreen formula to compute surface Green's functions and energy-dependent transmittance T(E) with O(N) complexity.",
-            assigned_role=AgentRole.MODEL_ARCHITECT,
-            dependencies=["task_01_env"],
-            inputs=["env_ready.lock", "model_config.yaml"],
-            outputs=["src/model.py", "src/loss.py", "src/rgf_solver.py"],
-            acceptance_criteria=[
-                "Tight-binding Hamiltonian matrix matches open-system lead boundary conditions",
-                "RGF solver forward pass computes transmittance T(E) in [0, 1] without NaN values",
-            ],
-            paper_context_excerpts=excerpts.get("model", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="src/model.py",
-                    artifact_type=ArtifactType.CODE,
-                    description=f"Core architecture implementation for {domain}",
-                ),
-                ArtifactContract(
-                    path="src/loss.py",
-                    artifact_type=ArtifactType.CODE,
-                    description=f"Mathematical loss formulation and objective for {domain}",
-                ),
-            ],
-        )
+    # 3. Model Architecture
+    t3 = Task(
+        task_id="task_03_model",
+        title=f"Implement {domain} Architecture & Operators",
+        category=TaskCategory.MODEL_IMPLEMENTATION,
+        description=f"Implement mathematical model architecture, layer dimensions, custom operators, and differentiable loss functions for {domain}.",
+        assigned_role=AgentRole.MODEL_ARCHITECT,
+        dependencies=["task_01_env"],
+        inputs=["env_ready.lock", "model_config.yaml"],
+        outputs=["src/model.py", "src/loss.py"],
+        acceptance_criteria=["Forward pass completes with correct tensor dimensions", "Loss function is differentiable and gradient norm is finite"],
+        paper_context_excerpts=excerpts.get("model", []),
+        artifact_contracts=[
+            ArtifactContract(
+                path="src/model.py",
+                artifact_type=ArtifactType.CODE,
+                description=f"Core architecture implementation for {domain}",
+            ),
+            ArtifactContract(
+                path="src/loss.py",
+                artifact_type=ArtifactType.CODE,
+                description=f"Mathematical loss formulation and objective for {domain}",
+            ),
+        ],
+    )
 
-        t4 = Task(
-            task_id="task_04_smoke",
-            title="Sanity Smoke-Test RGF Solver Transmittance on Short Disordered Chain",
-            category=TaskCategory.SANITY_SMOKE_TEST,
-            description="Execute single-realization smoke test of the RGF solver on a short chain (N=100, W=0.1, chi=0.3) across 10 energy points to verify finite conductance, numerical stability, and absence of NaN values.",
-            assigned_role=AgentRole.MODEL_ARCHITECT,
-            dependencies=["task_02_data", "task_03_model"],
-            inputs=["data/train.pt", "src/model.py", "src/loss.py"],
-            outputs=["logs/smoke_test_passed.log"],
-            acceptance_criteria=[
-                "Single-realization RGF smoke test completes with exit code 0",
-                "Transmittance values T(E) are bounded in [0, 1] with zero NaN values",
-            ],
-            paper_context_excerpts=excerpts.get("smoke", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="logs/smoke_test_passed.log",
-                    artifact_type=ArtifactType.LOCKFILE,
-                    description=f"Smoke test verification log for {domain}",
-                ),
-            ],
-        )
+    # 4. Sanity Smoke-Tests
+    t4 = Task(
+        task_id="task_04_smoke",
+        title=f"Sanity Smoke-Test {domain} Forward Pass & Gradients",
+        category=TaskCategory.SANITY_SMOKE_TEST,
+        description=f"Execute a single forward pass and backward step on a dummy mini-batch for {domain} to verify gradient propagation, shape compatibility, and CPU thread safety before full training.",
+        assigned_role=AgentRole.MODEL_ARCHITECT,
+        dependencies=["task_02_data", "task_03_model"],
+        inputs=["data/train.pt", "src/model.py", "src/loss.py"],
+        outputs=["logs/smoke_test_passed.log"],
+        acceptance_criteria=["Single mini-batch forward pass completes with exit code 0", "Gradients non-zero and no NaN values produced"],
+        paper_context_excerpts=excerpts.get("smoke", []),
+        artifact_contracts=[
+            ArtifactContract(
+                path="logs/smoke_test_passed.log",
+                artifact_type=ArtifactType.LOCKFILE,
+                description=f"Smoke test verification log for {domain}",
+            ),
+        ],
+    )
 
-        t5 = Task(
-            task_id="task_05_train",
-            title="Simulate Ensemble Transmittance Spectra T(E; W, chi) & Map Misfit Cost Landscape F(W, chi)",
-            category=TaskCategory.TRAINING_OR_SIMULATION,
-            description="Compute disorder-averaged transmittance spectra T(E; W, chi) = (1/N_conf) sum_i T_i(E) over N=10^4 chains. Generate target spectrum T_tar(E) at (W_tar=0.10, chi_tar=0.30) with N_conf=1000. Sweep trial parameters (W, chi) with N_conf=200 and compute misfit cost landscape F(W, chi) = (1/N_E) sum_m [T(E_m; W, chi) - T_tar(E_m)]^2 over energy window [E-, E+] with single-thread capping (torch.set_num_threads(1), OMP_NUM_THREADS=1).",
-            assigned_role=AgentRole.EXPERIMENT_RUNNER,
-            dependencies=["task_04_smoke"],
-            inputs=["data/train.pt", "data/val.pt", "src/model.py", "logs/smoke_test_passed.log"],
-            outputs=["checkpoints/best_model.pt", "logs/train_metrics.csv", "results/misfit_landscape.csv"],
-            acceptance_criteria=[
-                "Disorder ensemble averaging completed across target and trial parameter grid",
-                "Misfit cost landscape F(W, chi) contains non-empty finite float entries across all trial pairs",
-            ],
-            paper_context_excerpts=excerpts.get("experiment", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="checkpoints/best_model.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["weights"],
-                    dtype="float32",
-                    description=f"Trained model checkpoint weights for {domain}",
-                ),
-                ArtifactContract(
-                    path="logs/train_metrics.csv",
-                    artifact_type=ArtifactType.TABULAR,
-                    columns={"epoch": "int", "loss": "float", "val_loss": "float", "learning_rate": "float"},
-                    description=f"Training and simulation metrics per epoch for {domain}",
-                ),
-            ],
-        )
+    # 5. Training / Simulation
+    t5 = Task(
+        task_id="task_05_train",
+        title=f"Execute {domain} Training & Simulation Protocol",
+        category=TaskCategory.TRAINING_OR_SIMULATION,
+        description=f"Train or simulate the model for {domain} using specified optimizer, learning rate schedule, batch size, and epochs while enforcing CPU-safe thread bounds (torch.set_num_threads(1), OMP_NUM_THREADS=1).",
+        assigned_role=AgentRole.EXPERIMENT_RUNNER,
+        dependencies=["task_04_smoke"],
+        inputs=["data/train.pt", "data/val.pt", "src/model.py", "logs/smoke_test_passed.log"],
+        outputs=["checkpoints/best_model.pt", "logs/train_metrics.csv"],
+        acceptance_criteria=["Training loss or objective converges over epochs", "Model checkpoint saved successfully"],
+        paper_context_excerpts=excerpts.get("experiment", []),
+        artifact_contracts=[
+            ArtifactContract(
+                path="checkpoints/best_model.pt",
+                artifact_type=ArtifactType.TENSOR,
+                shape=["weights"],
+                dtype="float32",
+                description=f"Trained model checkpoint weights for {domain}",
+            ),
+            ArtifactContract(
+                path="logs/train_metrics.csv",
+                artifact_type=ArtifactType.TABULAR,
+                columns={"epoch": "int", "loss": "float", "val_loss": "float", "learning_rate": "float"},
+                description=f"Training and simulation metrics per epoch for {domain}",
+            ),
+        ],
+    )
 
-        t6 = Task(
-            task_id="task_06_eval",
-            title="Extract Inversion Parameters (W_opt, chi_opt) & Benchmark Against Paper Spectra",
-            category=TaskCategory.METRIC_EVALUATION,
-            description="Locate global minimum of misfit cost landscape F(W, chi) to extract recovered parameters (W_opt, chi_opt). Compare against reference target parameters (W_tar=0.10, chi_tar=0.30) within 5% error and benchmark transmittance curves against Fig. 2 and Fig. 3.",
-            assigned_role=AgentRole.EVALUATION_AGENT,
-            dependencies=["task_05_train"],
-            inputs=["checkpoints/best_model.pt", "data/test.pt"],
-            outputs=["metrics/evaluation_report.json", "results/optimal_parameters.json"],
-            acceptance_criteria=[
-                "Parameter recovery error |W_opt - W_tar|/W_tar < 0.05 and |chi_opt - chi_tar|/chi_tar < 0.05",
-                "Benchmark report cross-references Fig. 2 and Fig. 3 transmittance step locations",
-            ],
-            paper_context_excerpts=excerpts.get("evaluation", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="metrics/evaluation_report.json",
-                    artifact_type=ArtifactType.METRICS_JSON,
-                    required_keys=["test_accuracy", "f1_score", "paper_target_comparison"],
-                    description=f"Evaluation metrics on held-out test split for {domain}",
-                ),
-            ],
-        )
+    # 6. Metric Evaluation
+    t6 = Task(
+        task_id="task_06_eval",
+        title=f"Compute {domain} Evaluation Metrics & Benchmarks",
+        category=TaskCategory.METRIC_EVALUATION,
+        description=f"Evaluate the trained model checkpoint for {domain} on held-out test splits, compute reported metrics, and generate comparison tables against paper baseline targets.",
+        assigned_role=AgentRole.EVALUATION_AGENT,
+        dependencies=["task_05_train"],
+        inputs=["checkpoints/best_model.pt", "data/test.pt"],
+        outputs=["metrics/evaluation_report.json"],
+        acceptance_criteria=["Primary performance metric computed on test set", "Comparison table generated against paper targets"],
+        paper_context_excerpts=excerpts.get("evaluation", []),
+        artifact_contracts=[
+            ArtifactContract(
+                path="metrics/evaluation_report.json",
+                artifact_type=ArtifactType.METRICS_JSON,
+                required_keys=["test_accuracy", "f1_score", "paper_target_comparison"],
+                description=f"Evaluation metrics on held-out test split for {domain}",
+            ),
+        ],
+    )
 
-        t7 = Task(
-            task_id="task_07_audit",
-            title="Audit Parameter Recovery Bounds & Transmittance Step Verification",
-            category=TaskCategory.VERIFICATION_AUDIT,
-            description="Verify parameter recovery accuracy (|W_opt - W_tar|/W_tar < 0.05, |chi_opt - chi_tar|/chi_tar < 0.05) and check transmittance jump location at E = 2 - 2*cos(pi*chi) matching paper tolerances.",
-            assigned_role=AgentRole.AUDIT_AGENT,
-            dependencies=["task_06_eval"],
-            inputs=["metrics/evaluation_report.json", "logs/train_metrics.csv"],
-            outputs=["results/replication_scorecard.md"],
-            acceptance_criteria=[
-                "Replication scorecard generated with 0 blocking flaws",
-                "All artifact checksums certified non-empty and parameter recovery verified",
-            ],
-            paper_context_excerpts=excerpts.get("audit", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="results/replication_scorecard.md",
-                    artifact_type=ArtifactType.CODE,
-                    description=f"Certified replication audit scorecard for {domain}",
-                ),
-            ],
-        )
-    else:
-        # 2. Data Splits & Acquisition
-        t2 = Task(
-            task_id="task_02_data",
-            title=f"Acquire & Preprocess {domain} Data",
-            category=TaskCategory.DATA_PREPROCESSING,
-            description=f"Download raw scientific datasets and synthesize configurations for {domain}, apply normalization, and partition into reproducible train, validation, and test splits with fixed random seed 42.",
-            assigned_role=AgentRole.DATA_ENGINEER,
-            dependencies=["task_01_env"],
-            inputs=["env_ready.lock", "data_spec.yaml"],
-            outputs=["data/train.pt", "data/val.pt", "data/test.pt"],
-            acceptance_criteria=["Train/Val/Test splits verified non-empty", "Zero missing values or NaN entries detected"],
-            paper_context_excerpts=excerpts.get("data", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="data/train.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["N_train", "features"],
-                    dtype="float32",
-                    description=f"Deterministic training split tensor for {domain}",
-                ),
-                ArtifactContract(
-                    path="data/val.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["N_val", "features"],
-                    dtype="float32",
-                    description=f"Validation split tensor for {domain}",
-                ),
-                ArtifactContract(
-                    path="data/test.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["N_test", "features"],
-                    dtype="float32",
-                    description=f"Held-out evaluation split tensor for {domain}",
-                ),
-            ],
-        )
-
-        # 3. Model Architecture
-        t3 = Task(
-            task_id="task_03_model",
-            title=f"Implement {domain} Architecture & Operators",
-            category=TaskCategory.MODEL_IMPLEMENTATION,
-            description=f"Implement mathematical model architecture, layer dimensions, custom operators, and differentiable loss functions for {domain}.",
-            assigned_role=AgentRole.MODEL_ARCHITECT,
-            dependencies=["task_01_env"],
-            inputs=["env_ready.lock", "model_config.yaml"],
-            outputs=["src/model.py", "src/loss.py"],
-            acceptance_criteria=["Forward pass completes with correct tensor dimensions", "Loss function is differentiable and gradient norm is finite"],
-            paper_context_excerpts=excerpts.get("model", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="src/model.py",
-                    artifact_type=ArtifactType.CODE,
-                    description=f"Core architecture implementation for {domain}",
-                ),
-                ArtifactContract(
-                    path="src/loss.py",
-                    artifact_type=ArtifactType.CODE,
-                    description=f"Mathematical loss formulation and objective for {domain}",
-                ),
-            ],
-        )
-
-        # 4. Sanity Smoke-Tests
-        t4 = Task(
-            task_id="task_04_smoke",
-            title=f"Sanity Smoke-Test {domain} Forward Pass & Gradients",
-            category=TaskCategory.SANITY_SMOKE_TEST,
-            description=f"Execute a single forward pass and backward step on a dummy mini-batch for {domain} to verify gradient propagation, shape compatibility, and CPU thread safety before full training.",
-            assigned_role=AgentRole.MODEL_ARCHITECT,
-            dependencies=["task_02_data", "task_03_model"],
-            inputs=["data/train.pt", "src/model.py", "src/loss.py"],
-            outputs=["logs/smoke_test_passed.log"],
-            acceptance_criteria=["Single mini-batch forward pass completes with exit code 0", "Gradients non-zero and no NaN values produced"],
-            paper_context_excerpts=excerpts.get("smoke", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="logs/smoke_test_passed.log",
-                    artifact_type=ArtifactType.LOCKFILE,
-                    description=f"Smoke test verification log for {domain}",
-                ),
-            ],
-        )
-
-        # 5. Training / Simulation
-        t5 = Task(
-            task_id="task_05_train",
-            title=f"Execute {domain} Training & Simulation Protocol",
-            category=TaskCategory.TRAINING_OR_SIMULATION,
-            description=f"Train or simulate the model for {domain} using specified optimizer, learning rate schedule, batch size, and epochs while enforcing CPU-safe thread bounds (torch.set_num_threads(1), OMP_NUM_THREADS=1).",
-            assigned_role=AgentRole.EXPERIMENT_RUNNER,
-            dependencies=["task_04_smoke"],
-            inputs=["data/train.pt", "data/val.pt", "src/model.py", "logs/smoke_test_passed.log"],
-            outputs=["checkpoints/best_model.pt", "logs/train_metrics.csv"],
-            acceptance_criteria=["Training loss or objective converges over epochs", "Model checkpoint saved successfully"],
-            paper_context_excerpts=excerpts.get("experiment", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="checkpoints/best_model.pt",
-                    artifact_type=ArtifactType.TENSOR,
-                    shape=["weights"],
-                    dtype="float32",
-                    description=f"Trained model checkpoint weights for {domain}",
-                ),
-                ArtifactContract(
-                    path="logs/train_metrics.csv",
-                    artifact_type=ArtifactType.TABULAR,
-                    columns={"epoch": "int", "loss": "float", "val_loss": "float", "learning_rate": "float"},
-                    description=f"Training and simulation metrics per epoch for {domain}",
-                ),
-            ],
-        )
-
-        # 6. Metric Evaluation
-        t6 = Task(
-            task_id="task_06_eval",
-            title=f"Compute {domain} Evaluation Metrics & Benchmarks",
-            category=TaskCategory.METRIC_EVALUATION,
-            description=f"Evaluate the trained model checkpoint for {domain} on held-out test splits, compute reported metrics, and generate comparison tables against paper baseline targets.",
-            assigned_role=AgentRole.EVALUATION_AGENT,
-            dependencies=["task_05_train"],
-            inputs=["checkpoints/best_model.pt", "data/test.pt"],
-            outputs=["metrics/evaluation_report.json"],
-            acceptance_criteria=["Primary performance metric computed on test set", "Comparison table generated against paper targets"],
-            paper_context_excerpts=excerpts.get("evaluation", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="metrics/evaluation_report.json",
-                    artifact_type=ArtifactType.METRICS_JSON,
-                    required_keys=["test_accuracy", "f1_score", "paper_target_comparison"],
-                    description=f"Evaluation metrics on held-out test split for {domain}",
-                ),
-            ],
-        )
-
-        # 7. Verification Audit
-        t7 = Task(
-            task_id="task_07_audit",
-            title=f"Audit Deliverables & Replication Scorecard for {domain}",
-            category=TaskCategory.VERIFICATION_AUDIT,
-            description=f"Verify checksums of all output deliverables, cross-reference replicated metrics for {domain} against paper claims, and produce formal replication scorecard.",
-            assigned_role=AgentRole.AUDIT_AGENT,
-            dependencies=["task_06_eval"],
-            inputs=["metrics/evaluation_report.json", "logs/train_metrics.csv"],
-            outputs=["results/replication_scorecard.md"],
-            acceptance_criteria=["Replication scorecard generated", "All artifact checksums certified non-empty"],
-            paper_context_excerpts=excerpts.get("audit", []),
-            artifact_contracts=[
-                ArtifactContract(
-                    path="results/replication_scorecard.md",
-                    artifact_type=ArtifactType.CODE,
-                    description=f"Certified replication audit scorecard for {domain}",
-                ),
-            ],
-        )
+    # 7. Verification Audit
+    t7 = Task(
+        task_id="task_07_audit",
+        title=f"Audit Deliverables & Replication Scorecard for {domain}",
+        category=TaskCategory.VERIFICATION_AUDIT,
+        description=f"Verify checksums of all output deliverables, cross-reference replicated metrics for {domain} against paper claims, and produce formal replication scorecard.",
+        assigned_role=AgentRole.AUDIT_AGENT,
+        dependencies=["task_06_eval"],
+        inputs=["metrics/evaluation_report.json", "logs/train_metrics.csv"],
+        outputs=["results/replication_scorecard.md"],
+        acceptance_criteria=["Replication scorecard generated", "All artifact checksums certified non-empty"],
+        paper_context_excerpts=excerpts.get("audit", []),
+        artifact_contracts=[
+            ArtifactContract(
+                path="results/replication_scorecard.md",
+                artifact_type=ArtifactType.CODE,
+                description=f"Certified replication audit scorecard for {domain}",
+            ),
+        ],
+    )
 
     for t in [t1, t2, t3, t4, t5, t6, t7]:
         graph.add_task(t)

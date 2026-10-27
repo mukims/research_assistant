@@ -44,6 +44,9 @@ PyMuPDF==1.28.2                # 1.28 deprecates `import fitz` (the code still u
 numpy==2.2.6
 chromadb==1.5.9
 rank-bm25==0.2.2
+lancedb>=0.15.0
+pyarrow>=16.0.0
+tantivy>=0.22.0
 snowballstemmer==3.1.1         # BM25 tokenizer stemming (v2)
 pysbd==0.3.4                   # v2 chunker sentence splitter
 

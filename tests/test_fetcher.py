@@ -427,3 +427,49 @@ class TestRetryableClassification(unittest.TestCase):
                 "paywalled / not open access | not in Europe PMC | arXiv error: timeout"
             )
         )
+
+
+class TestAbstractFallback(unittest.TestCase):
+    def test_paywalled_paper_with_abstract_saved_as_abstract_tier(self):
+        ref = {
+            "raw_reference": "Paywalled Author. Paywalled Title. Nature 2020.",
+            "source_file": "seed.pdf",
+            "title": "Paywalled Title",
+            "doi": "10.1038/s41586-020-0000",
+            "doi_confidence": "high",
+        }
+        fake_biblio = {
+            "title": "Paywalled Title",
+            "abstract": "This is a comprehensive verified abstract with sufficient length to meet the 50 char threshold.",
+            "is_retracted": False,
+            "citation_count": 42,
+            "doi": "10.1038/s41586-020-0000",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            downloaded_path = os.path.join(tmp, "downloaded.json")
+            failed_path = os.path.join(tmp, "failed_downloads.json")
+            pdfs_dir = os.path.join(tmp, "pulled_pdfs")
+
+            with patch.object(agent2_fetcher, "DOWNLOADED_JSON_PATH", downloaded_path), \
+                 patch.object(agent2_fetcher, "FAILED_DOWNLOADS_PATH", failed_path), \
+                 patch.object(agent2_fetcher, "PULLED_PDFS_DIR", pdfs_dir), \
+                 patch.object(agent2_fetcher, "_load_references", return_value=[ref]), \
+                 patch.object(agent2_fetcher, "resolve_doi", return_value=("10.1038/s41586-020-0000", "grobid")), \
+                 patch.object(agent2_fetcher, "try_unpaywall", return_value=(False, "paywalled")), \
+                 patch.object(agent2_fetcher, "try_europepmc", return_value=(False, "not in Europe PMC")), \
+                 patch.object(agent2_fetcher, "try_arxiv", return_value=(False, "not found on arXiv")), \
+                 patch("research_assistant.shared.academic_apis.fetch_bibliometrics_and_abstract", return_value=fake_biblio):
+                agent2_fetcher.fetch_papers()
+
+            with open(downloaded_path) as f:
+                downloaded = json.load(f)
+
+            self.assertEqual(len(downloaded), 1)
+            record = next(iter(downloaded.values()))
+            self.assertEqual(record["evidence_tier"], "abstract_only")
+            self.assertIn("comprehensive verified abstract", record["abstract"])
+            self.assertEqual(record["citation_count"], 42)
+            self.assertFalse(record["is_retracted"])
+            self.assertIsNone(record["path"])
+

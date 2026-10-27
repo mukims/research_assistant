@@ -212,3 +212,30 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
             "Insufficient metadata to assess peer review status or venue rigor."
         ),
     }
+
+
+def assess_source_online(
+    metadata: dict[str, Any] | None = None,
+    ref_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assess publication quality, enriching metadata via academic APIs (OpenAlex/CrossRef/S2) if needed."""
+    meta = dict(metadata or {})
+    doi = meta.get("doi") or (ref_info.get("doi") if ref_info else None)
+    title = meta.get("title") or (ref_info.get("title") if ref_info else None)
+
+    if (meta.get("citation_count") is None or "is_retracted" not in meta) and (doi or title):
+        try:
+            from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
+            bib = fetch_bibliometrics_and_abstract(doi=doi, title=title)
+            if bib:
+                if meta.get("citation_count") is None and bib.get("citation_count") is not None:
+                    meta["citation_count"] = bib["citation_count"]
+                if "is_retracted" not in meta and bib.get("is_retracted") is not None:
+                    meta["is_retracted"] = bib["is_retracted"]
+                if not meta.get("venue") and bib.get("venue"):
+                    meta["venue"] = bib["venue"]
+        except Exception:
+            pass
+
+    return assess_source(meta, ref_info=ref_info)
+

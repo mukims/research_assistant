@@ -110,26 +110,27 @@ def start_job(job_id: str, label: str, runner: Callable, origin: str = "audit") 
         _JOBS[job_id] = job
 
     def _run():
-        try:
-            final = _call_runner(runner, job)
-            job.result = final if isinstance(final, dict) else {}
+        with pipeline_status.job_status_context(job_id):
             try:
-                save_run(job_id, job.result, label=label, origin=origin)
-            except Exception as exc:  # the run succeeded; only its record failed
-                logger.warning("Could not save run %s: %s", job_id, exc)
-            # State flips last: a reader that sees "done" may rely on the
-            # record being on disk already.
-            job.state = "done"
-        except BaseException as exc:  # noqa: BLE001 — a thread must never die silently
-            if pipeline_status.is_cancellation(exc):
-                job.state = "cancelled"
-                job.error = pipeline_status.format_exception_detail(exc)
-            else:
-                job.state = "failed"
-                job.error = pipeline_status.format_exception_detail(exc)
-                logger.error("Run %s failed: %s\n%s", job_id, job.error, traceback.format_exc())
-        finally:
-            job.finished_at = _now()
+                final = _call_runner(runner, job)
+                job.result = final if isinstance(final, dict) else {}
+                try:
+                    save_run(job_id, job.result, label=label, origin=origin)
+                except Exception as exc:  # the run succeeded; only its record failed
+                    logger.warning("Could not save run %s: %s", job_id, exc)
+                # State flips last: a reader that sees "done" may rely on the
+                # record being on disk already.
+                job.state = "done"
+            except BaseException as exc:  # noqa: BLE001 — a thread must never die silently
+                if pipeline_status.is_cancellation(exc):
+                    job.state = "cancelled"
+                    job.error = pipeline_status.format_exception_detail(exc)
+                else:
+                    job.state = "failed"
+                    job.error = pipeline_status.format_exception_detail(exc)
+                    logger.error("Run %s failed: %s\n%s", job_id, job.error, traceback.format_exc())
+            finally:
+                job.finished_at = _now()
 
     job.thread = threading.Thread(target=_run, name=f"run-{job_id}", daemon=True)
     job.thread.start()
