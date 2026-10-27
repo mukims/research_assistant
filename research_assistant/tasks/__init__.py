@@ -11,8 +11,17 @@ from research_assistant.tasks.models import (
     ArtifactType,
     Task,
     TaskCategory,
+    TaskContextPack,
     TaskGraph,
     TaskStatus,
+)
+from research_assistant.tasks.retrieval import (
+    build_paper_reference_subgraph,
+    compile_task_context_pack,
+    dereference_method_citations,
+    format_query_results_markdown,
+    populate_graph_context_packs,
+    query_task_database,
 )
 from research_assistant.tasks.graph import (
     export_antigravity_specs,
@@ -36,16 +45,35 @@ from research_assistant.tasks.runner import (
     ExecutionReport,
     TaskExecutionResult,
     TaskRunner,
+    generate_task_rationale,
+)
+from research_assistant.tasks.workspace import (
+    get_paper_workspace_dir,
+    materialize_deconstructed_paper_bundle,
+    materialize_paper_upload,
+    render_paper_summary_markdown,
 )
 
 __all__ = [
     "Task",
     "TaskGraph",
     "TaskCategory",
+    "TaskContextPack",
     "TaskStatus",
     "AgentRole",
     "ArtifactContract",
     "ArtifactType",
+    "generate_task_rationale",
+    "get_paper_workspace_dir",
+    "materialize_deconstructed_paper_bundle",
+    "materialize_paper_upload",
+    "render_paper_summary_markdown",
+    "build_paper_reference_subgraph",
+    "compile_task_context_pack",
+    "dereference_method_citations",
+    "format_query_results_markdown",
+    "populate_graph_context_packs",
+    "query_task_database",
     "export_antigravity_specs",
     "load_task_graph",
     "render_markdown_plan",

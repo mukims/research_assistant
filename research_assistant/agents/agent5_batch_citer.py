@@ -18,11 +18,21 @@ from research_assistant.config import (
     JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_NEIGHBOUR_WINDOW,
 )
+from research_assistant.judgement.evidence import assemble_evidence, _warn_if_context_is_tight
 from research_assistant.judgement.judge import compose_context, judge
-from research_assistant.shared.claim_text import sentence_context, split_into_sentences  # re-exported: seed_audit, agent8 and tests import it from here
+from research_assistant.shared.claim_text import (  # re-exported: seed_audit, agent8 and tests import from here
+    _CITE_RE,
+    _TERMINAL,
+    _TRAILING_CITES_RE,
+    _cite_keys,
+    _restore_terminal_punctuation,
+    sentence_context,
+    split_into_sentences,
+)
 from research_assistant.shared.search import expand_neighbours, hybrid_search
 from research_assistant.shared.retry import retry
 from research_assistant.shared.llm import chat
+from research_assistant.shared import seed_audit
 
 logger = get_logger("agent5")
 
@@ -41,14 +51,12 @@ def contextualized_queries(sentences, contexts, paragraph_ids, needs_cite) -> di
     """{sentence index: query} for the sentences that need a citation, from
     the audit's query contextualization — one model call per paragraph. A
     failure means no queries: the caller searches with the sentences."""
-    from research_assistant.shared.seed_audit import contextualize_citation_queries  # seed_audit imports this module
-
     indices = [i for i, need in enumerate(needs_cite) if need]
     if not indices:
         return {}
     claims = [{"claim": sentences[i], "context": contexts[i], "paragraph_id": paragraph_ids[i]} for i in indices]
     try:
-        contextualize_citation_queries(claims)
+        seed_audit.contextualize_citation_queries(claims)
     except Exception as exc:  # noqa: BLE001 — the query is better with it, fine without
         logger.warning("Query contextualization failed (%s) — searching with the sentences.", exc)
         return {}
@@ -56,53 +64,9 @@ def contextualized_queries(sentences, contexts, paragraph_ids, needs_cite) -> di
 
 
 # ─── Citation key extraction ─────────────────────────────────────────────────
-
-_CITE_RE = re.compile(r"\\cite\{([^}]*)\}")
-
-# One or more \cite{...} groups at the very end of a sentence, with the
-# whitespace before them.
-_TRAILING_CITES_RE = re.compile(r"(?:\s*\\cite\{[^}]*\})+\s*$")
-_TERMINAL = ".!?"
-
-
-def _restore_terminal_punctuation(original: str, cited: str) -> str:
-    r"""Give the cited sentence back the full stop the model dropped.
-
-    gemma4:e2b writes "… films \cite{cite_1}" for "… films." — no terminal
-    punctuation. run_batch_citer joins sentences with a space, and Agent 8's
-    split_into_sentences needs [.!?] before whitespace, so the next sentence
-    is swallowed into this one and both citations get judged against a
-    two-sentence claim. Restore the original's terminator after the cite.
-
-    Left alone: a cited sentence that already ends in [.!?], or that ends in
-    [.!?] immediately before a trailing \cite{} group ("… films. \cite{a}"),
-    and any original that had no terminator to restore.
-    """
-    original = original.rstrip()
-    if not original or original[-1] not in _TERMINAL:
-        return cited
-    stripped = cited.rstrip()
-    if stripped and stripped[-1] in _TERMINAL:
-        return stripped
-    core = _TRAILING_CITES_RE.sub("", stripped)
-    if core and core[-1] in _TERMINAL:
-        return stripped
-    return stripped + original[-1]
-
-
-def _cite_keys(text: str) -> set[str]:
-    """Return the set of citation keys actually present in *text*.
-
-    Handles the multi-key form ``\\cite{a,b}`` as well as ``\\cite{a}``.
-    An empty set means no citation was made, whatever the model replied.
-    """
-    keys = set()
-    for match in _CITE_RE.finditer(text):
-        for key in match.group(1).split(","):
-            key = key.strip()
-            if key:
-                keys.add(key)
-    return keys
+# Note: _CITE_RE, _TRAILING_CITES_RE, _TERMINAL, _restore_terminal_punctuation,
+# and _cite_keys are imported from research_assistant.shared.claim_text and
+# re-exported at module level above for backward compatibility.
 
 
 # ─── Batched citation-need check ─────────────────────────────────────────────
@@ -309,8 +273,6 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
     passing means no citation and a record of what came closest, so the
     report can show the same account the audit would.
     """
-    from research_assistant.agents.agent8_verifier import assemble_evidence  # agent8 imports this module
-
     expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
     ctx = compose_context(context) if context else None
     verdicts, partial = [], None
@@ -347,13 +309,11 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
 
 def _verdict_steps(record: dict, sentence: str) -> list:
     """The audit's 'Why this verdict' lines for one of the citer's judged
-    candidates. seed_audit imports this module, so it is imported here."""
-    from research_assistant.shared.seed_audit import explain_verdict_steps
-
+    candidates."""
     item = {"outcome": "judged", "claim": sentence, "evidence_hits": 1}
     item.update({k: v for k, v in record.items()
                  if k not in ("key", "document", "chunk_index", "evidence", "best", "accepted", "error")})
-    return explain_verdict_steps(item)
+    return seed_audit.explain_verdict_steps(item)
 
 
 def _generate_report(
@@ -541,7 +501,6 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     if CITATION_CITER_JUDGE:
         # The judge's rubric prompt is the slow path on a local model; the
         # audit's warning says so once per run. A no-op unless LLM_BACKEND is ollama.
-        from research_assistant.agents.agent8_verifier import _warn_if_context_is_tight  # agent8 imports this module
         _warn_if_context_is_tight()
 
     # ── Process sentences ────────────────────────────────────────────────

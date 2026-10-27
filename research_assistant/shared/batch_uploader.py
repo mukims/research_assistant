@@ -12,7 +12,7 @@ import hashlib
 import zipfile
 from typing import Any
 
-from research_assistant.agents.agent0_discoverer import (
+from research_assistant.shared.pdf_metadata import (
     _inspect_pdf,
     _is_pdf_content,
 )

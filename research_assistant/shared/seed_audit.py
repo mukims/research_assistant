@@ -30,11 +30,13 @@ from research_assistant.shared.claim_text import (
     tidy_punctuation,
 )
 from research_assistant.shared.extract import normalise_section_kind
-from research_assistant.agents.agent8_verifier import (
-    _judge_once,
-    _judgement_model,
+from research_assistant.judgement.evidence import (
     assemble_evidence,
     needs_escalation,
+)
+from research_assistant.judgement.judge import (
+    _judge_once,
+    _judgement_model,
 )
 from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
@@ -746,7 +748,7 @@ def get_cached_seed_audit(seed_path: str, include_failed: bool = False) -> dict 
     # Try inspecting PDF on disk to resolve canonical key (e.g. if uploaded with a temp name)
     if os.path.exists(seed_path):
         try:
-            from research_assistant.agents.agent0_discoverer import _inspect_pdf
+            from research_assistant.shared.pdf_metadata import _inspect_pdf
             from research_assistant.shared.fetch import filename_for
             _, doi, arxiv_id = _inspect_pdf(seed_path)
             if arxiv_id:

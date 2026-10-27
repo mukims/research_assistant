@@ -15,6 +15,8 @@ from research_assistant.tasks.critic import (
 )
 from research_assistant.tasks.models import (
     AgentRole,
+    ArtifactContract,
+    ArtifactType,
     Task,
     TaskCategory,
     TaskGraph,
@@ -161,6 +163,25 @@ class TestMacroCritic(unittest.TestCase):
         self.assertTrue(len(wave_flaws) > 0)
         self.assertEqual(wave_flaws[0].severity, FlawSeverity.WARNING.value)
 
+    def test_cross_task_duplicate_output_flagged_blocking(self):
+        g = _build_full_canonical_graph()
+        # Make task_02_data also claim results/metrics.json which belongs to task_06_eval
+        g.tasks["task_02_data"].outputs.append("results/metrics.json")
+        flaws = self.critic.evaluate(g)
+        dup_flaws = [f for f in flaws if "macro_duplicate_output" in f.flaw_id]
+        self.assertTrue(len(dup_flaws) > 0)
+        self.assertEqual(dup_flaws[0].severity, FlawSeverity.BLOCKING.value)
+        self.assertIn("results/metrics.json", dup_flaws[0].description)
+
+    def test_graph_complexity_bloat_flagged_warning(self):
+        g = TaskGraph(paper_id="bloated", paper_title="Bloated Graph")
+        for i in range(13):
+            g.add_task(_make_sample_task(f"t_{i}", f"Task {i}", category=TaskCategory.DATA_PREPROCESSING))
+        flaws = self.critic.evaluate(g)
+        bloat_flaws = [f for f in flaws if f.flaw_id == "macro_graph_complexity_bloat"]
+        self.assertTrue(len(bloat_flaws) > 0)
+        self.assertEqual(bloat_flaws[0].severity, FlawSeverity.WARNING.value)
+
 
 class TestMicroCritic(unittest.TestCase):
     def setUp(self):
@@ -237,6 +258,38 @@ class TestMicroCritic(unittest.TestCase):
         flaws = self.critic.evaluate(g)
         thread_flaws = [f for f in flaws if f.category == "cpu_oversubscription"]
         self.assertEqual(thread_flaws, [])
+
+    def test_intra_task_duplicate_output_flagged_blocking(self):
+        t = _make_sample_task("t1", outputs=["data/features.pt", "data/features.pt"])
+        g = TaskGraph("p1", "P1", tasks={"t1": t})
+        flaws = self.critic.evaluate(g)
+        dup_flaws = [f for f in flaws if "micro_contract_duplicate_out" in f.flaw_id]
+        self.assertTrue(len(dup_flaws) > 0)
+        self.assertEqual(dup_flaws[0].severity, FlawSeverity.BLOCKING.value)
+
+    def test_intra_task_deliverable_bloat_flagged_warning(self):
+        outputs = [f"output_{i}.pt" for i in range(9)]
+        t = _make_sample_task("t1", outputs=outputs)
+        g = TaskGraph("p1", "P1", tasks={"t1": t})
+        flaws = self.critic.evaluate(g)
+        bloat_flaws = [f for f in flaws if "micro_contract_bloat" in f.flaw_id]
+        self.assertTrue(len(bloat_flaws) > 0)
+        self.assertEqual(bloat_flaws[0].severity, FlawSeverity.WARNING.value)
+
+    def test_tensor_dim_bloat_flagged_warning(self):
+        contract = ArtifactContract(
+            path="embeddings.pt",
+            artifact_type=ArtifactType.TENSOR,
+            shape=[100, 60000],
+            dtype="float32",
+        )
+        t = _make_sample_task("t1", outputs=["embeddings.pt"])
+        t.artifact_contracts = [contract]
+        g = TaskGraph("p1", "P1", tasks={"t1": t})
+        flaws = self.critic.evaluate(g)
+        dim_flaws = [f for f in flaws if "micro_tensor_dim_bloat" in f.flaw_id]
+        self.assertTrue(len(dim_flaws) > 0)
+        self.assertEqual(dim_flaws[0].severity, FlawSeverity.WARNING.value)
 
 
 class TestTaskCriticAndScorecard(unittest.TestCase):

@@ -571,6 +571,22 @@ def extract_references(pdf_path: str, grobid_ok: bool) -> tuple[list[Reference],
     return [], "none"
 
 
+def extract_citations_from_pdf(
+    pdf_path: str, *, grobid_ok: bool | None = None
+) -> list[dict]:
+    """Extract references for a single PDF non-destructively.
+
+    Does not move or modify the source PDF file on disk.
+    Returns a list of reference dictionaries.
+    """
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    if grobid_ok is None:
+        grobid_ok = grobid_alive()
+    refs, _method = extract_references(pdf_path, grobid_ok)
+    return [r.to_dict() for r in refs]
+
+
 def run_extractor() -> dict:
     """Extract references from every PDF in RAW_DIR.
 

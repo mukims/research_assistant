@@ -52,7 +52,7 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     )
 
     # Console handler
-    console = logging.StreamHandler(sys.stdout)
+    console = logging.StreamHandler(sys.stderr)
     console.setLevel(level)
     console.setFormatter(formatter)
     logger.addHandler(console)

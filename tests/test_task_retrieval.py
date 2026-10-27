@@ -257,6 +257,179 @@ class TestTaskRetrieval(unittest.TestCase):
         self.assertIn("y = sigma(W_2 * ReLU(W_1 * x + b_1) + b_2)", formatted)
         self.assertIn("Target Metric: Validation Fidelity >= 0.999.", formatted)
 
+    def test_reference_subgraph_and_citation_dereferencing(self):
+        """
+        Verifies Stage 1 (Paper-Scoped Reference Subgraph Builder),
+        Stage 2 (Citation Dereferencer), and Stage 3 (TaskContextPack & Query DB).
+        """
+        from research_assistant.tasks.models import Task, TaskCategory, TaskGraph
+        from research_assistant.tasks.retrieval import (
+            build_paper_reference_subgraph,
+            dereference_method_citations,
+            populate_graph_context_packs,
+            query_task_database,
+        )
+        from research_assistant.tasks.roles import format_subagent_prompt
+
+        sample_tei = """<?xml version="1.0" encoding="UTF-8"?>
+        <TEI xmlns="http://www.tei-c.org/ns/1.0">
+          <teiHeader>
+            <fileDesc><titleStmt><title type="main">Quantum Variational Solver Paper</title></titleStmt></fileDesc>
+          </teiHeader>
+          <text>
+            <body>
+              <div>
+                <head>2. Methodology</head>
+                <p>We adopt the parameter-shift gradient estimator following <ref type="bibr" target="#b0">[1]</ref> and normalize input Hamiltonians using the protocol of <ref type="bibr" target="#b1">[2]</ref>.</p>
+              </div>
+            </body>
+            <back>
+              <div type="references">
+                <listBibl>
+                  <biblStruct xml:id="b0">
+                    <analytic><title type="main">Parameter-Shift Quantum Gradients</title></analytic>
+                    <monogr><imprint><date type="published" when="2021"/></imprint></monogr>
+                    <idno type="DOI">10.1103/PhysRevA.99.032331</idno>
+                  </biblStruct>
+                  <biblStruct xml:id="b1">
+                    <analytic><title type="main">Unpublished Normalization Protocol</title></analytic>
+                    <monogr><imprint><date type="published" when="2022"/></imprint></monogr>
+                  </biblStruct>
+                </listBibl>
+              </div>
+            </back>
+          </text>
+        </TEI>
+        """
+
+        fake_manifest = {
+            "ref_1": {
+                "xml_id": "b0",
+                "cited_by": "quantum_solver.pdf",
+                "title": "Parameter-Shift Quantum Gradients",
+                "doi": "10.1103/PhysRevA.99.032331",
+                "path": "/tmp/pulled_pdfs/param_shift_2021.pdf",
+            }
+        }
+
+        with patch("research_assistant.shared.seed_audit._load_downloaded_manifest", return_value=fake_manifest), \
+             patch("research_assistant.tasks.retrieval.get_ingested_documents", return_value={"quantum_solver.pdf", "param_shift_2021.pdf"}):
+            subgraph = build_paper_reference_subgraph(
+                sample_tei,
+                paper_title="quantum_solver.pdf",
+            )
+
+        self.assertEqual(subgraph["seed_doc_key"], "quantum_solver.pdf")
+        self.assertIn("param_shift_2021.pdf", subgraph["cited_doc_keys"])
+        self.assertIn("param_shift_2021.pdf", subgraph["method_doc_keys"])
+        self.assertEqual(len(subgraph["method_citations"]), 1)
+        self.assertEqual(subgraph["method_citations"][0]["cited_doc_key"], "param_shift_2021.pdf")
+        self.assertEqual(len(subgraph["unresolved_method_citations"]), 1)
+        self.assertEqual(
+            subgraph["unresolved_method_citations"][0]["ref_title"],
+            "Unpublished Normalization Protocol",
+        )
+
+        # Stage 2: Dereference method citations against mock search resources
+        mock_collection = MagicMock()
+        mock_bm25 = MagicMock()
+        texts = [
+            "Preceding context for parameter-shift derivation.",
+            "Exact parameter-shift rule: d/dtheta <H> = 0.5 * (<H(theta + pi/2)> - <H(theta - pi/2)>).",
+            "Following context with variance bounds.",
+            "Seed paper method overview chunk.",
+        ]
+        metadatas = [
+            {"document": "param_shift_2021.pdf", "section": "Methods", "page": 3, "type": "text"},
+            {"document": "param_shift_2021.pdf", "section": "Methods", "page": 3, "type": "text"},
+            {"document": "param_shift_2021.pdf", "section": "Methods", "page": 4, "type": "text"},
+            {"document": "quantum_solver.pdf", "section": "Methodology", "page": 2, "type": "text"},
+        ]
+
+        def fake_hybrid_search(query, collection, bm25, texts, metadatas, top_k=5, doc_filter=None, **kwargs):
+            if doc_filter and "param_shift_2021.pdf" in doc_filter:
+                return [{
+                    "chunk_index": 1,
+                    "text": texts[1],
+                    "metadata": metadatas[1],
+                    "rrf_score": 0.032,
+                }]
+            return [{
+                "chunk_index": 3,
+                "text": texts[3],
+                "metadata": metadatas[3],
+                "rrf_score": 0.031,
+            }]
+
+        with patch("research_assistant.tasks.retrieval.hybrid_search", side_effect=fake_hybrid_search):
+            deref = dereference_method_citations(
+                subgraph,
+                search_resources=(mock_collection, mock_bm25, texts, metadatas),
+            )
+            self.assertEqual(len(deref), 1)
+            self.assertEqual(deref[0]["cited_doc_key"], "param_shift_2021.pdf")
+            # Neighbor chunks (0 and 2) should be expanded into the passage text
+            passage_text = deref[0]["passages"][0]["text"]
+            self.assertIn("Exact parameter-shift rule", passage_text)
+            self.assertIn("Preceding context", passage_text)
+            self.assertIn("Following context", passage_text)
+
+            # Stage 3: Populate TaskContextPack on a TaskGraph and test serialization + prompt + query
+            graph = TaskGraph(paper_id="quantum_solver.pdf", paper_title="Quantum Variational Solver Paper")
+            t_model = Task(
+                task_id="task_03_model",
+                title="Implement Parameter-Shift Gradient Estimator",
+                category=TaskCategory.MODEL_IMPLEMENTATION,
+                description="Implement parameter-shift gradient estimator [1] for the variational circuit.",
+                inputs=["env_ready.lock"],
+                outputs=["src/gradients.py"],
+                acceptance_criteria=["Gradient matches finite difference within 1e-6"],
+            )
+            graph.add_task(t_model)
+
+            populate_graph_context_packs(
+                graph,
+                subgraph=subgraph,
+                dereferenced_citations=deref,
+                search_resources=(mock_collection, mock_bm25, texts, metadatas),
+            )
+
+            self.assertIsNotNone(t_model.context_pack)
+            self.assertFalse(t_model.context_pack.is_empty())
+            self.assertTrue(len(t_model.context_pack.seed_passages) >= 1)
+            self.assertTrue(len(t_model.context_pack.cited_protocols) >= 1)
+            self.assertEqual(len(t_model.context_pack.unresolved_citations), 1)
+
+            # Round-trip serialization check
+            restored = TaskGraph.from_dict(graph.to_dict())
+            restored_task = restored.get_task("task_03_model")
+            self.assertIsNotNone(restored_task.context_pack)
+            self.assertEqual(
+                restored_task.context_pack.cited_protocols[0]["cited_doc_key"],
+                "param_shift_2021.pdf",
+            )
+            self.assertIn("param_shift_2021.pdf", restored.subgraph_doc_keys())
+
+            # Subagent prompt check
+            prompt = format_subagent_prompt(restored_task, plan_path="plan.json")
+            self.assertIn("## Grounded Reference Database Context Pack", prompt)
+            self.assertIn("Dereferenced Cited Protocols", prompt)
+            self.assertIn("param_shift_2021.pdf", prompt)
+            self.assertIn("python orchestrate_tasks.py query plan.json --task-id task_03_model", prompt)
+
+            # On-demand query_task_database check
+            q_res = query_task_database(
+                query="parameter shift gradient formula",
+                graph_or_subgraph=restored,
+                task_id="task_03_model",
+                scope="cited",
+                search_resources=(mock_collection, mock_bm25, texts, metadatas),
+            )
+            self.assertEqual(q_res["scope"], "cited")
+            self.assertTrue(len(q_res["results"]) >= 1)
+            self.assertEqual(q_res["results"][0]["document"], "param_shift_2021.pdf")
+            self.assertIn("Exact parameter-shift rule", q_res["results"][0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

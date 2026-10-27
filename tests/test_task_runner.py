@@ -20,6 +20,7 @@ from research_assistant.tasks.runner import (
     ExecutionReport,
     TaskExecutionResult,
     TaskRunner,
+    generate_task_rationale,
 )
 
 
@@ -96,6 +97,15 @@ class TestTaskRunner(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(workspace, "data", "processed.h5")))
         self.assertTrue(os.path.exists(os.path.join(workspace, "model.py")))
         self.assertTrue(os.path.exists(os.path.join(workspace, "metrics.json")))
+
+        # Verify rationales were materialized (AUTOMAT idea.md protocol)
+        self.assertTrue(os.path.exists(os.path.join(workspace, "rationale.md")))
+        self.assertTrue(os.path.exists(os.path.join(workspace, "rationales", "t1_rationale.md")))
+        with open(os.path.join(workspace, "rationales", "t1_rationale.md"), "r", encoding="utf-8") as f:
+            rat_content = f.read()
+        self.assertIn("## 1. Problem Knowledge", rat_content)
+        self.assertIn("## 2. Scientific Insight", rat_content)
+        self.assertIn("## 3. Implementation Strategy & Complexity Bounds", rat_content)
 
         # Check updates list has events
         self.assertGreater(len(updates), 0)
@@ -177,6 +187,25 @@ class TestTaskRunner(unittest.TestCase):
         with open(out_path, "r", encoding="utf-8") as f:
             content = f.read()
         self.assertIn("def train()", content)
+
+    def test_generate_task_rationale_structure(self):
+        t = Task(
+            task_id="t_custom",
+            title="Compute Hyperuniform Spectral Cutoff",
+            category=TaskCategory.DATA_PREPROCESSING,
+            assigned_role=AgentRole.DATA_ENGINEER,
+            inputs=["raw.h5"],
+            outputs=["data/sk.pt"],
+            description="Generate stealthy hyperuniform configurations with S(k)=0 for |k| < K.",
+            acceptance_criteria=["Exit code 0", "Shape is (N,)"],
+        )
+        rat = generate_task_rationale(t, workspace_dir="/tmp/test_workspace")
+        self.assertIn("# Scientific Rationale & Execution Plan: Compute Hyperuniform Spectral Cutoff", rat)
+        self.assertIn("## 1. Problem Knowledge", rat)
+        self.assertIn("## 2. Scientific Insight", rat)
+        self.assertIn("## 3. Implementation Strategy & Complexity Bounds", rat)
+        self.assertIn("`raw.h5`", rat)
+        self.assertIn("`data/sk.pt`", rat)
 
 
 if __name__ == "__main__":

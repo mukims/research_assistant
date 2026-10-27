@@ -20,7 +20,9 @@ from research_assistant.tasks import (
     TaskRunner,
     deconstruct_paper_into_task_graph,
     export_antigravity_specs,
+    format_query_results_markdown,
     load_task_graph,
+    query_task_database,
     render_markdown_plan,
     render_mermaid,
 )
@@ -39,7 +41,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
             paper_id=args.paper_id,
             force_heuristic=args.heuristic,
             full_phases=getattr(args, "full_phases", False),
+            build_refs=getattr(args, "build_refs", False),
         )
+        from research_assistant.tasks.workspace import get_paper_workspace_dir
+        ws_dir = get_paper_workspace_dir(graph.paper_id)
+        print(f"Paper root workspace created at: {ws_dir} (all Markdown files materialized)")
     except Exception as exc:
         print(f"Error: Failed to deconstruct paper '{paper_path}': {exc}", file=sys.stderr)
         return 1
@@ -84,7 +90,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: Failed to load plan file '{plan_path}': {exc}", file=sys.stderr)
         return 1
 
-    workspace = args.workspace or os.path.join("workspace_runs", graph.paper_id)
+    from research_assistant.tasks.workspace import get_paper_workspace_dir
+    workspace = args.workspace or get_paper_workspace_dir(graph.paper_id)
     mode = ExecutionMode.AUTONOMOUS if args.mode == "autonomous" else ExecutionMode.SIMULATION
 
     print(f"Executing Task Graph: {graph.paper_title} ({len(graph.tasks)} tasks)")
@@ -146,6 +153,39 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_query(args: argparse.Namespace) -> int:
+    plan_path = args.plan_json
+    if not os.path.exists(plan_path):
+        print(f"Error: Plan file '{plan_path}' not found.", file=sys.stderr)
+        return 1
+
+    try:
+        graph = load_task_graph(plan_path)
+    except Exception as exc:
+        print(f"Error: Failed to load plan file '{plan_path}': {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        result = query_task_database(
+            query=args.query,
+            graph_or_subgraph=graph,
+            task_id=getattr(args, "task_id", None),
+            scope=getattr(args, "scope", "subgraph"),
+            top_k=getattr(args, "top_k", 5),
+            expand_window=getattr(args, "expand_window", 1),
+        )
+    except Exception as exc:
+        print(f"Error: Database query failed: {exc}", file=sys.stderr)
+        return 1
+
+    fmt = getattr(args, "format", "markdown").lower()
+    if fmt == "json":
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(format_query_results_markdown(result))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scientific Paper-to-Agent Task Orchestrator")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -158,6 +198,7 @@ def main() -> int:
     p_plan.add_argument("--output", "-o", help="File to write the generated plan to")
     p_plan.add_argument("--heuristic", action="store_true", help="Force fast offline heuristic mode")
     p_plan.add_argument("--full-phases", action="store_true", help="Generate all 6 mandatory scientific replication phases")
+    p_plan.add_argument("--build-refs", action="store_true", help="Extract, fetch, and ingest missing references around the paper")
 
     # run command
     p_run = subparsers.add_parser("run", help="Execute a planned task graph")
@@ -171,6 +212,16 @@ def main() -> int:
     p_show.add_argument("plan_json", help="Path to TaskGraph JSON file")
     p_show.add_argument("--format", choices=["markdown", "mermaid", "json", "antigravity"], default="markdown")
 
+    # query command
+    p_query = subparsers.add_parser("query", help="Query the paper's reference database for a task")
+    p_query.add_argument("plan_json", help="Path to TaskGraph JSON file")
+    p_query.add_argument("--query", "-q", required=True, help="Methodological or equation query string")
+    p_query.add_argument("--task-id", "-t", help="Optional task ID for task-scoped context")
+    p_query.add_argument("--scope", choices=["subgraph", "seed", "cited", "global"], default="subgraph")
+    p_query.add_argument("--top-k", type=int, default=5, help="Number of passages to return")
+    p_query.add_argument("--expand-window", type=int, default=1, help="Neighbor chunk expansion window")
+    p_query.add_argument("--format", choices=["markdown", "json"], default="markdown")
+
     args = parser.parse_args()
     if args.command == "plan":
         return cmd_plan(args)
@@ -178,6 +229,8 @@ def main() -> int:
         return cmd_run(args)
     elif args.command == "show":
         return cmd_show(args)
+    elif args.command == "query":
+        return cmd_query(args)
     return 0
 
 

@@ -387,13 +387,65 @@ While Pipeline 1 builds literature corpora and answers research questions, **Pip
 
 | Module | Location | Responsibilities |
 |---|---|---|
-| **Models & Graph Engine** | `research_assistant.tasks.models` | Strongly-typed dataclasses (`Task`, `TaskGraph`), enums (`TaskCategory`, `TaskStatus`, `AgentRole`), cycle detection via DFS, missing dependency validation, topological wave decomposition, and task readiness calculation. |
-| **Protocol Miner** | `research_assistant.tasks.extractor` | Parses TEI XML or plain text for methodology, equations, algorithms, tables, and benchmarks. Prompts LLM to deconstruct the paper into dependency-linked tasks with automatic fallback to a deterministic 5-task heuristic replication graph. |
+| **Models & Graph Engine** | `research_assistant.tasks.models` | Strongly-typed dataclasses (`Task`, `TaskGraph`, `ArtifactContract`), enums (`TaskCategory`, `TaskStatus`, `AgentRole`, `ArtifactType`), cycle detection via DFS, missing dependency validation, topological wave decomposition, and task readiness calculation. |
+| **Protocol Miner** | `research_assistant.tasks.extractor` | Parses TEI XML or plain text for methodology, equations, algorithms, tables, and benchmarks. Prompts LLM to deconstruct the paper into dependency-linked tasks with automatic fallback to a deterministic heuristic replication graph. Automatically triggers Markdown bundle materialization upon completion. |
+| **Context Retrieval & Subgraphs** | `research_assistant.tasks.retrieval` | Builds paper-scoped reference subgraphs, dereferences methodological citations against the corpus, performs 4-facet retrieval (data, architecture, hyperparameters, evaluation), and compiles a grounded `TaskContextPack` for every task. |
+| **Two-Level Critic Engine** | `research_assistant.tasks.critic` | Hierarchical critique engine (`MacroCritic`, `MicroCritic`, `RubricScorecard`). Scrutinizes DAG topology, mandatory 6 scientific phases, wave parallelizability, deliverable collision prevention (`BLOCKING`), graph size caps, instruction specificity, artifact contracts, CPU thread safety, and tensor dimensionality bloat warnings. |
+| **Proposer-Critic Refinement** | `research_assistant.tasks.iteration` | Multi-turn refinement engine (`ProposerCriticEngine`). Runs up to 3 turns between proposer and critic to iteratively eliminate blocking flaws and optimize replication quality. |
+| **Test Harness Generator** | `research_assistant.tasks.harness` | Generates deterministic Python test harnesses (`harness_<task_id>.py`) asserting file existence, minimum byte sizes, non-empty outputs, and tensor/tabular schemas. |
+| **Agent Roles & Prompts** | `research_assistant.tasks.roles` | Specialized role definitions, capabilities, tool access, and dynamic task prompt formatting for 6 personas: `devops_agent`, `data_engineer`, `model_architect`, `experiment_runner`, `evaluation_agent`, and `audit_agent`. Includes instructions for maintaining `rationale.md`. |
+| **Reflexion Runner & Dispatcher** | `research_assistant.tasks.runner` | Orchestrates topological wave execution, manages artifact routing between parent/child tasks, writes pre-execution `rationale.md` files (AUTOMAT protocol), executes Two-Cycle Reflexion against test harnesses with structured error diagnostics, and compiles `execution_scorecard.md`. |
+| **Workspace Manager** | `research_assistant.tasks.workspace` | Creates and manages dedicated paper root directories (`workspace_runs/<paper_id>/`), strictly protected from persistent data directories. Materializes the complete Markdown bundle (`plan.md`, `dag.md`, `scorecard.md`, `paper_summary.md`, `rationale.md`, `rationales/*.md`, `README.md`, `plan.json`, `antigravity_specs.json`). |
 | **Graph Visualizer & Exporter** | `research_assistant.tasks.graph` | Color-coded Mermaid DAG flowcharts, comprehensive executive Markdown execution plans, Google Antigravity subagent invocation payloads, and atomic JSON persistence. |
-| **Agent Roles & Personas** | `research_assistant.tasks.roles` | Specialized role definitions, capabilities, tool access, and dynamic task prompt formatting for 6 personas: `devops_agent`, `data_engineer`, `model_architect`, `experiment_runner`, `evaluation_agent`, and `audit_agent`. |
-| **Task Runner & Dispatcher** | `research_assistant.tasks.runner` | Orchestrates topological wave execution, manages artifact routing between parent/child tasks, verifies acceptance criteria, tracks SHA-256 artifact hashes, and compiles final `ExecutionReport` replication scorecards. |
-| **Streamlit Interface** | `research_assistant.tasks.ui` | Tab 0 in `app.py`: interactive paper selection, instant DAG synthesis, live pan/zoom Mermaid flowcharts, expandable task cards, and single-click wave execution with downloadable plans. |
-| **CLI Orchestrator** | `orchestrate_tasks.py` | Command-line interface for planning (`plan`), running (`run`), and previewing (`show`) task graphs. |
+| **Streamlit Interface** | `research_assistant.tasks.ui` | Tab 0 in `app.py`: interactive paper selection, upload staging, instant DAG synthesis, live pan/zoom Mermaid flowcharts, expandable task cards, and single-click wave execution. |
+| **CLI Orchestrator** | `orchestrate_tasks.py` | Command-line interface for planning (`plan`), running (`run`), and previewing (`show`) task graphs with automatic workspace materialization. |
+
+### Two-Level Hierarchical Critic & Quantitative Rubric Scorecard
+
+To ensure replication workflows are scientifically rigorous and safe to run, `critic.py` implements a two-level evaluation engine:
+
+1. **MacroCritic (Global Graph & Topology)**:
+   - **Topology**: Enforces DAG acyclicity, catches self-loops, and flags missing upstream dependencies.
+   - **6 Mandatory Scientific Phases**: Verifies that the workflow spans `environment_setup`, `data_preprocessing`, `model_implementation`, `sanity_smoke_test`, `training_or_simulation`, and `metric_evaluation` / `verification_audit`.
+   - **Wave Serialization**: Flags warnings if parallelizable independent tasks are unnecessarily serialized into a single line.
+   - **Output Deliverable Collisions (AUTOMAT)**: Flags `macro_duplicate_output_*` as `BLOCKING` if two different tasks claim the same output file path.
+   - **Graph Complexity Bloat (AUTOMAT)**: Flags `macro_graph_complexity_bloat` as `WARNING` if the graph contains >12 tasks.
+
+2. **MicroCritic (Task-Level Contracts & Execution Safety)**:
+   - **Instruction Specificity**: Flags vague task descriptions (<60 characters) and requires explicit mathematical algorithm formulation (e.g. reciprocal wavevectors and spectral cutoffs for stealthy hyperuniform disorder).
+   - **Artifact Contracts**: Requires explicit file extensions and formal `ArtifactContract` schemas (shape and dtype for tensors, column dictionaries for tabular data, required keys for metrics JSON).
+   - **Intra-Task Duplicate Deliverables (AUTOMAT)**: Flags `micro_contract_duplicate_out_*` as `BLOCKING` if a task lists identical output paths.
+   - **Deliverable Bloat (AUTOMAT)**: Flags `micro_contract_bloat_*` as `WARNING` if an individual task declares >8 deliverables.
+   - **Tensor Dimensionality Bloat (AUTOMAT)**: Flags `micro_tensor_dim_bloat_*` as `WARNING` if a tensor shape specifies dimensions >50,000 without dimensionality reduction.
+   - **CPU Hardware Bounds**: Flags `cpu_oversubscription` as `BLOCKING` if compute/training tasks do not explicitly bound CPU threads (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`).
+
+3. **Rubric Scorecard (0–100)**:
+   - Evaluates three quantitative sub-scores: Topology Score, Contract Score, and Testability/CPU Safety Score.
+   - A scorecard passes (`is_passing = True`) only when there are **0 blocking flaws**.
+
+### AUTOMAT Principles: Hypothesis Logging & Complexity Control
+
+Adapted from the AUTOMAT autoresearch framework (Cobelli & Sanvito, *Digital Discovery*, 2026):
+
+- **Hypothesis Logging Protocol (`idea.md` / `rationale.md`)**:
+  Before executing code, `runner.py` materializes `<workspace>/rationales/<task_id>_rationale.md` and updates `<workspace>/rationale.md` structured into three mandatory sections:
+  1. *1. Problem Knowledge*: Objective, prerequisites, and paper context excerpts.
+  2. *2. Scientific Insight*: Mathematical formulations, physical invariants, reality conditions, and symmetries.
+  3. *3. Implementation Strategy & Complexity Bounds*: Output deliverables, formal artifact contracts, thread caps, and acceptance criteria.
+- **Complexity and Redundancy Caps**:
+  Prevents unconstrained agentic feature/deliverable explosion by blocking duplicate deliverables across or within tasks, warning on deliverable counts >8, and capping unpruned tensor dimensions at 50,000.
+
+### Dedicated Paper Root Workspaces & Markdown Bundles
+
+Whenever a paper is uploaded (via UI) or deconstructed (via API or CLI), `workspace.py` creates `workspace_runs/<paper_id>/` and drops a complete Markdown bundle:
+- `README.md`: Workspace manifest and wave summary.
+- `plan.md`: Human-readable and agent-executable replication DAG.
+- `dag.md`: Interactive Mermaid diagram.
+- `scorecard.md`: Two-level critic rubric scorecard and identified flaws.
+- `paper_summary.md`: Extracted methodology, sections, equations, and tables.
+- `rationale.md`: Master hypothesis and execution rationale.
+- `rationales/*.md`: Per-task scientific rationales for each subagent.
+- `plan.json` & `antigravity_specs.json`: Machine-readable specifications.
 
 ### CLI Usage
 

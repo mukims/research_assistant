@@ -2,10 +2,6 @@
 
 *Autonomous Academic Research Assistant*
 
-[![tests](https://github.com/mukims/research_assistant/actions/workflows/tests.yml/badge.svg)](https://github.com/mukims/research_assistant/actions/workflows/tests.yml)
-![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
-[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
-
 **He cites your draft for you. He also judges you for not reading the papers.**
 
 Hand him a half-written manuscript and a vague research idea. He'll find the
@@ -104,13 +100,41 @@ The **Agent task planner** is a second pipeline (`research_assistant/tasks/`,
 (GROBID TEI, or PyMuPDF text for a bare PDF). If the paper is already in the
 corpus it retrieves evidence for four facets — data, architecture,
 hyperparameters, evaluation — from it (`TASK_ENABLE_AUTO_INGEST=1` ingests the
-paper first). Then a proposer–critic loop of at most three turns rewrites the
-task graph until the critic finds no blocking flaw, and any flaw still left is
-repaired deterministically. If the model fails or the graph won't validate,
-or you pass `--heuristic`, it falls back to a fixed five-task graph
-(`--full-phases` gives all six phases). The result is checked as a DAG (no
-cycles, no dangling dependencies), scheduled into topological waves, and run
-either as a dry run or autonomously. Read the scorecard for what it is: the
+paper first), and constructs a paper-scoped reference subgraph to dereference
+methodological citations.
+
+A proposer–critic loop of at most three turns rewrites the task graph against a
+**Two-Level Hierarchical Critic Engine**:
+- **MacroCritic**: Verifies DAG acyclicity, dependency validity, topological wave
+  parallelizability, and mandatory coverage across the six scientific phases
+  (`environment_setup`, `data_preprocessing`, `model_implementation`,
+  `sanity_smoke_test`, `training_or_simulation`, `metric_evaluation` / `verification_audit`).
+  Also enforces single-owner deliverables (`macro_duplicate_output_*` blocking)
+  and warns against over-fragmented graph bloat (>12 tasks).
+- **MicroCritic**: Scrutinizes task instruction specificity (operational parameters,
+  first-principles algorithms), enforces formal `ArtifactContract` schemas
+  (shapes, dtypes, columns, keys), prevents intra-task duplicate outputs and
+  deliverable bloat (>8 deliverables), warns against unpruned tensor bloat (>50,000 dimensions),
+  and strictly verifies hardware CPU bounds (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`).
+- **Quantitative Rubric Scorecards (0–100)**: Rates topology, contracts, and testability.
+
+Whenever a paper is uploaded or asked to be deconstructed, the system creates a
+dedicated root directory (`workspace_runs/<paper_id>/`) and automatically drops a
+complete suite of inspectable Markdown artifacts:
+- [`plan.md`](#): Complete DAG replication plan with wave sequencing and artifact contracts.
+- [`dag.md`](#): Mermaid flowchart dependency diagram.
+- [`scorecard.md`](#): Quantitative critic rubric scorecard and identified flaws.
+- [`paper_summary.md`](#): Extracted abstract, theoretical framework, methodology sections, and tables.
+- [`rationale.md`](#): Consolidated scientific hypothesis and complexity bounds (adapting the AUTOMAT protocol).
+- [`rationales/*.md`](#): Individual subagent task rationales documenting *Problem Knowledge*, *Scientific Insight*, and *Implementation Strategy*.
+- [`README.md`](#): Workspace index and execution waves manifest.
+- [`plan.json`](#) & [`antigravity_specs.json`](#): Machine-readable specifications for autonomous multi-agent teams.
+
+When executed, a **Two-Cycle Reflexion Runner** runs tasks wave-by-wave, generates
+deterministic acceptance test harnesses, parses structured failure diagnostics
+(exit code, error type, failing assertions, missing files, tracebacks), and gives
+failing tasks one reflection cycle to refine deliverables before compiling a
+final `execution_scorecard.md`. Read the scorecard for what it is: the
 rating (`CERTIFIED_REPLICABLE` at 99%+, `PARTIALLY_REPLICATED` from 70%) is the
 share of tasks whose acceptance check passed. It does not say the paper's
 numbers were reproduced, and a dry run, which fills in placeholder data, can
@@ -324,12 +348,13 @@ the runner refuses to point at the persistent data directory.
 | `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, the citation audit |
 | `research_assistant/judgement/` | the claim–evidence judge, source assessor, reliability policy, and the judge's evaluation set |
 | `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
-| `research_assistant/tasks/` | the Agent task planner (Pipeline 2); reaches into few shared modules |
+| `research_assistant/tasks/` | the Agent task planner (Pipeline 2): `models`, `extractor`, `critic`, `iteration`, `retrieval`, `harness`, `roles`, `runner`, `workspace`, `ui` |
 | `research_assistant/transfer/` | borrowing from other fields: technique cards, bottlenecks, transfers, the critic, scoring and reports |
 | `scripts/` | operator tools: judge and citer evaluation, labelling, index statistics, and the technique-transfer commands (`build_cards.py`, `transfer.py`, `evaluate_transfer.py`, `build_case_corpus.py`, `review_cards.py`) |
 | `notebooks/` | `pipeline.ipynb`, a test bench that runs Agents 0–8 on one paper |
 | `deploy/` | `local.sh`, which starts GROBID and the app on this machine only |
 | `tests/` | the test suite |
+| `workspace_runs/` | dedicated root workspaces for deconstructed and executed papers with all Markdown bundles |
 | `data/` | everything the pipeline writes: indexes, PDFs, logs. Gitignored |
 
 The full tree, down to individual files, is in [PIPELINE.md](PIPELINE.md#layout).
@@ -361,8 +386,3 @@ fake world of papers and cards). It needs none of the heavy stack: no ChromaDB,
 no PyTorch, no model backend, no GROBID. Each run gets its own throwaway data
 directory, so a test can never open the real corpus. CI runs it on Python 3.10 and 3.12 and import-sweeps every module
 in the package to catch a broken import no test happens to cover.
-
-## License
-
-[MIT](LICENSE). Marvin would like it noted that this doesn't make him happy
-either.

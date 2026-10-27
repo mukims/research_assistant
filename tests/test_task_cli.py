@@ -208,6 +208,34 @@ class TestTaskCLI(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertIn("Error: Failed to write plan", res.stderr)
 
+    def test_cli_query_subcommand(self):
+        paper = self.tmp_path / "paper_query.txt"
+        paper.write_text("Abstract: Quantum circuit training with parameter-shift gradients.")
+        plan_file = self.tmp_path / "plan_query.json"
+
+        subprocess.run([
+            sys.executable, "orchestrate_tasks.py", "plan",
+            str(paper), "--heuristic", "-o", str(plan_file),
+        ], check=True, capture_output=True, text=True)
+
+        res_md = subprocess.run([
+            sys.executable, "orchestrate_tasks.py", "query",
+            str(plan_file), "--task-id", "task_03_model",
+            "--query", "parameter-shift gradients", "--format", "markdown",
+        ], capture_output=True, text=True)
+        self.assertEqual(res_md.returncode, 0)
+        self.assertIn("# Database Query Results", res_md.stdout)
+
+        res_json = subprocess.run([
+            sys.executable, "orchestrate_tasks.py", "query",
+            str(plan_file), "--task-id", "task_03_model",
+            "--query", "parameter-shift gradients", "--format", "json",
+        ], capture_output=True, text=True)
+        self.assertEqual(res_json.returncode, 0)
+        payload = json.loads(res_json.stdout)
+        self.assertEqual(payload["task_id"], "task_03_model")
+        self.assertIn("results", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

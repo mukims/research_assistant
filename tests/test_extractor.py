@@ -616,3 +616,15 @@ class TestRunExtractorConcurrentRawDir(RunExtractorTestCase):
             os.path.exists(os.path.join(self.raw_dir, "failed", "b.pdf")),
             "the surviving PDF was never filed",
         )
+
+    def test_extract_citations_from_pdf_non_destructive(self):
+        pdf_path = self._touch_pdf("single_sample.pdf")
+        fake_ref = Reference(raw_reference="Test Reference 2024", source_file="single_sample.pdf", extraction_method="grobid")
+        with patch.object(ex, "grobid_alive", return_value=True), \
+             patch.object(ex, "extract_references", return_value=([fake_ref], "grobid")):
+            refs = ex.extract_citations_from_pdf(pdf_path)
+
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0]["raw_reference"], "Test Reference 2024")
+        self.assertTrue(os.path.exists(pdf_path), "Single-PDF extraction must not move or delete the input file")
+

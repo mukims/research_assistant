@@ -57,6 +57,25 @@ class ArtifactType(str, Enum):
     OTHER = "other"
 
 
+def _normalize_string_list(val: Any) -> List[str]:
+    """Ensures a string or collection is converted into a list of non-empty strings."""
+    if not val:
+        return []
+    if isinstance(val, str):
+        val = val.strip()
+        return [val] if val else []
+    if isinstance(val, (list, tuple, set)):
+        items = []
+        for item in val:
+            if item is None:
+                continue
+            s = str(item).strip()
+            if s:
+                items.append(s)
+        return items
+    return [str(val).strip()]
+
+
 @dataclass
 class ArtifactContract:
     """Formal schema and contract specification for an artifact produced by a task."""
@@ -113,12 +132,55 @@ class ArtifactContract:
         return cls(
             path=str(d.get("path", "")),
             artifact_type=atype,
-            shape=list(d["shape"]) if d.get("shape") is not None else None,
+            shape=list(d["shape"]) if isinstance(d.get("shape"), (list, tuple)) else ([str(d["shape"])] if d.get("shape") is not None else None),
             dtype=str(d["dtype"]) if d.get("dtype") is not None else None,
-            columns=dict(d["columns"]) if d.get("columns") is not None else None,
-            required_keys=list(d["required_keys"]) if d.get("required_keys") is not None else None,
-            cli_args=list(d["cli_args"]) if d.get("cli_args") is not None else None,
+            columns=dict(d["columns"]) if isinstance(d.get("columns"), dict) else None,
+            required_keys=_normalize_string_list(d.get("required_keys")) if d.get("required_keys") is not None else None,
+            cli_args=_normalize_string_list(d.get("cli_args")) if d.get("cli_args") is not None else None,
             description=str(d.get("description", "")),
+        )
+
+
+@dataclass
+class TaskContextPack:
+    """Grounded database context bundle compiled for an agent executing a specific task."""
+    seed_passages: List[Dict[str, Any]] = field(default_factory=list)
+    cited_protocols: List[Dict[str, Any]] = field(default_factory=list)
+    unresolved_citations: List[Dict[str, Any]] = field(default_factory=list)
+    technique_cards: List[Dict[str, Any]] = field(default_factory=list)
+    target_benchmarks: List[str] = field(default_factory=list)
+    query_terms: List[str] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not (
+            self.seed_passages
+            or self.cited_protocols
+            or self.unresolved_citations
+            or self.technique_cards
+            or self.target_benchmarks
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "seed_passages": [dict(p) if isinstance(p, dict) else {"text": str(p)} for p in (self.seed_passages or [])],
+            "cited_protocols": [dict(c) if isinstance(c, dict) else {"text": str(c)} for c in (self.cited_protocols or [])],
+            "unresolved_citations": [dict(u) if isinstance(u, dict) else {"title": str(u)} for u in (self.unresolved_citations or [])],
+            "technique_cards": [dict(t) if isinstance(t, dict) else {"name": str(t)} for t in (self.technique_cards or [])],
+            "target_benchmarks": [str(b) for b in (self.target_benchmarks or [])],
+            "query_terms": [str(q) for q in (self.query_terms or [])],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional["TaskContextPack"]:
+        if not data or not isinstance(data, dict):
+            return None
+        return cls(
+            seed_passages=[dict(p) if isinstance(p, dict) else {"text": str(p)} for p in (data.get("seed_passages") or [])],
+            cited_protocols=[dict(c) if isinstance(c, dict) else {"text": str(c)} for c in (data.get("cited_protocols") or [])],
+            unresolved_citations=[dict(u) if isinstance(u, dict) else {"title": str(u)} for u in (data.get("unresolved_citations") or [])],
+            technique_cards=[dict(t) if isinstance(t, dict) else {"name": str(t)} for t in (data.get("technique_cards") or [])],
+            target_benchmarks=[str(b) for b in (data.get("target_benchmarks") or [])],
+            query_terms=[str(q) for q in (data.get("query_terms") or [])],
         )
 
 
@@ -142,9 +204,18 @@ class Task:
     execution_log: Optional[str] = None
     metrics_produced: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    context_pack: Optional[TaskContextPack] = None
+
+    def __post_init__(self):
+        self.dependencies = _normalize_string_list(self.dependencies)
+        self.inputs = _normalize_string_list(self.inputs)
+        self.outputs = _normalize_string_list(self.outputs)
+        self.acceptance_criteria = _normalize_string_list(self.acceptance_criteria)
+        self.paper_context_excerpts = _normalize_string_list(self.paper_context_excerpts)
+        self.tools_required = _normalize_string_list(self.tools_required)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "task_id": self.task_id,
             "title": self.title,
             "category": self.category.value if hasattr(self.category, "value") else str(self.category),
@@ -168,6 +239,13 @@ class Task:
             "metrics_produced": dict(self.metrics_produced),
             "metadata": dict(self.metadata),
         }
+        if self.context_pack is not None:
+            out["context_pack"] = (
+                self.context_pack.to_dict()
+                if hasattr(self.context_pack, "to_dict")
+                else dict(self.context_pack)
+            )
+        return out
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Task":
@@ -198,24 +276,33 @@ class Task:
             elif isinstance(c, dict):
                 contracts.append(ArtifactContract.from_dict(c))
 
+        raw_pack = d.get("context_pack")
+        if isinstance(raw_pack, TaskContextPack):
+            context_pack = raw_pack
+        elif isinstance(raw_pack, dict):
+            context_pack = TaskContextPack.from_dict(raw_pack)
+        else:
+            context_pack = None
+
         return cls(
             task_id=str(d.get("task_id", "")),
             title=str(d.get("title", "")),
             category=category,
             description=str(d.get("description", "")),
             assigned_role=assigned_role,
-            dependencies=list(d.get("dependencies") or []),
-            inputs=list(d.get("inputs") or []),
-            outputs=list(d.get("outputs") or []),
-            acceptance_criteria=list(d.get("acceptance_criteria") or []),
-            paper_context_excerpts=list(d.get("paper_context_excerpts") or []),
-            tools_required=list(d.get("tools_required") or []),
+            dependencies=_normalize_string_list(d.get("dependencies")),
+            inputs=_normalize_string_list(d.get("inputs")),
+            outputs=_normalize_string_list(d.get("outputs")),
+            acceptance_criteria=_normalize_string_list(d.get("acceptance_criteria")),
+            paper_context_excerpts=_normalize_string_list(d.get("paper_context_excerpts")),
+            tools_required=_normalize_string_list(d.get("tools_required")),
             status=status,
             artifact_contracts=contracts,
             test_harness_script=d.get("test_harness_script"),
             execution_log=d.get("execution_log"),
             metrics_produced=dict(d.get("metrics_produced") or {}),
             metadata=dict(d.get("metadata") or {}),
+            context_pack=context_pack,
         )
 
 
@@ -443,6 +530,18 @@ class TaskGraph:
             }
             for idx, wave in enumerate(waves)
         ]
+
+    def subgraph_doc_keys(self) -> List[str]:
+        """Returns the list of document keys in the paper's reference subgraph."""
+        sub = (self.metadata or {}).get("subgraph") or {}
+        keys = sub.get("all_subgraph_keys") or (self.metadata or {}).get("subgraph_doc_keys") or []
+        return [str(k) for k in keys if k]
+
+    def cited_doc_keys(self) -> List[str]:
+        """Returns the list of cited reference document keys in the paper's subgraph."""
+        sub = (self.metadata or {}).get("subgraph") or {}
+        keys = sub.get("cited_doc_keys") or []
+        return [str(k) for k in keys if k]
 
     def to_dict(self) -> Dict[str, Any]:
         return {

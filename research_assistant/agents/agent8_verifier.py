@@ -25,7 +25,7 @@ import os
 import re
 from datetime import datetime
 
-from research_assistant.agents.agent5_batch_citer import (
+from research_assistant.shared.claim_text import (
     _cite_keys,
     split_into_sentences,
 )
@@ -38,6 +38,11 @@ from research_assistant.config import (
     JUDGEMENT_TOP_K,
     LLM_BACKEND,
     LLM_MODEL,
+)
+from research_assistant.judgement.evidence import (
+    assemble_evidence,
+    needs_escalation,
+    _warn_if_context_is_tight,
 )
 from research_assistant.judgement.judge import (
     DERIVED_FIELDS,
@@ -183,48 +188,8 @@ def _judgement_model() -> str:
     return JUDGEMENT_MODEL or LLM_MODEL
 
 
-def _warn_if_context_is_tight():
-    """A local model with a small context truncates the prompt silently."""
-    if LLM_BACKEND != "ollama":
-        return
-    from research_assistant.config import JUDGEMENT_OLLAMA_OPTIONS
-    from research_assistant.judgement.judge import PROMPT_TEMPLATE
-
-    approx_tokens = len(PROMPT_TEMPLATE) // 4
-    logger.warning(
-        "Judging with local model %s. The prompt alone is ~%d tokens and "
-        "num_ctx is set to %s — if the model cannot honour that, Ollama "
-        "truncates the prompt tail (where the worked examples are) without "
-        "raising, and verdicts degrade silently.",
-        _judgement_model(), approx_tokens, JUDGEMENT_OLLAMA_OPTIONS.get("num_ctx"),
-    )
-
-
-_HIT_SEPARATOR = "\n\n[…]\n\n"
-
-
-def assemble_evidence(hits, max_chars: int) -> str:
-    """The text the judge sees: each hit wrapped in its neighbours, hits in
-    rank order, separated, de-duplicated, capped from the tail so the top hit
-    is never the one cut."""
-    parts, seen = [], set()
-    for h in hits:
-        block = "\n".join(p for p in (h.get("context_before", ""), h["text"], h.get("context_after", "")) if p)
-        if block in seen:
-            continue
-        seen.add(block)
-        parts.append(block)
-    out = _HIT_SEPARATOR.join(parts)
-    return out[:max_chars]
-
-
-def needs_escalation(verdict: dict) -> bool:
-    """The first verdict says it did not see enough — by its own sufficiency
-    rating, or by landing on a judgement that more evidence could overturn."""
-    return (
-        verdict.get("evidence_sufficiency") != "sufficient"
-        or verdict.get("judgement") in ("Unclear / insufficient evidence", "Does not support")
-    )
+# Note: _warn_if_context_is_tight, assemble_evidence, and needs_escalation
+# are imported from research_assistant.judgement.evidence and re-exported above.
 
 
 def verify_draft(draft_path, citations_path=None, top_k=None,

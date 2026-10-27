@@ -65,7 +65,10 @@ def ingest_manual_pdf(
         dict: The result summary from :func:`shared.ingestion.ingest_pdfs`.
     """
     if citation_string is None:
-        citation_string = os.path.splitext(os.path.basename(pdf_path))[0]
+        from research_assistant.agents.agent3_ingestor import resolve_labels_for_pdfs
+
+        labels = resolve_labels_for_pdfs([pdf_path])
+        citation_string = labels.get(pdf_path) or os.path.splitext(os.path.basename(pdf_path))[0]
 
     logger.info("Ingesting %s (citation label: '%s')", pdf_path, citation_string)
     return ingest_pdfs({pdf_path: citation_string}, workers=workers)

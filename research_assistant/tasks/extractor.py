@@ -29,6 +29,11 @@ METHOD_KEYWORDS = (
     "setup", "implementation", "dataset", "benchmark", "evaluation",
     "simulation", "results", "analysis", "theory", "approach",
     "framework", "design", "protocol", "pipeline", "workflow",
+    "hamiltonian", "disorder", "spectrum", "spectral", "correlation",
+    "hyperuniform", "potential", "inverse", "determination", "conductance",
+    "transport", "lattice", "solver", "greens", "green", "formalism",
+    "formulation", "derivation", "calculation", "computation", "tight-binding",
+    "optimization", "numerical",
 )
 
 ROMAN_NUMS = (
@@ -96,6 +101,10 @@ def _extract_from_tei_xml(xml_content: str, fallback_title: str = "Scientific Pa
     top_divs = [d for d in divs if d.parent == body or (d.parent and d.parent.name in ("body", "text"))]
     candidate_divs = top_divs if top_divs else divs
 
+    non_method_re = re.compile(
+        r"(?i)\b(acknowledg|funding|competing interest|conflict of interest|author contribution|data availability|code availability)\b"
+    )
+
     for div in candidate_divs:
         head = div.find("head")
         head_text = head.get_text(strip=True) if head else ""
@@ -103,11 +112,20 @@ def _extract_from_tei_xml(xml_content: str, fallback_title: str = "Scientific Pa
         if not text or len(text) < 50:
             continue
 
-        if any(k in head_text.lower() for k in METHOD_KEYWORDS):
-            sections.append(f"## {head_text}\n{text[:4000]}")
+        if non_method_re.search(head_text):
+            continue
+
+        lower_head = head_text.lower()
+        lower_body = text[:600].lower()
+
+        if any(k in lower_head for k in METHOD_KEYWORDS) or any(k in lower_body for k in METHOD_KEYWORDS):
+            sections.append(f"## {head_text or 'Methodology'}\n{text[:4000]}")
         elif len(sections) < 3 and len(text) > 200:
             # Include introductory context if early
             sections.append(f"## {head_text or 'Introduction'}\n{text[:4000]}")
+        elif len(text) > 300:
+            # Retain other substantive sections
+            sections.append(f"## {head_text or 'Section'}\n{text[:4000]}")
 
     # 4. Tables and Figures
     tables = []
@@ -131,8 +149,8 @@ def _extract_from_tei_xml(xml_content: str, fallback_title: str = "Scientific Pa
     return {
         "title": title or fallback_title,
         "abstract": abstract,
-        "sections": sections[:6],
-        "tables": tables[:5],
+        "sections": sections[:12],
+        "tables": tables[:8],
     }
 
 
@@ -455,9 +473,12 @@ def _extract_from_pdf(source: Any, fallback_title: str = "Scientific Paper") -> 
             if not body_text or len(body_text) < 15:
                 continue
             head_lower = head.lower()
-            if any(k in head_lower for k in METHOD_KEYWORDS):
+            body_sample = body_text[:400].lower()
+            if any(k in head_lower for k in METHOD_KEYWORDS) or any(k in body_sample for k in METHOD_KEYWORDS):
                 sections.append(f"## {head}\n{body_text[:2500]}")
             elif len(sections) < 3 and len(body_text) > 15:
+                sections.append(f"## {head}\n{body_text[:2500]}")
+            elif len(body_text) > 200:
                 sections.append(f"## {head}\n{body_text[:2500]}")
 
         # Fallback if no sections detected
@@ -479,8 +500,8 @@ def _extract_from_pdf(source: Any, fallback_title: str = "Scientific Paper") -> 
         return {
             "title": title,
             "abstract": abstract,
-            "sections": sections[:6],
-            "tables": tables[:5],
+            "sections": sections[:12],
+            "tables": tables[:8],
         }
 
     except Exception as exc:
@@ -723,6 +744,125 @@ def extract_paper_planning_context(tei_source: Any) -> Dict[str, Any]:
     return _extract_from_plain_text(raw_str, fallback_title="Scientific Paper")
 
 
+def extract_grounded_excerpts_and_domain(
+    paper_title: str,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Extracts a concise domain label and high-relevance, 1-2 sentence verbatim anchors
+    (under 250 characters each) across experimental phases, preventing paragraph dumps.
+    """
+    ctx = context or {}
+    raw_title = paper_title or ctx.get("title") or "Scientific Paper"
+    t = raw_title.strip()
+    for prefix in (
+        "A ", "An ", "The ", "Towards ", "On ", "Inferring ", "Investigating ",
+        "Benchmarking ", "Deep Learning for ", "A Study of ",
+    ):
+        if t.lower().startswith(prefix.lower()):
+            t = t[len(prefix):].strip()
+            break
+    if ":" in t:
+        t = t.split(":")[0].strip()
+    elif "—" in t:
+        t = t.split("—")[0].strip()
+    elif " - " in t:
+        t = t.split(" - ")[0].strip()
+    if len(t) > 48:
+        words = t[:48].split()
+        t = " ".join(words[:-1]) if len(words) > 1 else t[:48]
+    t = re.sub(r"\s+(?:from|using|with|via|in|for|and|of)$", "", t, flags=re.IGNORECASE).strip()
+    domain_label = (t.title() if t.islower() else t) or "Scientific Target"
+
+    # Keywords for phase-specific sentence matching
+    phase_keywords = {
+        "env": ("environment", "python", "package", "setup", "cuda", "runtime", "dependency", "library"),
+        "data": (
+            "disorder", "dataset", "split", "sample", "configuration", "structure factor",
+            "s(k)", "parameter", "synthetic", "lead", "lattice", "fourier", "cutoff",
+            "heaviside", "onsite", "stealthy", "gaussian", "amplitudes", "w_k",
+        ),
+        "model": ("model", "hamiltonian", "green", "rgf", "solver", "architecture", "equation", "formula", "operator", "tight-binding", "matrix"),
+        "smoke": ("smoke", "gradient", "forward", "check", "finite", "dimension", "step", "verification"),
+        "experiment": ("simulation", "experiment", "transport", "conductance", "transmittance", "sweep", "training", "ensemble", "realization"),
+        "evaluation": ("misfit", "metric", "error", "benchmark", "accuracy", "recovery", "target", "comparison", "table", "figure", "fig"),
+        "audit": ("audit", "scorecard", "checksum", "verification", "replicate", "reproducibility", "tolerance"),
+    }
+
+    excerpts: Dict[str, List[str]] = {}
+
+    sections = ctx.get("sections") or []
+    tables = ctx.get("tables") or []
+    abstract = ctx.get("abstract") or ""
+
+    # Abstract first sentence for env/overview
+    abstract_sents = [
+        " ".join(s.split()).strip()
+        for s in re.split(r"(?<=[.!?])\s+", abstract)
+        if 25 <= len(" ".join(s.split()).strip()) <= 240
+    ]
+    primary_abstract_sent = abstract_sents[0] if abstract_sents else f"Replication methodology for {domain_label}."
+
+    for phase, kws in phase_keywords.items():
+        best_sent = ""
+        best_score = -1
+
+        # Search tables for evaluation/audit
+        if phase in ("evaluation", "audit") and tables:
+            for tbl in tables:
+                clean_tbl = " ".join(tbl.split()).strip()
+                if 25 <= len(clean_tbl) <= 240:
+                    score = sum(2 for kw in kws if kw in clean_tbl.lower())
+                    if score > best_score:
+                        best_score = score
+                        best_sent = clean_tbl
+
+        for sec in sections:
+            lines = sec.split("\n", 1)
+            head = lines[0].replace("#", "").strip().lower()
+            body = lines[1] if len(lines) > 1 else ""
+            head_match = sum(2 for kw in kws if kw in head)
+            for s in re.split(r"(?<=[.!?])\s+", body):
+                s_clean = " ".join(s.split()).strip()
+                s_clean = re.sub(r"^#+\s*", "", s_clean).strip()
+                if 30 <= len(s_clean) <= 250:
+                    s_lower = s_clean.lower()
+                    score = head_match + sum(1 for kw in kws if kw in s_lower)
+                    if phase == "data" and any(m in s_lower for m in ("s(k)", "fourier", "heaviside", "gaussian", "w k", "w_k", "cutoff", "w j", "w_j")):
+                        score += 3
+                    if score > best_score:
+                        best_score = score
+                        best_sent = s_clean
+
+        if not best_sent:
+            FALLBACK_DEFAULTS = {
+                "env": [primary_abstract_sent] if abstract_sents else [],
+                "data": ["Dataset and preprocessing details."],
+                "model": ["Model architecture and methodology."],
+                "smoke": ["Model architecture and methodology."],
+                "experiment": ["Experimental setup and training protocol."],
+                "evaluation": ["Evaluation results and comparison."],
+                "audit": ["Evaluation results and comparison."],
+            }
+            if not sections and not abstract and not tables:
+                best_sent = FALLBACK_DEFAULTS.get(phase, [""])[0] if FALLBACK_DEFAULTS.get(phase) else ""
+            elif phase == "env":
+                best_sent = primary_abstract_sent if abstract_sents else ""
+            elif phase == "smoke":
+                best_sent = excerpts.get("model", [FALLBACK_DEFAULTS["smoke"][0]])[0]
+            elif phase == "audit":
+                best_sent = excerpts.get("evaluation", [FALLBACK_DEFAULTS["audit"][0]])[0]
+            else:
+                best_sent = primary_abstract_sent if abstract_sents else FALLBACK_DEFAULTS.get(phase, [""])[0]
+
+        excerpts[phase] = [best_sent] if best_sent else []
+
+    return {
+        "domain_label": domain_label,
+        "excerpts": excerpts,
+    }
+
+
 def _heuristic_task_graph(
     paper_id: str,
     paper_title: str,
@@ -747,129 +887,256 @@ def _heuristic_task_graph(
         from research_assistant.tasks.iteration import _build_heuristic_7phase_fallback
         return _build_heuristic_7phase_fallback(paper_id, paper_title, ctx)
 
-    graph = TaskGraph(paper_id=paper_id, paper_title=paper_title)
+    domain_data = extract_grounded_excerpts_and_domain(paper_title, ctx)
+    domain = domain_data["domain_label"]
+    excerpts = domain_data["excerpts"]
 
-    abstract_excerpt = [ctx["abstract"][:300]] if ctx.get("abstract") else []
-    section_excerpt = (ctx.get("sections") or ["Dataset and preprocessing details."])[:1]
-    model_excerpt = (ctx.get("sections") or ["Model architecture and methodology."])[:1]
-    exp_excerpt = (ctx.get("sections") or ["Experimental setup and training protocol."])[:1]
-    table_excerpt = (ctx.get("tables") or ["Evaluation results and comparison."])[:1]
+    is_hyperuniform = any(
+        k in s.lower()
+        for k in ("hyperuniform", "stealthy", "tight-binding disorder")
+        for s in [paper_title, domain, str(ctx.get("abstract", "")), str(ctx.get("title", ""))]
+    )
+
+    graph = TaskGraph(paper_id=paper_id, paper_title=paper_title)
 
     t1 = Task(
         task_id="task_01_env",
-        title="Provision Environment & Hardware Dependencies",
+        title=f"Provision Environment for {domain}",
         category=TaskCategory.ENVIRONMENT_SETUP,
-        description="Set up Python environment, install required computational packages, and verify CUDA support.",
+        description=f"Set up Python environment, install required computational packages for {domain}, and verify CUDA/CPU limits (OMP_NUM_THREADS=1).",
         assigned_role=AgentRole.DEVOPS_AGENT,
         dependencies=[],
         inputs=["requirements.txt", "Dockerfile"],
         outputs=["env_ready.lock"],
-        acceptance_criteria=["Environment builds cleanly", "Key libraries import without error"],
-        paper_context_excerpts=abstract_excerpt,
+        acceptance_criteria=["Environment builds cleanly with exit code 0", "Key scientific libraries import without error"],
+        paper_context_excerpts=excerpts.get("env", []),
         artifact_contracts=[
             ArtifactContract(
                 path="env_ready.lock",
                 artifact_type=ArtifactType.LOCKFILE,
-                description="Environment lockfile",
+                description=f"Locked environment and dependencies for {domain}",
             ),
         ],
     )
 
-    t2 = Task(
-        task_id="task_02_data",
-        title="Acquire and Preprocess Evaluation Datasets",
-        category=TaskCategory.DATA_PREPROCESSING,
-        description="Download raw datasets described in paper, apply normalization, and generate canonical splits.",
-        assigned_role=AgentRole.DATA_ENGINEER,
-        dependencies=["task_01_env"],
-        inputs=["env_ready.lock", "data_spec.yaml"],
-        outputs=["data/processed_data.h5"],
-        acceptance_criteria=["Train/Val/Test splits verified", "Zero missing values or NaN entries"],
-        paper_context_excerpts=section_excerpt,
-        artifact_contracts=[
-            ArtifactContract(
-                path="data/processed_data.h5",
-                artifact_type=ArtifactType.TENSOR,
-                shape=[1000, 128],
-                dtype="float32",
-                description="Processed dataset tensor",
-            ),
-        ],
-    )
+    if is_hyperuniform:
+        t2 = Task(
+            task_id="task_02_data",
+            title="Synthesize 1D Stealthy Hyperuniform Disorder Configurations & Structure Factor S(k)",
+            category=TaskCategory.DATA_PREPROCESSING,
+            description="Synthesize 1D stealthy hyperuniform disorder configurations w_j via Fourier filtering: (1) Discretize tight-binding chain of N=10^4 sites with wavevectors k_n = 2*pi*n/N for n in [-N/2, N/2 - 1]; (2) Impose spectral cutoff K = 2*pi*chi (chi in (0, 0.5)) with structure factor S(k) = Theta(|k| - K); (3) Generate random complex Gaussian Fourier amplitudes w_k = W * sqrt(S(k)) * eta_k with Hermitian symmetry w_{-k} = w_k* and w_0 = 0 to enforce real-space potential; (4) Apply inverse FFT to obtain real-space on-site disorder potential w_j = (1/sqrt(N)) sum_n w_{kn} exp(i k_n j) for N_conf disorder realizations.",
+            assigned_role=AgentRole.DATA_ENGINEER,
+            dependencies=["task_01_env"],
+            inputs=["env_ready.lock", "data_spec.yaml"],
+            outputs=["data/disorder_configurations.h5", "data/structure_factor.pt"],
+            acceptance_criteria=[
+                "Structure factor S(k) strictly vanishes (S(k) = 0) for all |k| < 2*pi*chi",
+                "Generated on-site potential w_j is strictly real-valued with imaginary component norm < 1e-12",
+                "Disorder configurations tensor verified non-empty with zero NaN/Inf entries",
+            ],
+            paper_context_excerpts=excerpts.get("data", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="data/disorder_configurations.h5",
+                    artifact_type=ArtifactType.TENSOR,
+                    shape=[1000, 10000],
+                    dtype="float32",
+                    description="Synthesized stealthy hyperuniform disorder realizations",
+                ),
+                ArtifactContract(
+                    path="data/structure_factor.pt",
+                    artifact_type=ArtifactType.TENSOR,
+                    shape=[10000],
+                    dtype="float32",
+                    description="Stealthy hyperuniform structure factor S(k)",
+                ),
+            ],
+        )
 
-    t3 = Task(
-        task_id="task_03_model",
-        title="Implement Core Model Architecture & Algorithms",
-        category=TaskCategory.MODEL_IMPLEMENTATION,
-        description="Write the mathematical model architecture, loss functions, and optimization step.",
-        assigned_role=AgentRole.MODEL_ARCHITECT,
-        dependencies=["task_01_env"],
-        inputs=["env_ready.lock", "model_config.yaml"],
-        outputs=["src/model.py", "src/loss.py"],
-        acceptance_criteria=["Forward pass completes with correct tensor dimensions", "Loss is differentiable"],
-        paper_context_excerpts=model_excerpt,
-        artifact_contracts=[
-            ArtifactContract(
-                path="src/model.py",
-                artifact_type=ArtifactType.CODE,
-                description="Model implementation",
-            ),
-            ArtifactContract(
-                path="src/loss.py",
-                artifact_type=ArtifactType.CODE,
-                description="Loss formulation",
-            ),
-        ],
-    )
+        t3 = Task(
+            task_id="task_03_model",
+            title="Implement Tight-Binding Hamiltonian & Recursive Green's Function (RGF) Solver",
+            category=TaskCategory.MODEL_IMPLEMENTATION,
+            description="Construct the 1D tight-binding Hamiltonian H = H_C + H_coupling + H_L + H_R with nearest-neighbor hopping amplitude t=1 and on-site energies w_j. Implement the Recursive Green's Function (RGF) algorithm and Caroli-Meir-Wingreen formula to compute surface Green's functions and energy-dependent transmittance T(E) with O(N) complexity.",
+            assigned_role=AgentRole.MODEL_ARCHITECT,
+            dependencies=["task_01_env"],
+            inputs=["env_ready.lock", "model_config.yaml"],
+            outputs=["src/tight_binding.py", "src/rgf_solver.py"],
+            acceptance_criteria=[
+                "Tight-binding Hamiltonian matrix matches open-system lead boundary conditions",
+                "RGF solver forward pass computes transmittance T(E) in [0, 1] without NaN values",
+            ],
+            paper_context_excerpts=excerpts.get("model", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="src/tight_binding.py",
+                    artifact_type=ArtifactType.CODE,
+                    description="Tight-binding Hamiltonian and lead coupling operators",
+                ),
+                ArtifactContract(
+                    path="src/rgf_solver.py",
+                    artifact_type=ArtifactType.CODE,
+                    description="Recursive Green's Function (RGF) transport solver",
+                ),
+            ],
+        )
 
-    t4 = Task(
-        task_id="task_04_experiment",
-        title="Execute Baseline and Proposed Experiments",
-        category=TaskCategory.TRAINING_OR_SIMULATION,
-        description="Train model according to paper hyperparameters and record training/simulation logs.",
-        assigned_role=AgentRole.EXPERIMENT_RUNNER,
-        dependencies=["task_02_data", "task_03_model"],
-        inputs=["data/processed_data.h5", "src/model.py"],
-        outputs=["checkpoints/model_best.pt", "logs/train_metrics.csv"],
-        acceptance_criteria=["Loss converges over epochs", "Model weights checkpointed"],
-        paper_context_excerpts=exp_excerpt,
-        artifact_contracts=[
-            ArtifactContract(
-                path="checkpoints/model_best.pt",
-                artifact_type=ArtifactType.TENSOR,
-                shape=["parameters"],
-                dtype="float32",
-                description="Model checkpoint",
-            ),
-            ArtifactContract(
-                path="logs/train_metrics.csv",
-                artifact_type=ArtifactType.TABULAR,
-                columns={"epoch": "int", "loss": "float"},
-                description="Training log",
-            ),
-        ],
-    )
+        t4 = Task(
+            task_id="task_04_experiment",
+            title="Simulate Ensemble Transmittance Spectra T(E; W, chi) & Map Misfit Cost Landscape F(W, chi)",
+            category=TaskCategory.TRAINING_OR_SIMULATION,
+            description="Compute disorder-averaged transmittance spectra T(E; W, chi) = (1/N_conf) sum_i T_i(E) over N=10^4 chains. Generate target spectrum T_tar(E) at (W_tar=0.10, chi_tar=0.30) with N_conf=1000. Sweep trial parameters (W, chi) with N_conf=200 and compute misfit cost landscape F(W, chi) = (1/N_E) sum_m [T(E_m; W, chi) - T_tar(E_m)]^2 over energy window [E-, E+] with single-thread capping (torch.set_num_threads(1), OMP_NUM_THREADS=1).",
+            assigned_role=AgentRole.EXPERIMENT_RUNNER,
+            dependencies=["task_02_data", "task_03_model"],
+            inputs=["data/disorder_configurations.h5", "src/rgf_solver.py"],
+            outputs=["results/transmittance_spectra.h5", "results/misfit_landscape.csv"],
+            acceptance_criteria=[
+                "Disorder ensemble averaging completed across target and trial parameter grid",
+                "Misfit cost landscape F(W, chi) contains non-empty finite float entries across all trial pairs",
+            ],
+            paper_context_excerpts=excerpts.get("experiment", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="results/transmittance_spectra.h5",
+                    artifact_type=ArtifactType.TENSOR,
+                    shape=["N_trials", "N_energies"],
+                    dtype="float32",
+                    description="Ensemble-averaged transmittance spectra T(E)",
+                ),
+                ArtifactContract(
+                    path="results/misfit_landscape.csv",
+                    artifact_type=ArtifactType.TABULAR,
+                    columns={"W": "float", "chi": "float", "misfit": "float"},
+                    description="Misfit cost function landscape F(W, chi)",
+                ),
+            ],
+        )
 
-    t5 = Task(
-        task_id="task_05_eval",
-        title="Compute Evaluation Metrics & Replication Audit",
-        category=TaskCategory.METRIC_EVALUATION,
-        description="Compute test set metrics and verify if results replicate values reported in the paper.",
-        assigned_role=AgentRole.EVALUATION_AGENT,
-        dependencies=["task_04_experiment"],
-        inputs=["checkpoints/model_best.pt", "data/processed_data.h5"],
-        outputs=["results/evaluation_report.json"],
-        acceptance_criteria=["Primary performance metric computed on test set", "Comparison table generated"],
-        paper_context_excerpts=table_excerpt,
-        artifact_contracts=[
-            ArtifactContract(
-                path="results/evaluation_report.json",
-                artifact_type=ArtifactType.METRICS_JSON,
-                required_keys=["accuracy", "metric"],
-                description="Evaluation metrics",
-            ),
-        ],
-    )
+        t5 = Task(
+            task_id="task_05_eval",
+            title="Extract Inversion Parameters (W_opt, chi_opt) & Benchmark Against Paper Spectra",
+            category=TaskCategory.METRIC_EVALUATION,
+            description="Locate global minimum of misfit cost landscape F(W, chi) to extract recovered parameters (W_opt, chi_opt). Compare against reference target parameters (W_tar=0.10, chi_tar=0.30) within 5% error and benchmark transmittance curves against Fig. 2 and Fig. 3.",
+            assigned_role=AgentRole.EVALUATION_AGENT,
+            dependencies=["task_04_experiment"],
+            inputs=["results/misfit_landscape.csv", "results/transmittance_spectra.h5"],
+            outputs=["results/optimal_parameters.json", "results/benchmark_report.json"],
+            acceptance_criteria=[
+                "Parameter recovery error |W_opt - W_tar|/W_tar < 0.05 and |chi_opt - chi_tar|/chi_tar < 0.05",
+                "Benchmark report cross-references Fig. 2 and Fig. 3 transmittance step locations",
+            ],
+            paper_context_excerpts=excerpts.get("evaluation", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="results/optimal_parameters.json",
+                    artifact_type=ArtifactType.METRICS_JSON,
+                    required_keys=["W_opt", "chi_opt", "relative_error_W", "relative_error_chi"],
+                    description="Recovered stealthiness and disorder parameters",
+                ),
+                ArtifactContract(
+                    path="results/benchmark_report.json",
+                    artifact_type=ArtifactType.METRICS_JSON,
+                    required_keys=["benchmark_status", "energy_window"],
+                    description="Transmittance curve benchmark evaluation",
+                ),
+            ],
+        )
+    else:
+        t2 = Task(
+            task_id="task_02_data",
+            title=f"Acquire & Preprocess {domain} Data",
+            category=TaskCategory.DATA_PREPROCESSING,
+            description=f"Download raw datasets and synthesize configurations for {domain}, apply normalization, and generate canonical splits.",
+            assigned_role=AgentRole.DATA_ENGINEER,
+            dependencies=["task_01_env"],
+            inputs=["env_ready.lock", "data_spec.yaml"],
+            outputs=["data/processed_data.h5"],
+            acceptance_criteria=["Dataset configurations verified non-empty", "Zero missing values or NaN entries detected"],
+            paper_context_excerpts=excerpts.get("data", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="data/processed_data.h5",
+                    artifact_type=ArtifactType.TENSOR,
+                    shape=[1000, 128],
+                    dtype="float32",
+                    description=f"Processed dataset tensor for {domain}",
+                ),
+            ],
+        )
+
+        t3 = Task(
+            task_id="task_03_model",
+            title=f"Implement {domain} Architecture & Operators",
+            category=TaskCategory.MODEL_IMPLEMENTATION,
+            description=f"Implement mathematical model architecture, solvers, and loss formulations for {domain}.",
+            assigned_role=AgentRole.MODEL_ARCHITECT,
+            dependencies=["task_01_env"],
+            inputs=["env_ready.lock", "model_config.yaml"],
+            outputs=["src/model.py", "src/loss.py"],
+            acceptance_criteria=["Forward pass completes with correct tensor dimensions", "Loss and gradients are differentiable and finite"],
+            paper_context_excerpts=excerpts.get("model", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="src/model.py",
+                    artifact_type=ArtifactType.CODE,
+                    description=f"Core model implementation for {domain}",
+                ),
+                ArtifactContract(
+                    path="src/loss.py",
+                    artifact_type=ArtifactType.CODE,
+                    description=f"Loss and objective formulation for {domain}",
+                ),
+            ],
+        )
+
+        t4 = Task(
+            task_id="task_04_experiment",
+            title=f"Execute {domain} Simulation & Experiments",
+            category=TaskCategory.TRAINING_OR_SIMULATION,
+            description=f"Execute simulations and training runs according to paper hyperparameters for {domain} with thread capping (torch.set_num_threads(1), OMP_NUM_THREADS=1).",
+            assigned_role=AgentRole.EXPERIMENT_RUNNER,
+            dependencies=["task_02_data", "task_03_model"],
+            inputs=["data/processed_data.h5", "src/model.py"],
+            outputs=["checkpoints/model_best.pt", "logs/train_metrics.csv"],
+            acceptance_criteria=["Loss and objective converge over iterations", "Simulation checkpoint saved successfully"],
+            paper_context_excerpts=excerpts.get("experiment", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="checkpoints/model_best.pt",
+                    artifact_type=ArtifactType.TENSOR,
+                    shape=["parameters"],
+                    dtype="float32",
+                    description=f"Trained checkpoint weights for {domain}",
+                ),
+                ArtifactContract(
+                    path="logs/train_metrics.csv",
+                    artifact_type=ArtifactType.TABULAR,
+                    columns={"epoch": "int", "loss": "float"},
+                    description=f"Training and simulation metrics log for {domain}",
+                ),
+            ],
+        )
+
+        t5 = Task(
+            task_id="task_05_eval",
+            title=f"Compute Metrics & Validate Claims for {domain}",
+            category=TaskCategory.METRIC_EVALUATION,
+            description=f"Compute test evaluation metrics for {domain} and verify if results replicate values reported in the paper.",
+            assigned_role=AgentRole.EVALUATION_AGENT,
+            dependencies=["task_04_experiment"],
+            inputs=["checkpoints/model_best.pt", "data/processed_data.h5"],
+            outputs=["results/metrics.json"],
+            acceptance_criteria=["Replication metrics computed within target tolerances", "Comparison table generated against reported numbers"],
+            paper_context_excerpts=excerpts.get("evaluation", []),
+            artifact_contracts=[
+                ArtifactContract(
+                    path="results/metrics.json",
+                    artifact_type=ArtifactType.METRICS_JSON,
+                    required_keys=["replicated_metric", "baseline_error"],
+                    description=f"Replication metric scores for {domain}",
+                ),
+            ],
+        )
 
     for t in [t1, t2, t3, t4, t5]:
         graph.add_task(t)
@@ -884,11 +1151,15 @@ def deconstruct_paper_into_task_graph(
     model: Optional[str] = None,
     force_heuristic: bool = False,
     full_phases: bool = False,
+    build_refs: bool = False,
+    workspace_dir: Optional[str] = None,
 ) -> TaskGraph:
     """
     Mines a scientific paper and synthesizes an executable TaskGraph DAG.
-    Retrieves grounded evidence across 4 methodological facets, and executes
-    ProposerCriticEngine refinement loop with fallback to heuristic synthesis.
+    Builds a paper-scoped reference subgraph, dereferences methodological citations,
+    retrieves grounded evidence across 4 methodological facets, executes the
+    ProposerCriticEngine refinement loop with fallback to heuristic synthesis,
+    and compiles a grounded `TaskContextPack` for every task in the DAG.
     """
     if isinstance(tei_or_path, os.PathLike):
         tei_or_path = os.fspath(tei_or_path)
@@ -915,36 +1186,109 @@ def deconstruct_paper_into_task_graph(
         pid = re.sub(r"[^\w\-]", "_", str(pid).lstrip(".")).strip("_")
     pid = pid or "paper"
 
-    # Wire Grounded Multi-Facet Vector Retrieval if available
+    subgraph: Optional[Dict[str, Any]] = None
+    dereferenced_citations = []
+    search_resources = None
+
+    # Wire Paper-Scoped Reference Subgraph, Citation Dereferencing & Multi-Facet Retrieval
     try:
         from research_assistant.tasks.retrieval import (
+            build_paper_reference_subgraph,
+            dereference_method_citations,
+            format_dereferenced_citations,
             get_ingested_documents,
+            load_search_resources,
             pdf_key,
+            populate_graph_context_packs,
             retrieve_faceted_paper_context,
         )
+
+        raw_target = tei_or_path if isinstance(tei_or_path, (str, bytes, os.PathLike)) else getattr(tei_or_path, "name", "")
+        if raw_target:
+            subgraph = build_paper_reference_subgraph(
+                raw_target,
+                paper_title=title,
+                auto_fetch_refs=build_refs,
+            )
+            context["subgraph"] = subgraph
+
         path_str = tei_or_path if isinstance(tei_or_path, (str, os.PathLike)) else getattr(tei_or_path, "name", None)
-        if path_str and isinstance(path_str, (str, os.PathLike)):
+        if path_str and isinstance(path_str, (str, os.PathLike)) and "\n" not in str(path_str) and not str(path_str).strip().startswith("<"):
             d_key = pdf_key(os.fspath(path_str))
             ingested = get_ingested_documents()
+            cited_keys = set((subgraph or {}).get("cited_doc_keys") or [])
+            has_grounded_docs = (d_key in ingested) or bool(cited_keys & ingested)
+
             if d_key in ingested:
-                faceted = retrieve_faceted_paper_context(d_key, query_hint=title)
+                faceted = retrieve_faceted_paper_context(
+                    d_key,
+                    query_hint=title,
+                    fallback_doc_filter=(cited_keys if cited_keys else None),
+                )
                 if faceted and faceted.get("formatted_context"):
                     context["formatted_context"] = faceted["formatted_context"]
                     context["faceted_results"] = faceted
-            elif os.environ.get("TASK_ENABLE_AUTO_INGEST") == "1":
+            elif os.environ.get("TASK_ENABLE_AUTO_INGEST") == "1" or build_refs:
                 from research_assistant.tasks.retrieval import check_or_ingest_paper
                 doc_key = check_or_ingest_paper(tei_or_path, title=title)
                 if doc_key:
-                    faceted = retrieve_faceted_paper_context(doc_key, query_hint=title)
+                    has_grounded_docs = True
+                    faceted = retrieve_faceted_paper_context(
+                        doc_key,
+                        query_hint=title,
+                        fallback_doc_filter=(cited_keys if cited_keys else None),
+                    )
                     if faceted and faceted.get("formatted_context"):
                         context["formatted_context"] = faceted["formatted_context"]
                         context["faceted_results"] = faceted
+
+            if has_grounded_docs and subgraph and subgraph.get("method_citations"):
+                try:
+                    search_resources = load_search_resources()
+                except Exception:
+                    search_resources = None
+                dereferenced_citations = dereference_method_citations(
+                    subgraph,
+                    search_resources=search_resources,
+                )
+                if dereferenced_citations:
+                    context["dereferenced_citations"] = dereferenced_citations
+                    deref_md = format_dereferenced_citations(dereferenced_citations)
+                    if deref_md:
+                        existing_fmt = context.get("formatted_context") or ""
+                        context["formatted_context"] = f"{existing_fmt}\n\n{deref_md}".strip()
     except Exception as exc:
-        logger.debug("Faceted retrieval skipped or failed (%s); proceeding with local context.", exc)
+        logger.debug("Subgraph/faceted retrieval skipped or failed (%s); proceeding with local context.", exc)
+
+    def _finalize_graph(g: TaskGraph) -> TaskGraph:
+        try:
+            from research_assistant.tasks.retrieval import populate_graph_context_packs
+            populate_graph_context_packs(
+                g,
+                subgraph=subgraph,
+                dereferenced_citations=dereferenced_citations,
+                search_resources=search_resources,
+            )
+        except Exception as e:
+            logger.debug("Context pack population skipped: %s", e)
+
+        # Automatically make root dir for paper and drop all markdown files
+        try:
+            from research_assistant.tasks.workspace import materialize_deconstructed_paper_bundle
+            materialize_deconstructed_paper_bundle(
+                graph=g,
+                workspace_dir=workspace_dir,
+                context=context,
+                tei_or_path=tei_or_path,
+            )
+        except Exception as e:
+            logger.warning("Paper markdown bundle materialization skipped: %s", e)
+
+        return g
 
     if force_heuristic or os.environ.get("CITATION_TASK_HEURISTIC_ONLY") == "1":
         logger.info("Synthesizing task graph via heuristic mode.")
-        return _heuristic_task_graph(pid, title, context, full_phases=full_phases)
+        return _finalize_graph(_heuristic_task_graph(pid, title, context, full_phases=full_phases))
 
     # Execute ProposerCriticEngine refinement loop
     try:
@@ -954,9 +1298,9 @@ def deconstruct_paper_into_task_graph(
         errors = graph.validate()
         if errors:
             logger.warning("Synthesized graph had validation errors (%s); falling back to heuristic.", errors)
-            return _heuristic_task_graph(pid, title, context, full_phases=full_phases)
+            return _finalize_graph(_heuristic_task_graph(pid, title, context, full_phases=full_phases))
         logger.info("Successfully synthesized TaskGraph with %d tasks via ProposerCriticEngine.", len(graph.tasks))
-        return graph
+        return _finalize_graph(graph)
     except Exception as exc:
         logger.warning("LLM task deconstruction failed (%s); using heuristic fallback.", exc)
-        return _heuristic_task_graph(pid, title, context, full_phases=full_phases)
+        return _finalize_graph(_heuristic_task_graph(pid, title, context, full_phases=full_phases))

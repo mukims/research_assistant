@@ -233,3 +233,58 @@ def sentence_context(sentences: list[str], idx: int) -> str:
     if idx + 1 < len(sentences):
         parts.append(sentences[idx + 1])
     return " ".join(parts)
+
+
+# ─── Citation key extraction & punctuation restoration ───────────────────────
+
+_CITE_RE = re.compile(r"\\cite\{([^}]*)\}")
+
+# One or more \cite{...} groups at the very end of a sentence, with the
+# whitespace before them.
+_TRAILING_CITES_RE = re.compile(r"(?:\s*\\cite\{[^}]*\})+\s*$")
+_TERMINAL = ".!?"
+
+
+def _restore_terminal_punctuation(original: str, cited: str) -> str:
+    r"""Give the cited sentence back the full stop the model dropped.
+
+    gemma4:e2b writes "… films \cite{cite_1}" for "… films." — no terminal
+    punctuation. run_batch_citer joins sentences with a space, and Agent 8's
+    split_into_sentences needs [.!?] before whitespace, so the next sentence
+    is swallowed into this one and both citations get judged against a
+    two-sentence claim. Restore the original's terminator after the cite.
+
+    Left alone: a cited sentence that already ends in [.!?], or that ends in
+    [.!?] immediately before a trailing \cite{} group ("… films. \cite{a}"),
+    and any original that had no terminator to restore.
+    """
+    original = original.rstrip()
+    if not original or original[-1] not in _TERMINAL:
+        return cited
+    stripped = cited.rstrip()
+    if stripped and stripped[-1] in _TERMINAL:
+        return stripped
+    core = _TRAILING_CITES_RE.sub("", stripped)
+    if core and core[-1] in _TERMINAL:
+        return stripped
+    return stripped + original[-1]
+
+
+def _cite_keys(text: str) -> set[str]:
+    """Return the set of citation keys actually present in *text*.
+
+    Handles the multi-key form ``\\cite{a,b}`` as well as ``\\cite{a}``.
+    An empty set means no citation was made, whatever the model replied.
+    """
+    keys = set()
+    for match in _CITE_RE.finditer(text):
+        for key in match.group(1).split(","):
+            key = key.strip()
+            if key:
+                keys.add(key)
+    return keys
+
+
+cite_keys = _cite_keys
+restore_terminal_punctuation = _restore_terminal_punctuation
+
