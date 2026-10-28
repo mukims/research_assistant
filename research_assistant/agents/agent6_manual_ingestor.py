@@ -46,6 +46,8 @@ def ingest_manual_pdf(
     pdf_path: str,
     citation_string: str | None = None,
     workers: int = 1,
+    enable_ocr: bool | None = None,
+    ocr_engine: str | None = None,
 ):
     """
     Ingest a single manually placed PDF into the ChromaDB vector database.
@@ -60,6 +62,8 @@ def ingest_manual_pdf(
                          If None, the PDF filename (without extension) is used.
         workers:         Worker processes for the parsing stage (single file, so
                          this is only useful if the file is very large).
+        enable_ocr:      Enable OCR for scanned/image-only PDFs (defaults to config.OCR_ENABLED).
+        ocr_engine:      OCR engine to use ("easyocr" or "vlm").
 
     Returns:
         dict: The result summary from :func:`shared.ingestion.ingest_pdfs`.
@@ -71,7 +75,42 @@ def ingest_manual_pdf(
         citation_string = labels.get(pdf_path) or os.path.splitext(os.path.basename(pdf_path))[0]
 
     logger.info("Ingesting %s (citation label: '%s')", pdf_path, citation_string)
-    return ingest_pdfs({pdf_path: citation_string}, workers=workers)
+    kwargs = {}
+    if enable_ocr is not None:
+        kwargs["enable_ocr"] = enable_ocr
+    if ocr_engine is not None:
+        kwargs["ocr_engine"] = ocr_engine
+    return ingest_pdfs({pdf_path: citation_string}, workers=workers, **kwargs)
+
+
+def ingest_directory(
+    folder_path: str,
+    workers: int = 1,
+    force: bool = False,
+    recursive: bool = True,
+    enable_ocr: bool | None = None,
+    ocr_engine: str | None = None,
+) -> dict:
+    """Ingest all PDF files found within a local directory into ChromaDB.
+
+    Scans the folder, stages valid PDFs, and runs batch ingestion with the
+    shared check/mark bookkeeping.
+    """
+    from research_assistant.shared.batch_uploader import scan_and_stage_directory
+
+    staged = scan_and_stage_directory(folder_path, recursive=recursive)
+    if not staged:
+        logger.info("No valid PDFs found to ingest in %s", folder_path)
+        return {"processed": 0, "skipped": 0, "inserted": 0, "failed": []}
+
+    candidates = {p["path"]: p.get("title") or os.path.basename(p["path"]) for p in staged}
+    logger.info("Batch ingesting %d paper(s) from %s...", len(candidates), folder_path)
+    kwargs = {}
+    if enable_ocr is not None:
+        kwargs["enable_ocr"] = enable_ocr
+    if ocr_engine is not None:
+        kwargs["ocr_engine"] = ocr_engine
+    return ingest_pdfs(candidates, workers=workers, skip_ingested=not force, **kwargs)
 
 
 # ─── Watchdog Handler ─────────────────────────────────────────────────────────
@@ -126,15 +165,60 @@ def main():
         help="Ingest a single PDF immediately instead of watching the directory.",
     )
     parser.add_argument(
+        "--dir",
+        metavar="FOLDER_PATH",
+        help="Scan and batch ingest all PDFs within a folder.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for parallel PDF parsing (default: 1).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-ingesting papers even if already recorded as ingested.",
+    )
+    parser.add_argument(
         "--citation",
         metavar="CITATION_STRING",
         default=None,
         help="Optional citation label for --once mode. Defaults to the PDF filename.",
     )
+    parser.add_argument(
+        "--ocr",
+        dest="ocr",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable OCR extraction for scanned papers & notes without digital text.",
+    )
+    parser.add_argument(
+        "--ocr-engine",
+        choices=["easyocr", "vlm"],
+        default=None,
+        help="OCR engine: 'easyocr' (local GPU/CPU) or 'vlm' (vision model for handwritten notes).",
+    )
     args = parser.parse_args()
 
+    if args.dir:
+        ingest_directory(
+            args.dir,
+            workers=args.workers,
+            force=args.force,
+            enable_ocr=args.ocr,
+            ocr_engine=args.ocr_engine,
+        )
+        return
+
     if args.once:
-        ingest_manual_pdf(args.once, citation_string=args.citation)
+        ingest_manual_pdf(
+            args.once,
+            citation_string=args.citation,
+            workers=args.workers,
+            enable_ocr=args.ocr,
+            ocr_engine=args.ocr_engine,
+        )
         return
 
     os.makedirs(PULLED_PDFS_DIR, exist_ok=True)

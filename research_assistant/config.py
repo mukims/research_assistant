@@ -106,6 +106,14 @@ HF_TOKEN        = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
 # ─── Models ──────────────────────────────────────────────────────────────────
 LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", _default_llm_model)
 CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", _default_llm_model)
+OLLAMA_CHAT_MODELS = (
+    "gemma4:e2b",
+    "llama3.2:latest",
+    "mistral:latest",
+    "qwen2.5:latest",
+    "deepseek-r1:8b",
+)
+
 # embeddinggemma-2 embeds text and images into one space, which is what lets a
 # text query find a figure. Any other embedder indexes text only (no figure
 # images) and must be set together with a fresh CITATION_INDEX_VERSION.
@@ -383,6 +391,14 @@ GROBID_JAR_PATH          = os.environ.get("GROBID_JAR_PATH", "")
 # already processed is never sent twice.
 GROBID_TEI_DIR           = os.path.join(RAW_DIR, "grobid_output")
 GROBID_FULLTEXT_TIMEOUT  = _env_int("GROBID_FULLTEXT_TIMEOUT", 300)
+
+# ─── OCR Settings ─────────────────────────────────────────────────────────────
+# Optical Character Recognition for scanned research papers and handwritten/typed notes
+OCR_ENABLED              = _env_bool("CITATION_ENABLE_OCR", True)
+OCR_ENGINE               = os.environ.get("CITATION_OCR_ENGINE", "easyocr")  # easyocr | vlm
+OCR_DPI                  = _env_int("CITATION_OCR_DPI", 150)
+OCR_MIN_CHARS_PER_PAGE   = _env_int("CITATION_OCR_MIN_CHARS_PER_PAGE", 50)
+OCR_MODEL_DIR            = os.environ.get("CITATION_OCR_MODEL_DIR", os.path.join(DATA_DIR, "models", "ocr"))
 
 # ─── Agent 2 — Fetcher ───────────────────────────────────────────────────────
 MAX_CITATION_LEN   = 500   # Skip citations longer than this (likely malformed)

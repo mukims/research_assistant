@@ -496,10 +496,12 @@ class ProposerCriticEngine:
     def __init__(
         self,
         model: Optional[str] = None,
+        backend: Optional[str] = None,
         chat_fn: Optional[Any] = None,
         full_phases: bool = True,
     ):
         self.model = model or LLM_MODEL
+        self.backend = backend
         self.chat_fn = chat_fn or chat
         self.full_phases = full_phases
         self.macro_critic = MacroCritic()
@@ -632,7 +634,7 @@ class ProposerCriticEngine:
             ]
 
         try:
-            res = self.chat_fn(messages, model=self.model, temperature=0.1, options={"num_ctx": 4096})
+            res = self.chat_fn(messages, model=self.model, backend=self.backend, temperature=0.1, options={"num_ctx": 4096})
             raw = res.content.strip() if hasattr(res, "content") else str(res).strip()
             graph = self._parse_llm_json(raw, paper_id, paper_title)
             if graph and len(graph.tasks) > 0:

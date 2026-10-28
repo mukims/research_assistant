@@ -5,6 +5,7 @@ Streamlit UI Component for Scientific Agent Task Planner & Replication DAGs.
 import json
 import os
 import re
+import sys
 from typing import List, Optional
 
 import streamlit as st
@@ -56,6 +57,30 @@ def _list_candidate_papers() -> List[str]:
     return unique_candidates
 
 
+ROLE_ICONS = {
+    "devops_agent": "🛠️",
+    "data_engineer": "📊",
+    "model_architect": "🧠",
+    "experiment_runner": "🧪",
+    "evaluation_agent": "📈",
+    "audit_agent": "⚖️",
+    "scientific_critic": "🔬",
+}
+
+
+def _list_existing_workspace_runs() -> List[str]:
+    """Finds existing deconstructed paper runs in workspace_runs/ that contain plan.json."""
+    ws_base = os.environ.get("CITATION_WORKSPACE_DIR") or os.path.join(config.PROJECT_ROOT, "workspace_runs")
+    if not os.path.exists(ws_base):
+        return []
+    runs = []
+    for item in sorted(os.listdir(ws_base)):
+        plan_file = os.path.join(ws_base, item, "plan.json")
+        if os.path.isfile(plan_file):
+            runs.append(item)
+    return runs
+
+
 def _render_mermaid_interactive(mermaid_code: str, height: int = 420):
     """Renders Mermaid diagram in an iframe with interactive pan/zoom support."""
     html = f"""
@@ -84,16 +109,37 @@ def _render_mermaid_interactive(mermaid_code: str, height: int = 420):
 {mermaid_code}
       </div>
       <script>
-        mermaid.initialize({{
-          startOnLoad: true,
-          theme: 'default',
-          securityLevel: 'loose',
-          flowchart: {{
-            useMaxWidth: true,
-            htmlLabels: true,
-            curve: 'basis'
+        var attempts = 0;
+        function renderMermaid() {{
+          if (typeof mermaid !== 'undefined') {{
+            try {{
+              mermaid.initialize({{
+                startOnLoad: false,
+                theme: 'default',
+                securityLevel: 'loose',
+                flowchart: {{
+                  useMaxWidth: true,
+                  htmlLabels: true,
+                  curve: 'basis'
+                }}
+              }});
+              mermaid.run({{
+                querySelector: '.mermaid'
+              }});
+            }} catch(e) {{
+              console.error('Mermaid render error:', e);
+            }}
+          }} else if (attempts < 50) {{
+            attempts++;
+            setTimeout(renderMermaid, 100);
           }}
-        }});
+        }}
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {{
+          renderMermaid();
+        }} else {{
+          window.addEventListener('DOMContentLoaded', renderMermaid);
+          window.addEventListener('load', renderMermaid);
+        }}
       </script>
     </body>
     </html>
@@ -101,8 +147,30 @@ def _render_mermaid_interactive(mermaid_code: str, height: int = 420):
     st.components.v1.html(html, height=height, scrolling=True)
 
 
+
+def _is_test_env() -> bool:
+    """Returns True if running under pytest, unittest, or headless test harness."""
+    return (
+        any(m in sys.modules for m in ("pytest", "unittest"))
+        or (len(sys.argv) > 0 and ("pytest" in sys.argv[0] or any("test" in a for a in sys.argv)))
+    )
+
+
 def render_planner_tab():
     """Renders the complete Agent Task Planner interface."""
+    # Pre-load existing workspace DAG if none is in session state (in live interactive app)
+    if not st.session_state.get("planner_active_graph") and not _is_test_env():
+        existing_runs = _list_existing_workspace_runs()
+        if existing_runs:
+            preferred = "sample_corpus_paper" if "sample_corpus_paper" in existing_runs else existing_runs[0]
+            ws_base = os.environ.get("CITATION_WORKSPACE_DIR") or os.path.join(config.PROJECT_ROOT, "workspace_runs")
+            plan_file = os.path.join(ws_base, preferred, "plan.json")
+            try:
+                with open(plan_file, "r", encoding="utf-8") as f:
+                    st.session_state["planner_active_graph"] = TaskGraph.from_dict(json.load(f))
+            except Exception:
+                pass
+
     st.subheader("🧬 Scientific Paper-to-Agent Task Decomposition")
     st.caption(
         "Deconstruct complex scientific papers into structured Directed Acyclic Graphs (DAGs) "
@@ -112,9 +180,14 @@ def render_planner_tab():
     col_input, col_opts = st.columns([2, 1])
 
     with col_input:
+        existing_workspaces = _list_existing_workspace_runs()
+        source_options = ["Select Ingested Paper", "Upload New Paper / TEI XML / Text"]
+        if existing_workspaces:
+            source_options.append("Load Existing Workspace Plan")
+
         input_source = st.radio(
             "Paper Source",
-            ["Select Ingested Paper", "Upload New Paper / TEI XML / Text"],
+            source_options,
             horizontal=True,
             key="planner_source_choice",
         )
@@ -122,7 +195,26 @@ def render_planner_tab():
         paper_path = None
         paper_title = None
 
-        if input_source == "Select Ingested Paper":
+        if input_source == "Load Existing Workspace Plan":
+            chosen_ws = st.selectbox(
+                "Choose workspace plan to inspect",
+                existing_workspaces,
+                key="planner_ws_select",
+            )
+            ws_base = os.environ.get("CITATION_WORKSPACE_DIR") or os.path.join(config.PROJECT_ROOT, "workspace_runs")
+            plan_file = os.path.join(ws_base, chosen_ws, "plan.json")
+            if os.path.isfile(plan_file):
+                paper_path = plan_file
+            if st.button("📂 Load Selected Plan", key="planner_btn_load_ws"):
+                try:
+                    with open(plan_file, "r", encoding="utf-8") as f:
+                        st.session_state["planner_active_graph"] = TaskGraph.from_dict(json.load(f))
+                    st.session_state["planner_last_report"] = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load plan: {e}")
+
+        elif input_source == "Select Ingested Paper":
             candidates = _list_candidate_papers()
             if candidates:
                 labels = [os.path.basename(c) for c in candidates]
@@ -137,7 +229,7 @@ def render_planner_tab():
             else:
                 st.info("No ingested papers found in corpus yet. Please upload a paper below.")
 
-        if input_source == "Upload New Paper / TEI XML / Text" or not paper_path:
+        elif input_source == "Upload New Paper / TEI XML / Text":
             uploaded = st.file_uploader(
                 "Upload Paper (PDF, TEI XML, or TXT)",
                 type=["pdf", "xml", "txt"],
@@ -174,6 +266,12 @@ def render_planner_tab():
                 except Exception as exc:
                     pass
 
+        # If user selected an ingested paper or uploaded file wasn't provided, ensure paper_path exists if possible
+        if not paper_path and input_source == "Select Ingested Paper":
+            candidates = _list_candidate_papers()
+            if candidates:
+                paper_path = candidates[0]
+
     with col_opts:
         st.markdown("##### Configuration")
         heuristic_mode = st.checkbox(
@@ -204,10 +302,14 @@ def render_planner_tab():
             try:
                 base_id = os.path.splitext(os.path.basename(paper_path))[0]
                 safe_pid = re.sub(r"[^\w\-]", "_", base_id).strip("_") or "paper"
+                active_model = st.session_state.get("chat_model") or config.LLM_MODEL
+                active_backend = st.session_state.get("chat_backend")
                 graph = deconstruct_paper_into_task_graph(
                     tei_or_path=paper_path,
                     paper_id=safe_pid,
                     paper_title=paper_title,
+                    model=active_model,
+                    backend=active_backend,
                     force_heuristic=heuristic_mode,
                     full_phases=True,
                 )
@@ -258,8 +360,45 @@ def render_planner_tab():
         with tab_flow:
             mermaid_str = render_mermaid(graph)
             _render_mermaid_interactive(mermaid_str)
-            with st.expander("Show Mermaid Source Code"):
+            with st.expander("🔍 Show Mermaid Source Code"):
                 st.code(mermaid_str, language="mermaid")
+
+            st.markdown("#### ⚡ Topological Wave Pipeline Flow")
+            st.caption("Sequential execution stages. Tasks within each wave run concurrently in isolated agent environments.")
+
+            for wave_idx, wave_tasks in enumerate(waves):
+                wave_num = wave_idx + 1
+                st.markdown(f"**🌊 Stage {wave_num} ({len(wave_tasks)} Concurrent Task{'s' if len(wave_tasks) > 1 else ''})**")
+
+                cols = st.columns(min(len(wave_tasks), 3))
+                for t_idx, task in enumerate(wave_tasks):
+                    col = cols[t_idx % len(cols)]
+                    with col:
+                        role_val = task.assigned_role.value if hasattr(task.assigned_role, "value") else str(task.assigned_role)
+                        role_icon = ROLE_ICONS.get(role_val, "📋")
+                        status_badge = (
+                            "🟢 Completed" if task.status == TaskStatus.COMPLETED
+                            else ("🟡 In Progress" if task.status == TaskStatus.RUNNING
+                            else ("⚪ Ready" if task.status == TaskStatus.READY else "🔴 Blocked"))
+                        )
+                        deliverables_str = ", ".join(f"`{out}`" for out in task.outputs) if task.outputs else "None specified"
+                        st.markdown(
+                            f"""
+                            <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-bottom: 10px; background-color: #f8fafc;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                    <span style="font-size: 11px; font-weight: 700; color: #475569; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">{task.task_id}</span>
+                                    <span style="font-size: 11px; font-weight: 600;">{status_badge}</span>
+                                </div>
+                                <div style="font-weight: 600; font-size: 13px; color: #0f172a; margin-bottom: 4px;">{task.title}</div>
+                                <div style="font-size: 12px; color: #64748b; margin-bottom: 6px;">{role_icon} {role_val}</div>
+                                <div style="font-size: 11px; color: #334155;"><strong>Deliverables:</strong> {deliverables_str}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                if wave_idx < len(waves) - 1:
+                    st.markdown("<div style='text-align: center; color: #94a3b8; font-size: 16px; margin: 4px 0 12px 0;'>⬇️ <em>Dependencies cascade downstream</em> ⬇️</div>", unsafe_allow_html=True)
 
         with tab_schedule:
             for wave_idx, wave_tasks in enumerate(waves):
@@ -326,10 +465,14 @@ def render_planner_tab():
                         prog_bar.progress(pct, text=f"Executed {executed}/{total} tasks ({status.value})...")
                     status_text.caption(f"Currently processing: `{t.task_id}` ({t.title}) -> **{status.value}**")
 
+                active_model = st.session_state.get("chat_model") or config.LLM_MODEL
+                active_backend = st.session_state.get("chat_backend")
                 runner = TaskRunner(
                     graph=graph,
                     workspace_dir=workspace,
                     mode=mode,
+                    model=active_model,
+                    backend=active_backend,
                     on_task_update=on_task_update,
                 )
 
@@ -403,3 +546,26 @@ def render_planner_tab():
                     "Error": res.error_message or "-",
                 })
             st.dataframe(table_rows, use_container_width=True)
+
+    else:
+        st.divider()
+        st.info("ℹ️ No active task graph currently loaded in session.")
+        col_hint1, col_hint2 = st.columns(2)
+        with col_hint1:
+            st.markdown(
+                "**Quick Start:**\n"
+                "- Select a paper from the corpus above and click **⚡ Deconstruct into Task Graph**.\n"
+                "- Or choose **Load Existing Workspace Plan** to inspect pre-synthesized replication DAGs."
+            )
+        with col_hint2:
+            existing_runs = _list_existing_workspace_runs()
+            if existing_runs and st.button("📂 Load Default Sample Corpus Plan", type="secondary", key="planner_btn_quick_load"):
+                preferred = "sample_corpus_paper" if "sample_corpus_paper" in existing_runs else existing_runs[0]
+                ws_base = os.environ.get("CITATION_WORKSPACE_DIR") or os.path.join(config.PROJECT_ROOT, "workspace_runs")
+                plan_file = os.path.join(ws_base, preferred, "plan.json")
+                try:
+                    with open(plan_file, "r", encoding="utf-8") as f:
+                        st.session_state["planner_active_graph"] = TaskGraph.from_dict(json.load(f))
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load plan: {e}")

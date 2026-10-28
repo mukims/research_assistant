@@ -240,6 +240,20 @@ class TestSearchResourcesRefresh(ChatTestCase):
         self.assertTrue(self.agent.use_search_resources(self._rebuilt()))
         self.assertEqual(kept(), before)
 
+    def test_model_can_be_configured_and_updated(self):
+        custom_chat = a7.ResearchChat(
+            top_k=5,
+            search_resources=(None, None, [], []),
+            model="llama3.2:latest",
+            backend="ollama",
+        )
+        self.assertEqual(custom_chat.model, "llama3.2:latest")
+        self.assertEqual(custom_chat.backend, "ollama")
+        custom_chat.set_model("mistral:latest", backend="ollama")
+        self.assertEqual(custom_chat.model, "mistral:latest")
+        self.assertEqual(custom_chat.backend, "ollama")
+
+
 
 if __name__ == "__main__":
     unittest.main()

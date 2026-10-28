@@ -28,7 +28,7 @@ from research_assistant.shared.log import get_logger
 
 logger = get_logger("ingest_v2")
 
-EXTRACTION_MODES_V2 = ("grobid", "pymupdf")
+EXTRACTION_MODES_V2 = ("grobid", "pymupdf", "ocr")
 
 
 def _pdf_key(pdf_path: str) -> str:
@@ -52,11 +52,16 @@ def _summary_source(doc: Document) -> str:
     return "\n\n".join(parts)[:SUMMARY_MAX_CHARS]
 
 
-def process_pdf_v2(pdf_path: str, citation_string: str,
-                   images_dir: str | None = None) -> list[dict]:
+def process_pdf_v2(
+    pdf_path: str,
+    citation_string: str,
+    images_dir: str | None = None,
+    enable_ocr: bool | None = None,
+    ocr_engine: str | None = None,
+) -> list[dict]:
     images_dir = images_dir or IMAGES_DIR
     key = _pdf_key(pdf_path)
-    doc = extract(pdf_path, key=key)
+    doc = extract(pdf_path, key=key, enable_ocr=enable_ocr, ocr_engine=ocr_engine)
     title = doc.title or citation_string
     chunks = chunk_document(doc, CHUNK_TARGET_CHARS, CHUNK_MAX_CHARS,
                             min_chars=CHUNK_MIN_CHARS, min_alpha=CHUNK_MIN_ALPHA)

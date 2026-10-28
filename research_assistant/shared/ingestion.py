@@ -117,9 +117,15 @@ def _ingest_lock():
 PRECHUNKED_TYPES = ("text_chunk", "caption", "figure_image")
 
 
-def process_pdf(pdf_path: str, citation_string: str, images_dir=None):
+def process_pdf(
+    pdf_path: str,
+    citation_string: str,
+    images_dir=None,
+    enable_ocr: bool | None = None,
+    ocr_engine: str | None = None,
+):
     """Extract a single PDF into corpus entries (shared.ingest_v2): GROBID full
-    text with the PyMuPDF fallback, sentence-window chunks, captions, figure
+    text with the PyMuPDF and OCR fallback, sentence-window chunks, captions, figure
     crops and their image embeddings.
 
     Every entry is tagged with the extraction mode that produced it so
@@ -127,7 +133,13 @@ def process_pdf(pdf_path: str, citation_string: str, images_dir=None):
     """
     from research_assistant.shared.ingest_v2 import process_pdf_v2
 
-    return process_pdf_v2(pdf_path, citation_string, images_dir=images_dir)
+    return process_pdf_v2(
+        pdf_path,
+        citation_string,
+        images_dir=images_dir,
+        enable_ocr=enable_ocr,
+        ocr_engine=ocr_engine,
+    )
 
 
 # ─── Document summaries (stage-1 index) ─────────────────────────────────────
@@ -508,6 +520,8 @@ def ingest_pdfs(
     rebuild_index: bool = True,
     log_prefix: str = "",
     require_grobid: bool = False,
+    enable_ocr: bool | None = None,
+    ocr_engine: str | None = None,
 ) -> dict:
     """Ingest a batch of PDFs: process → upsert → mark → rebuild the BM25 index.
 
@@ -530,16 +544,36 @@ def ingest_pdfs(
         rebuild_index: Rebuild the BM25 index once at the end. Pass False when
                        ingesting several batches and rebuild once yourself.
         log_prefix:    Prefix for log lines, e.g. ``"[Sync] "``.
+        enable_ocr:    Enable OCR for scanned/image-only PDFs (defaults to config.OCR_ENABLED).
+        ocr_engine:    OCR engine to use ("easyocr" or "vlm").
 
     Returns:
         dict: ``{"processed", "skipped", "inserted", "failed"}`` — ``failed``
         is the list of paths that could not be read.
     """
     with _ingest_lock():
-        return _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, require_grobid)
+        return _ingest_pdfs_locked(
+            pdfs,
+            workers,
+            skip_ingested,
+            rebuild_index,
+            log_prefix,
+            require_grobid,
+            enable_ocr=enable_ocr,
+            ocr_engine=ocr_engine,
+        )
 
 
-def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix, require_grobid=False) -> dict:
+def _ingest_pdfs_locked(
+    pdfs,
+    workers,
+    skip_ingested,
+    rebuild_index,
+    log_prefix,
+    require_grobid=False,
+    enable_ocr=None,
+    ocr_engine=None,
+) -> dict:
     """ingest_pdfs()'s body. Call it through ingest_pdfs(), which holds the lock."""
     if not isinstance(pdfs, dict):
         pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
@@ -608,7 +642,12 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
                     detail=f"Parsing PDF [{i}/{len(candidates)}]: {name}",
                 )
                 logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), name)
-                entries = process_pdf(path, label)
+                entries = process_pdf(
+                    path,
+                    label,
+                    enable_ocr=enable_ocr,
+                    ocr_engine=ocr_engine,
+                )
                 if not entries:
                     scanned_or_empty.append(name)
                 corpus.extend(entries)
@@ -618,7 +657,14 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
             )
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(process_pdf, path, label): (path, label)
+                    executor.submit(
+                        process_pdf,
+                        path,
+                        label,
+                        None,
+                        enable_ocr,
+                        ocr_engine,
+                    ): (path, label)
                     for path, label in candidates.items()
                 }
                 completed_count = 0
@@ -676,6 +722,12 @@ def _ingest_pdfs_locked(pdfs, workers, skip_ingested, rebuild_index, log_prefix,
                 docs.add(entry["document"])
         result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}
         result["figure_images"] = sum(1 for e in corpus if e.get("type") == "figure_image")
+
+        if by_mode.get("ocr"):
+            logger.info(
+                "%s%d of %d document(s) extracted via OCR (%s).",
+                log_prefix, len(by_mode["ocr"]), result["processed"], ocr_engine or "easyocr",
+            )
 
         if by_mode["pymupdf"]:
             logger.warning(

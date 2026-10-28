@@ -1020,6 +1020,7 @@ def deconstruct_paper_into_task_graph(
     paper_id: Optional[str] = None,
     paper_title: Optional[str] = None,
     model: Optional[str] = None,
+    backend: Optional[str] = None,
     force_heuristic: bool = False,
     full_phases: bool = False,
     build_refs: bool = False,
@@ -1164,7 +1165,7 @@ def deconstruct_paper_into_task_graph(
     # Execute ProposerCriticEngine refinement loop
     try:
         from research_assistant.tasks.iteration import ProposerCriticEngine
-        engine = ProposerCriticEngine(model=model, chat_fn=chat, full_phases=full_phases)
+        engine = ProposerCriticEngine(model=model, backend=backend, chat_fn=chat, full_phases=full_phases)
         graph, scorecards = engine.run_refinement_loop(pid, title, context, max_turns=3)
         errors = graph.validate()
         if errors:

@@ -162,3 +162,130 @@ def unpack_and_stage_uploads(
 
     logger.info('Staged %d valid research paper(s) into %s', len(staged), destination_dir)
     return staged
+
+
+def scan_and_stage_directory(
+    folder_path: str,
+    destination_dir: str = RAW_DIR,
+    recursive: bool = True,
+) -> list[dict]:
+    """Scan a local directory for all PDF documents, inspect, and stage them.
+
+    Args:
+        folder_path:     Root path of directory on disk to scan.
+        destination_dir: Target directory where validated PDFs are staged (default: RAW_DIR).
+        recursive:       Whether to scan subdirectories recursively.
+
+    Returns:
+        List of dicts describing staged papers.
+    """
+    if not os.path.isdir(folder_path):
+        logger.warning("Directory does not exist: %s", folder_path)
+        return []
+
+    pdf_files: list[str] = []
+    if recursive:
+        for root, _, files in os.walk(folder_path):
+            for f in files:
+                if f.lower().endswith(".pdf") and not f.startswith("."):
+                    pdf_files.append(os.path.join(root, f))
+    else:
+        for f in os.listdir(folder_path):
+            full_p = os.path.join(folder_path, f)
+            if os.path.isfile(full_p) and f.lower().endswith(".pdf") and not f.startswith("."):
+                pdf_files.append(full_p)
+
+    logger.info("Found %d PDF file(s) in %s (recursive=%s)", len(pdf_files), folder_path, recursive)
+    return unpack_and_stage_uploads(pdf_files, destination_dir=destination_dir)
+
+
+def fetch_and_stage_urls_or_dois(
+    items: list[str],
+    destination_dir: str = RAW_DIR,
+) -> list[dict]:
+    """Fetch papers given a list of URLs, arXiv IDs, or DOIs and stage them.
+
+    Args:
+        items:           List of strings (URLs, DOIs like 10.1103/..., or arXiv IDs like 2401.12345).
+        destination_dir: Target directory where fetched PDFs are staged.
+
+    Returns:
+        List of dicts describing successfully fetched and staged papers.
+    """
+    import requests
+
+    staged: list[dict] = []
+    seen_keys: set[str] = set()
+
+    for raw in items:
+        token = raw.strip()
+        if not token or token.startswith("#"):
+            continue
+
+        data: bytes | None = None
+        orig_name: str = "fetched_paper.pdf"
+
+        # Check if URL
+        if token.startswith(("http://", "https://")):
+            url = token
+            # Convert arXiv abs to pdf link if applicable
+            if "arxiv.org/abs/" in url:
+                url = url.replace("arxiv.org/abs/", "arxiv.org/pdf/") + ".pdf"
+            orig_name = os.path.basename(url.split("?")[0]) or "url_paper.pdf"
+            try:
+                resp = requests.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Marvin-Citebot/1.0"},
+                    timeout=30,
+                )
+                if resp.status_code == 200 and _is_pdf_content(resp.content[:1024]):
+                    data = resp.content
+                else:
+                    logger.warning("URL %s did not return valid PDF content (status %d)", url, resp.status_code)
+            except Exception as exc:
+                logger.warning("Failed fetching URL %s: %s", url, exc)
+
+        # Check if arXiv ID (e.g. 2401.12345 or arXiv:2401.12345)
+        elif re.match(r"^(?:arxiv:)?\d{4}\.\d{4,5}(?:v\d+)?$", token, re.I):
+            aid = re.sub(r"^arxiv:", "", token, flags=re.I).strip()
+            url = f"https://arxiv.org/pdf/{aid}.pdf"
+            orig_name = f"arxiv_{aid}.pdf"
+            try:
+                resp = requests.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 Marvin-Citebot/1.0"},
+                    timeout=30,
+                )
+                if resp.status_code == 200 and _is_pdf_content(resp.content[:1024]):
+                    data = resp.content
+            except Exception as exc:
+                logger.warning("Failed fetching arXiv:%s: %s", aid, exc)
+
+        # Check if DOI (e.g. 10.xxxx/yyyy)
+        elif token.startswith("10.") and "/" in token:
+            doi = token
+            # Try Unpaywall / Europe PMC via Agent 2
+            try:
+                from research_assistant.agents import agent2_fetcher
+
+                tmp_dest = os.path.join(destination_dir, "temp_doi_fetch.pdf")
+                ok = agent2_fetcher.try_unpaywall(doi, tmp_dest)
+                if not ok:
+                    ok = agent2_fetcher.try_europepmc(doi, {"doi": doi}, tmp_dest)
+                if ok and os.path.exists(tmp_dest):
+                    with open(tmp_dest, "rb") as fh:
+                        data = fh.read()
+                    os.unlink(tmp_dest)
+                    orig_name = f"doi_{doi.replace('/', '_')}.pdf"
+            except Exception as exc:
+                logger.warning("Failed resolving DOI %s: %s", doi, exc)
+
+        if data:
+            rec = _extract_from_bytes(data, orig_name, destination_dir)
+            if rec and rec["key"] not in seen_keys:
+                seen_keys.add(rec["key"])
+                staged.append(rec)
+
+    logger.info("Successfully fetched and staged %d paper(s)", len(staged))
+    return staged
+

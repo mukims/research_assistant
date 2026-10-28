@@ -46,7 +46,7 @@ def render_audit_tab():
             placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
             help="If provided, used to synthesize an answer across the papers at the end.",
         )
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         audit_citations = c1.toggle(
             "Audit citations",
             value=True,
@@ -54,6 +54,11 @@ def render_audit_tab():
         )
         ask = c2.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis.")
         force = c3.toggle("Force re-run", value=False)
+        enable_ocr = c4.toggle(
+            "Enable OCR",
+            value=True,
+            help="Enable OCR for scanned papers or notes without a digital text layer.",
+        )
         submitted_upload = st.form_submit_button("Audit Citations & Index Paper(s)", type="primary")
 
     if submitted_upload:
@@ -170,7 +175,12 @@ def render_audit_tab():
                         detail=f"Batch ingesting {len(candidates)} papers",
                     ):
                         try:
-                            ingest_res = ingest_pdfs(candidates, workers=1, skip_ingested=not force)
+                            ingest_res = ingest_pdfs(
+                                candidates,
+                                workers=1,
+                                skip_ingested=not force,
+                                enable_ocr=enable_ocr,
+                            )
                         finally:
                             pipeline_status.unregister_progress_callback(_on_batch_progress)
 

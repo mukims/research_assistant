@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from lxml import etree
 
+from research_assistant import config
 from research_assistant.config import GROBID_SERVER, GROBID_TEI_DIR, GROBID_FULLTEXT_TIMEOUT
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.tokenize import normalize
@@ -65,7 +66,7 @@ class Document:
     abstract: list
     sections: list
     figures: list
-    extraction: str                 # "grobid" | "pymupdf"
+    extraction: str                 # "grobid" | "pymupdf" | "ocr"
     n_bib: int = 0
 
 
@@ -362,10 +363,39 @@ def extract_pymupdf(pdf_path: str, key: str) -> Document:
 
 # ─── Entry point ─────────────────────────────────────────────────────
 
-def extract(pdf_path: str, key: str | None = None) -> Document:
-    """Cached TEI → GROBID → PyMuPDF. Never raises for a readable PDF; the
-    Document says which path produced it."""
+def extract(
+    pdf_path: str,
+    key: str | None = None,
+    enable_ocr: bool | None = None,
+    ocr_engine: str | None = None,
+) -> Document:
+    """Cached TEI → GROBID → PyMuPDF → OCR.
+
+    If a PDF is detected as scanned/image-only without digital text, or if both
+    GROBID and PyMuPDF extract zero text, falls back to OCR extraction (EasyOCR or VLM)
+    when OCR is enabled. Never raises for a readable PDF; the Document.extraction
+    field records which path produced it ('grobid' | 'pymupdf' | 'ocr').
+    """
     key = key or os.path.basename(pdf_path).strip().replace(" ", "_").lower()
+    enable_ocr = config.OCR_ENABLED if enable_ocr is None else enable_ocr
+    ocr_engine = ocr_engine or config.OCR_ENGINE
+
+    # Check if this PDF is a scanned/image-only document lacking a digital text layer
+    if enable_ocr:
+        try:
+            from research_assistant.shared.ocr import is_scanned_pdf, extract_ocr
+
+            if is_scanned_pdf(pdf_path):
+                logger.info(
+                    "PDF %s detected as scanned/image-only without digital text — routing to OCR (%s)",
+                    os.path.basename(pdf_path),
+                    ocr_engine,
+                )
+                return extract_ocr(pdf_path, key=key, engine=ocr_engine)
+        except Exception as exc:
+            logger.warning("Scanned PDF detection/OCR failed for %s (%s) — continuing pipeline.",
+                           os.path.basename(pdf_path), exc)
+
     cache = tei_cache_path(pdf_path)
 
     xml = None
@@ -394,4 +424,22 @@ def extract(pdf_path: str, key: str | None = None) -> Document:
         logger.warning("GROBID produced no body text for %s — falling back to PyMuPDF.",
                        os.path.basename(pdf_path))
 
-    return extract_pymupdf(pdf_path, key)
+    doc = extract_pymupdf(pdf_path, key)
+    has_text = bool(doc.abstract) or any(s.paragraphs for s in doc.sections)
+
+    if not has_text and enable_ocr:
+        logger.info(
+            "PyMuPDF extracted no text for %s — routing to OCR fallback (%s)",
+            os.path.basename(pdf_path),
+            ocr_engine,
+        )
+        try:
+            from research_assistant.shared.ocr import extract_ocr
+
+            ocr_doc = extract_ocr(pdf_path, key=key, engine=ocr_engine)
+            if ocr_doc.abstract or any(s.paragraphs for s in ocr_doc.sections):
+                return ocr_doc
+        except Exception as exc:
+            logger.warning("OCR fallback failed for %s (%s)", os.path.basename(pdf_path), exc)
+
+    return doc

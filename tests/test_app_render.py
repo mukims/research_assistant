@@ -23,6 +23,58 @@ class TestSynthesisWarnings(unittest.TestCase):
         self.assertEqual(ui_results._synthesis_warnings({"suggestion": "x"}), [])
 
 
+class TestSynthesisExport(unittest.TestCase):
+    def test_build_synthesis_markdown(self):
+        answer = {
+            "suggestion": "Topological edge states are protected against backscattering [P1].",
+            "selected": [
+                {
+                    "key": "P1",
+                    "citation": "Hasan 2010 Colloquium: Topological insulators",
+                    "document": "hasan2010.pdf",
+                    "score": 0.92,
+                    "summary": "Reviews topological insulator theory and phenomenology.",
+                }
+            ],
+            "notes": [
+                {
+                    "key": "P1",
+                    "citation": "Hasan 2010 Colloquium: Topological insulators",
+                    "notes": "Edge states exist inside the bulk energy gap.",
+                    "relevant": True,
+                    "passages_used": 3,
+                }
+            ],
+            "citations": ["Hasan 2010 Colloquium: Topological insulators"],
+        }
+        md = ui_results._build_synthesis_markdown("quantum wires", answer)
+        self.assertIn("# 🔬 Literature Synthesis: quantum wires", md)
+        self.assertIn("Topological edge states are protected", md)
+        self.assertIn("Hasan 2010 Colloquium", md)
+        self.assertIn("Edge states exist inside the bulk energy gap", md)
+        self.assertIn("## 📑 Cited Sources", md)
+
+    def test_build_synthesis_bibtex(self):
+        answer = {
+            "selected": [
+                {
+                    "key": "P1",
+                    "citation": "Kane 2005 Z2 Topological Order and the Quantum Spin Hall Effect",
+                    "document": "kane2005.pdf",
+                }
+            ]
+        }
+        bib = ui_results._build_synthesis_bibtex(answer)
+        self.assertIn("@article{kane2005_p1,", bib)
+        self.assertIn("author = {Kane},", bib)
+        self.assertIn("year = {2005},", bib)
+        self.assertIn("note = {Document: kane2005.pdf},", bib)
+
+    def test_build_synthesis_bibtex_empty(self):
+        bib = ui_results._build_synthesis_bibtex({})
+        self.assertIn("No references found", bib)
+
+
 class TestAuditItemBadge(unittest.TestCase):
     def test_badges_follow_outcome_before_judgement(self):
         self.assertEqual(ui_audit._audit_item_badge({"outcome": "judged", "judgement": "Supports"}), "🟢 Supports")

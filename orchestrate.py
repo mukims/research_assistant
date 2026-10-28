@@ -80,6 +80,7 @@ class PipelineState(_Inputs, total=False):
     stopped: Optional[str]   # reason the run ended early, if it did
     discovery_trace: Optional[dict]
     context_profile: Optional[dict]
+    synthesis_mode: Optional[str]
 
 
 def _banner(title: str) -> None:
@@ -211,7 +212,8 @@ def respond(state: PipelineState) -> dict:
 
     with pipeline_status.track_stage("respond", "Synthesizing answer", current_step=5, total_steps=5, detail=f"Synthesizing related-work response for: {state.get('query', '')[:50]}"):
         pipeline_status.add_event("✍️ Formulating related-work synthesis…")
-        result = retrieve.research_answer(state["query"])
+        synth_mode = state.get("synthesis_mode") or config.SYNTHESIS_MODE
+        result = retrieve.research_answer(state["query"], mode=synth_mode)
         pipeline_status.add_event("✅ Related-work synthesis complete")
 
         audit_result = None

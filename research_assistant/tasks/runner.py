@@ -265,11 +265,15 @@ class TaskRunner:
         graph: TaskGraph,
         workspace_dir: str,
         mode: ExecutionMode = ExecutionMode.SIMULATION,
+        model: Optional[str] = None,
+        backend: Optional[str] = None,
         on_task_update: Optional[Callable[[Task, TaskStatus], None]] = None,
     ):
         self.graph = graph
         self.workspace_dir = os.path.abspath(workspace_dir)
         self.mode = mode
+        self.model = model or LLM_MODEL
+        self.backend = backend
         self.on_task_update = on_task_update
 
         # Storage Invariant Guardrail: Never point workspace to persistent DATA_DIR or VECTORDB_PATH
@@ -773,7 +777,8 @@ class TaskRunner:
                             {"role": "system", "content": role_spec.system_prompt},
                             {"role": "user", "content": prompt_c1},
                         ],
-                        model=LLM_MODEL,
+                        model=self.model,
+                        backend=self.backend,
                         temperature=0.2,
                         options=TASK_OLLAMA_OPTIONS,
                     )
@@ -828,7 +833,8 @@ class TaskRunner:
                             {"role": "assistant", "content": last_llm_response},
                             {"role": "user", "content": refine_prompt},
                         ],
-                        model=LLM_MODEL,
+                        model=self.model,
+                        backend=self.backend,
                         temperature=0.1,
                         options=TASK_OLLAMA_OPTIONS,
                     )

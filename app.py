@@ -17,7 +17,8 @@ import streamlit as st
 from research_assistant import config
 from research_assistant.ui.audit_tab import render_audit_tab
 from research_assistant.ui.chat_tab import render_chat_tab
-from research_assistant.ui.common import _check_auth, _corpus_stats
+from research_assistant.ui.common import _check_auth, _corpus_stats, _render_sidebar_backend_controls
+from research_assistant.ui.corpus_tab import render_corpus_tab
 from research_assistant.ui.draft_tab import render_draft_tab
 from research_assistant.ui.grobid import _render_grobid_controls
 from research_assistant.ui.help_tab import render_help_tab
@@ -29,6 +30,53 @@ os.makedirs(config.DATA_DIR, exist_ok=True)
 
 if not _check_auth():
     st.stop()
+
+# ─── UI Styling ─────────────────────────────────────────────────────────────
+
+st.markdown(
+    """
+    <style>
+    /* Marvin Modern Theme Enhancements */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+        padding-bottom: 4px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 8px 16px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+    .stTabs [aria-selected="true"] {
+        font-weight: 600;
+        border-bottom: 2px solid #6366f1;
+    }
+    div[data-testid="stMetric"] {
+        background: rgba(128, 128, 128, 0.05);
+        border: 1px solid rgba(128, 128, 128, 0.15);
+        border-radius: 12px;
+        padding: 12px 16px;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    }
+    .stButton > button {
+        border-radius: 10px;
+        font-weight: 500;
+        transition: all 0.15s ease;
+    }
+    div[data-testid="stExpander"] {
+        border-radius: 12px;
+        border: 1px solid rgba(128, 128, 128, 0.15);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -45,8 +93,7 @@ with st.sidebar:
     c2.metric("Chunks", chunks)
 
     st.subheader("Backend")
-    st.caption(f"**Chat** — `{config.LLM_MODEL}` · {config.LLM_BACKEND}")
-    st.caption(f"**Embeddings** — `{config.EMBED_MODEL}` · {config.EMBED_BACKEND}")
+    _render_sidebar_backend_controls()
 
     st.subheader("Server & Services")
     _render_grobid_controls()
@@ -63,9 +110,9 @@ st.caption(
     "Or hand it a paper to audit its citations against the evidence."
 )
 
-tab_planner, tab_audit, tab_idea, tab_draft, tab_chat, tab_help = st.tabs(
+tab_planner, tab_audit, tab_idea, tab_draft, tab_chat, tab_corpus, tab_help = st.tabs(
     ["Agent task planner", "Citation auditor", "Research idea", "Cite a draft", "Research chat",
-     "How to use"]
+     "Corpus library", "How to use"]
 )
 
 with tab_planner:
@@ -84,6 +131,9 @@ with tab_draft:
 
 with tab_chat:
     render_chat_tab(chunks)
+
+with tab_corpus:
+    render_corpus_tab(chunks, papers)
 
 with tab_help:
     render_help_tab()

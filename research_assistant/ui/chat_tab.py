@@ -5,7 +5,13 @@ import time
 
 import streamlit as st
 
-from research_assistant.ui.common import _get_resources_mtime, get_cached_search_resources
+from research_assistant import config
+from research_assistant.ui.common import (
+    _get_model_choices,
+    _get_resources_mtime,
+    get_cached_search_resources,
+)
+
 
 def render_chat_tab(chunks):
     """Tab: multi-turn research chat. `chunks` is the corpus size shown in the sidebar."""
@@ -20,7 +26,14 @@ def render_chat_tab(chunks):
 
             try:
                 cached_res = get_cached_search_resources(_get_resources_mtime())
-                st.session_state["chat_agent"] = ResearchChat(top_k=5, search_resources=cached_res)
+                init_model = st.session_state.get("chat_model")
+                init_backend = st.session_state.get("chat_backend")
+                st.session_state["chat_agent"] = ResearchChat(
+                    top_k=5,
+                    search_resources=cached_res,
+                    model=init_model,
+                    backend=init_backend,
+                )
             except Exception as e:
                 st.warning(f"Could not load search index: {e}")
                 st.session_state["chat_agent"] = None
@@ -78,8 +91,8 @@ def render_chat_tab(chunks):
                 ],
             }
 
-            # Top controls toolbar
-            col_mode, col_clear, col_exp_md, col_exp_json = st.columns([3, 1, 1.2, 1.2])
+            # Top controls toolbar: Analytical Lens + Model Selector (with Ollama options)
+            col_mode, col_model, col_clear, col_exp_md, col_exp_json = st.columns([2.2, 2.8, 0.9, 1.1, 1.1])
             with col_mode:
                 selected_label = st.selectbox(
                     "Brainstorming Lens",
@@ -92,8 +105,47 @@ def render_chat_tab(chunks):
                 active_mode = next((k for k, v in LENS_LABELS.items() if v == selected_label), "explore")
                 agent.mode = active_mode
 
+            with col_model:
+                model_choices = _get_model_choices()
+                labels = [c["label"] for c in model_choices]
+                current_model = st.session_state.get("chat_model") or getattr(agent, "model", config.CHAT_MODEL)
+                default_idx = 0
+                for idx, c in enumerate(model_choices):
+                    if c["model"] == current_model:
+                        default_idx = idx
+                        break
+
+                selected_model_label = st.selectbox(
+                    "Chat Model",
+                    options=labels,
+                    index=default_idx,
+                    key="chat_model_selector",
+                    label_visibility="collapsed",
+                    help="Select chat model: choose from local/popular Ollama models or hosted models.",
+                )
+                chosen = next((c for c in model_choices if c["label"] == selected_model_label), model_choices[0])
+
+                if chosen["model"] == "__custom__":
+                    custom_name = st.text_input(
+                        "Ollama Model Name",
+                        value=st.session_state.get("custom_ollama_model", "gemma4:e2b"),
+                        key="custom_ollama_input",
+                        placeholder="e.g. phi3:mini, llama3.2",
+                    )
+                    final_model = custom_name.strip() or "gemma4:e2b"
+                    final_backend = "ollama"
+                    st.session_state["custom_ollama_model"] = final_model
+                else:
+                    final_model = chosen["model"]
+                    final_backend = chosen["backend"]
+
+                if getattr(agent, "model", None) != final_model or getattr(agent, "backend", None) != final_backend:
+                    agent.set_model(final_model, backend=final_backend)
+                st.session_state["chat_model"] = final_model
+                st.session_state["chat_backend"] = final_backend
+
             with col_clear:
-                if st.button("🗑️ Reset Chat", use_container_width=True, help="Clear conversation turns and memory"):
+                if st.button("🗑️ Reset", use_container_width=True, help="Clear conversation turns and memory"):
                     agent.clear_history()
                     st.session_state["chat_pending_query"] = None
                     st.rerun()
@@ -124,6 +176,11 @@ def render_chat_tab(chunks):
                     use_container_width=True,
                     help="Download structured JSON session data",
                 )
+
+            # Active Model & Mode Status Indicator
+            backend_badge = "🦙 Ollama (Local)" if final_backend == "ollama" else "✨ Cloud API"
+            st.caption(f"**Engine:** `{final_model}` · {backend_badge} | **Lens:** {selected_label.split('(')[0].strip()}")
+
 
             # Interactive Scratchpad & Pinned Ideas Drawer
             scratchpad = st.session_state.get("chat_scratchpad", [])

@@ -95,9 +95,18 @@ class ResearchChat:
     grounded answer with [S#] keys → validate citations and extract suggestions.
     """
 
-    def __init__(self, top_k: int = 5, search_resources: tuple | None = None, mode: str = "explore"):
+    def __init__(
+        self,
+        top_k: int = 5,
+        search_resources: tuple | None = None,
+        mode: str = "explore",
+        model: str | None = None,
+        backend: str | None = None,
+    ):
         self.top_k = top_k
         self.mode = mode if mode in BRAIN_LENS_INSTRUCTIONS else "explore"
+        self.model = model or CHAT_MODEL
+        self.backend = backend
         self.history: list[dict[str, str]] = []       # list of {"role": ..., "content": ...}
         self.turns: list[dict[str, Any]] = []          # structured per-turn history with sources
         self.memory = ""                               # rolling summary of turns that no longer fit
@@ -115,6 +124,11 @@ class ResearchChat:
             logger.info("Loading search resources…")
             self.collection, self.bm25, self.texts, self.metadatas = load_search_resources()
         logger.info("Ready. %d chunks in database.", len(self.texts))
+
+    def set_model(self, model: str, backend: str | None = None) -> None:
+        """Update active chat model and backend (e.g. switching between Ollama and Gemini)."""
+        self.model = model
+        self.backend = backend
 
     def use_search_resources(self, resources: tuple) -> bool:
         """Adopt a newer (collection, bm25, texts, metadatas), e.g. after an index
@@ -141,11 +155,16 @@ class ResearchChat:
         try:
             recent = self._transcript(self.history[-4:], 600)
             prompt = CHAT_CONDENSE_USER.format(history=recent, question=question)
+            kw = {
+                "model": getattr(self, "model", CHAT_MODEL),
+                "temperature": 0.0,
+                "options": CHAT_OLLAMA_OPTIONS,
+            }
+            if getattr(self, "backend", None) is not None:
+                kw["backend"] = self.backend
             out = chat(
                 [{"role": "user", "content": prompt}],
-                model=CHAT_MODEL,
-                temperature=0.0,
-                options=CHAT_OLLAMA_OPTIONS,
+                **kw,
             ).content.strip().strip('"')
         except Exception as exc:  # noqa: BLE001
             logger.warning("Condense call failed (%s) — searching question as typed.", exc)
@@ -192,12 +211,17 @@ class ResearchChat:
         """Summarize older turns that leave the window into rolling memory."""
         try:
             turns_text = self._transcript(dropped, 800)
+            kw = {
+                "model": getattr(self, "model", CHAT_MODEL),
+                "temperature": 0.0,
+                "options": CHAT_OLLAMA_OPTIONS,
+            }
+            if getattr(self, "backend", None) is not None:
+                kw["backend"] = self.backend
             out = chat(
                 [{"role": "user", "content": CHAT_MEMORY_USER.format(
                     memory=self.memory or "(none)", turns=turns_text)}],
-                model=CHAT_MODEL,
-                temperature=0.0,
-                options=CHAT_OLLAMA_OPTIONS,
+                **kw,
             ).content.strip()
             if out:
                 self.memory = out
@@ -264,11 +288,16 @@ class ResearchChat:
         }
 
         full_answer = ""
+        kw = {
+            "model": getattr(self, "model", CHAT_MODEL),
+            "options": CHAT_OLLAMA_OPTIONS,
+            "temperature": CHAT_TEMPERATURE,
+        }
+        if getattr(self, "backend", None) is not None:
+            kw["backend"] = self.backend
         for content in chat_stream(
             messages,
-            model=CHAT_MODEL,
-            options=CHAT_OLLAMA_OPTIONS,
-            temperature=CHAT_TEMPERATURE,
+            **kw,
         ):
             full_answer += content
             yield content

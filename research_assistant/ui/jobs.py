@@ -94,7 +94,9 @@ def _start_pipeline_job(
     ask: bool = True,
     force: bool = False,
     audit_citations: bool = True,
+    synthesis_mode: str | None = None,
     origin: str = "audit",
+    enable_ocr: bool | None = None,
 ) -> str | None:
     """Start the pipeline as a server-side job and remember it in the URL.
 
@@ -116,6 +118,8 @@ def _start_pipeline_job(
         "seed_url": seed_url_val,
         "seed_file": seed_file_path,
         "audit_citations": audit_citations,
+        "synthesis_mode": synthesis_mode,
+        "enable_ocr": enable_ocr,
     }
     display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
 

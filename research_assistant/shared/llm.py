@@ -44,6 +44,28 @@ class ChatResult:
     completion_tokens: object = "N/A"
 
 
+def list_ollama_models() -> list[str]:
+    """Return names of locally pulled Ollama models (excluding pure embedding models)."""
+    try:
+        import ollama
+
+        res = ollama.list()
+        raw = res.get("models", []) if isinstance(res, dict) else getattr(res, "models", [])
+        names = []
+        for m in raw:
+            name = (
+                m.get("name")
+                if isinstance(m, dict)
+                else getattr(m, "model", getattr(m, "name", ""))
+            )
+            if name and not any(k in name.lower() for k in ("embed", "bge")):
+                names.append(name)
+        return names
+    except Exception:
+        return []
+
+
+
 # ─── Chat ────────────────────────────────────────────────────────────────────
 
 
@@ -62,7 +84,19 @@ def chat(messages, model=None, images=None, temperature=None, options=None, back
         backend:  explicit backend ("ollama" or "openai"). None falls back
                   to config.LLM_BACKEND.
     """
-    eff_backend = (backend or LLM_BACKEND).lower()
+    if backend:
+        eff_backend = backend.lower()
+    elif model:
+        m_lower = model.lower()
+        if m_lower.startswith(("gemini", "gpt-", "o1", "o3", "text-embedding")):
+            eff_backend = "openai"
+        elif ":" in m_lower or m_lower in ("gemma", "llama", "mistral", "qwen", "deepseek", "phi"):
+            eff_backend = "ollama"
+        else:
+            eff_backend = LLM_BACKEND.lower()
+    else:
+        eff_backend = LLM_BACKEND.lower()
+
     model = model or LLM_MODEL
     opts = dict(options) if options is not None else {}
     opts.setdefault("num_ctx", 4096)
@@ -72,7 +106,13 @@ def chat(messages, model=None, images=None, temperature=None, options=None, back
     if eff_backend == "openai":
         return _openai_chat(messages, model, images, temperature)
     if eff_backend == "ollama":
-        return _ollama_chat(messages, model, images, temperature, opts)
+        try:
+            return _ollama_chat(messages, model, images, temperature, opts)
+        except Exception as exc:
+            if GEMINI_API_KEY:
+                logger.warning("Ollama chat failed (%s); gracefully falling back to Gemini (%s)", exc, LLM_MODEL)
+                return _openai_chat(messages, LLM_MODEL, images, temperature)
+            raise
     raise ValueError(f"Unknown LLM_BACKEND {eff_backend!r} (expected 'ollama' or 'openai')")
 
 

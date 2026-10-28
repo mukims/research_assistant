@@ -53,21 +53,22 @@ With local models he can be miserable for free, forever. See
 
 ## What he does
 
-Six tabs. The sixth is the instructions, which nobody reads, which he has
+Seven tabs. The seventh is the instructions, which nobody reads, which he has
 noticed.
 
 | Tab | You give him | He gives you |
 |-----|--------------|--------------|
 | **Agent task planner** | a paper — a PDF from your library, an upload, GROBID TEI XML, or plain-text methods notes | a dependency graph of replication tasks, grouped into parallel waves and assigned to six agent roles; a Mermaid flowchart, a Markdown plan and Antigravity agent specs to download; and a replication scorecard if you run it (a dry run, or autonomously, with the model writing each task's deliverables) |
-| **Citation auditor** | a published paper — one PDF, several, or a ZIP | he parses its in-text citations with GROBID, fetches the open-access references, and checks each citation against the cited paper's text: a verdict, the passage behind it, and an upload card for every paywalled reference he couldn't reach. Optionally a related-work synthesis across them |
-| **Research idea** | a research idea, and optionally a seed-paper link (arXiv or a direct PDF URL) | a corpus built from the literature, and a synthesis of what's already been done on your idea |
+| **Citation auditor** | a published paper — one PDF, several, or a ZIP | he parses its in-text citations with GROBID, fetches the open-access references, and checks each citation against the cited paper's text: a verdict, the passage behind it, and an upload card for every paywalled reference he couldn't reach. Scanned papers and notes are automatically salvaged via local OCR. Optionally a related-work synthesis across them |
+| **Research idea** | a research idea, an uploaded seed PDF, or a seed link (arXiv or direct URL) | a corpus built from the literature, starter prompt exploration, a synthesis of what's already been done (deep Map-Reduce notes or fast single-pass), an audit of the seed paper, Markdown/BibTeX export, and an instant handoff button to brainstorm the findings in Research Chat |
 | **Cite a draft** | a `.txt` draft, uploaded or pasted | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
 | **Research chat** | questions | streamed answers grounded in the corpus, with the sources he used |
+| **Corpus library** | a folder of PDFs, a ZIP archive, or a list of DOIs/arXiv IDs/URLs | batch ingestion directly into ChromaDB/LanceDB and BM25 index with parallel workers, OCR for scanned papers, deduplication, and an interactive corpus inspector |
 | **How to use** | nothing | [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide |
 
-Cite a draft and Research chat need a corpus, so build one in Citation auditor
-or Research idea first. Citing a single sentence is not a tab; it is Agent 4
-on the command line (see [PIPELINE.md](PIPELINE.md)).
+Cite a draft and Research chat need a corpus, so build one in Corpus library,
+Citation auditor, or Research idea first. Citing a single sentence is not a tab;
+it is Agent 4 on the command line (see [PIPELINE.md](PIPELINE.md)).
 
 ## How he works
 
@@ -77,18 +78,18 @@ run resumes where it stopped.
 
 ```
 research idea ─┐
-PDF / ZIP ─────┴─► Agent 0  find a seed paper           arXiv → OpenAlex → Semantic Scholar
-                   Agent 1  raid its reference list     GROBID, regex fallback when it's down
-                   Agent 2  fetch open-access PDFs      Unpaywall → Europe PMC → arXiv
+PDF / ZIP ─────┼─► Agent 0  find a seed paper           arXiv → OpenAlex → Semantic Scholar
+Folder / URLs ─┤   Agent 1  raid its reference list     GROBID, regex fallback when it's down
+Scanned notes ─┘   Agent 2  fetch open-access PDFs      Unpaywall → Europe PMC → arXiv
                    Agent 3  read, chunk, embed, summarise   ChromaDB + BM25, one summary per paper
-                            │
+                            │ (with local EasyOCR / VLM for scanned PDFs & notes)
             ┌───────────────┼──────────────────────┐
             ▼               ▼                      ▼
         Agent 4         Agent 5 ──► Agent 8     Agent 7
         one sentence    whole draft, then       multi-turn chat
         → \cite{key}    audit every \cite       over the corpus
 
-        Agent 6  ingests PDFs you drop in by hand — the paywalled ones Agent 2 couldn't reach
+        Agent 6  ingests PDFs you drop in by hand, scans entire folders, or parses image-only notes
 ```
 
 Agent 4 is the command-line way to cite one sentence. The app's **Citation
@@ -229,6 +230,37 @@ for whether he finds it. `scripts/evaluate_transfer.py --retrieval-only` checks
 that the right card is retrieved; `--score --runs 3` runs the whole thing.
 Results will follow when there are some. He has not been told this is a promise.
 
+## Dumping your own library (Corpus Library)
+
+Sometimes you already have forty PDFs in a folder, a ZIP archive from a colleague, or a list of DOIs, and you don't want Marvin searching arXiv for papers you're already looking at.
+
+The **Corpus library** tab bypasses discovery and feeds documents straight into ChromaDB/LanceDB and the BM25 index:
+- **Multi-File & ZIP Upload**: Drag in dozens of PDFs or drop a `.zip` archive. Marvin validates `%PDF-` magic headers, extracts titles/metadata, and stages them cleanly.
+- **Local Folder Scan**: Point him at any directory on disk (e.g. `/Users/you/papers/`) with recursive scanning to ingest an entire local library at once.
+- **Batch DOIs / URLs / arXiv IDs**: Paste a raw list of identifiers (one per line). Marvin resolves them via Unpaywall, Europe PMC, or arXiv, downloads the open-access PDFs, and embeds them.
+- **Corpus Explorer**: An interactive table of everything in his index, with document keys, timestamps, and direct DOI/arXiv links.
+
+Headless batch ingestion from the terminal:
+```bash
+python -m research_assistant.agents.agent6_manual_ingestor --dir /path/to/papers/ --workers 2
+```
+
+## Reading the unreadable: OCR for scanned papers & notes
+
+Historical journal reprints, photocopy PDFs, handwritten lab notebooks, and whiteboard photos have one thing in common: GROBID and PyMuPDF see zero extractable font characters. Previously, Marvin marked these as `scanned_or_empty` and threw them away.
+
+Now he reads them:
+- **Automatic Scanned-PDF Detection**: `is_scanned_pdf()` detects documents lacking a digital text layer (< 50 chars/page) and routes them straight to the OCR engine.
+- **Dual-Tier OCR Engine**:
+  - **Local EasyOCR** (default): Runs offline on Apple Silicon Metal Performance Shaders (MPS) or CUDA GPU using bundled weights (`data/models/ocr/`). Clusters bounding boxes into natural reading order, de-hyphenates split words (`super-\nconducting` $\to$ `superconducting`), and filters artifact noise.
+  - **Vision LLM Mode** (`vlm`): Routes page renderings to multimodal vision models (`gemini-3.5-flash-lite` or Ollama vision) for handwritten notes, complex mathematical notation, and low-contrast scans.
+- **Seamless Indexing**: Produces standard `Document(..., extraction="ocr")` objects with page-tracked paragraphs, which flow into sentence-window chunking, vector embedding, and BM25 retrieval without downstream changes.
+- **UI & CLI Controls**: Toggle OCR and select the engine in the **Corpus library**, **Citation auditor**, or **Research idea** tabs, or via `--ocr` / `--ocr-engine` on the CLI:
+
+```bash
+python -m research_assistant.agents.agent6_manual_ingestor --once data/raw/scanned_notes.pdf --ocr --ocr-engine easyocr
+```
+
 ## What he's worst at
 
 Depth. Ask him what's been done on an idea and he'll tell you — grouped by
@@ -340,12 +372,15 @@ the runner refuses to point at the persistent data directory.
 
 | Path | What it is |
 |------|------------|
-| `app.py` | the Streamlit page: sidebar and six tabs. Each tab's code is in `research_assistant/ui/` |
+| `app.py` | the Streamlit page: sidebar and seven tabs. Each tab's code is in `research_assistant/ui/` |
 | `orchestrate.py` | one research idea end to end, as a LangGraph |
 | `orchestrate_tasks.py` | command line for the Agent task planner: `plan`, `show`, `run` |
 | `watch.py` | directory watcher: drop a PDF or a draft and the matching stage runs |
 | `research_assistant/agents/` | Agents 0–8, one file each (the pipeline above) |
 | `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, the citation audit |
+| `research_assistant/shared/ocr.py` | Optical Character Recognition layer: EasyOCR (MPS/GPU) and Vision LLM |
+| `research_assistant/shared/batch_uploader.py` | staging, directory scanning, ZIP extraction, and online URL/DOI fetching |
+| `research_assistant/ui/corpus_tab.py` | Corpus library tab: batch file/folder ingestion and corpus inspector |
 | `research_assistant/judgement/` | the claim–evidence judge, source assessor, reliability policy, and the judge's evaluation set |
 | `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
 | `research_assistant/tasks/` | the Agent task planner (Pipeline 2): `models`, `extractor`, `critic`, `iteration`, `retrieval`, `harness`, `roles`, `runner`, `workspace`, `ui` |

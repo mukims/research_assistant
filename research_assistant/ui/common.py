@@ -138,3 +138,85 @@ def _stage_upload(uploaded_file) -> str:
     with os.fdopen(fd, "wb") as fh:
         fh.write(uploaded_file.getbuffer())
     return path
+
+
+def _get_model_choices():
+    """Build list of available chat models, prioritizing local and popular Ollama models."""
+    from research_assistant.shared.llm import list_ollama_models
+
+    choices = []
+
+    # 1. Local installed Ollama models (detected from daemon)
+    for m in list_ollama_models():
+        choices.append({"label": f"🦙 Ollama: {m} (installed)", "model": m, "backend": "ollama"})
+
+    # 2. Recommended / popular Ollama models
+    standard_ollama = getattr(
+        config,
+        "OLLAMA_CHAT_MODELS",
+        ("gemma4:e2b", "llama3.2:latest", "mistral:latest", "qwen2.5:latest", "deepseek-r1:8b"),
+    )
+    for m in standard_ollama:
+        if not any(c["model"] == m for c in choices):
+            choices.append({"label": f"🦙 Ollama: {m}", "model": m, "backend": "ollama"})
+
+    # 3. Hosted / Gemini / OpenAI options
+    if config.GEMINI_API_KEY:
+        choices.append({"label": "✨ Gemini: gemini-3.5-flash-lite (fast)", "model": "gemini-3.5-flash-lite", "backend": "openai"})
+        choices.append({"label": "✨ Gemini: gemini-2.5-pro (deep reasoning)", "model": "gemini-2.5-pro", "backend": "openai"})
+    elif config.OPENAI_API_KEY:
+        choices.append({"label": "🌐 OpenAI: gpt-4o-mini", "model": "gpt-4o-mini", "backend": "openai"})
+    else:
+        choices.append({"label": "✨ Gemini: gemini-3.5-flash-lite", "model": "gemini-3.5-flash-lite", "backend": "openai"})
+
+    # 4. Custom Ollama model entry
+    choices.append({"label": "⚙️ Custom Ollama model…", "model": "__custom__", "backend": "ollama"})
+    return choices
+
+
+def _render_sidebar_backend_controls():
+    """Render chat model selector (with Ollama models) and embedding info in sidebar."""
+    choices = _get_model_choices()
+    labels = [c["label"] for c in choices]
+    active_m = st.session_state.get("chat_model") or config.CHAT_MODEL
+    default_idx = 0
+    for idx, c in enumerate(choices):
+        if c["model"] == active_m:
+            default_idx = idx
+            break
+
+    sel_label = st.selectbox(
+        "Chat Model Engine",
+        options=labels,
+        index=default_idx,
+        key="sidebar_chat_model_selector",
+        help="Select LLM: pick from local Ollama models or cloud endpoints.",
+    )
+    chosen = next((c for c in choices if c["label"] == sel_label), choices[0])
+
+    if chosen["model"] == "__custom__":
+        custom_name = st.text_input(
+            "Custom Ollama Name",
+            value=st.session_state.get("custom_ollama_model", "gemma4:e2b"),
+            key="sidebar_custom_ollama_input",
+            placeholder="e.g. phi3:mini",
+        )
+        final_model = custom_name.strip() or "gemma4:e2b"
+        final_backend = "ollama"
+        st.session_state["custom_ollama_model"] = final_model
+    else:
+        final_model = chosen["model"]
+        final_backend = chosen["backend"]
+
+    st.session_state["chat_model"] = final_model
+    st.session_state["chat_backend"] = final_backend
+
+    if "chat_agent" in st.session_state and st.session_state["chat_agent"] is not None:
+        agent = st.session_state["chat_agent"]
+        if getattr(agent, "model", None) != final_model or getattr(agent, "backend", None) != final_backend:
+            agent.set_model(final_model, backend=final_backend)
+
+    b_badge = "🦙 Ollama Local" if final_backend == "ollama" else "✨ Cloud API"
+    st.caption(f"**Backend:** {b_badge}")
+    st.caption(f"**Embeddings** — `{config.EMBED_MODEL}` · {config.EMBED_BACKEND}")
+
