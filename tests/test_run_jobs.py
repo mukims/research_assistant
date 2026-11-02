@@ -143,6 +143,17 @@ class TestRunsOnDisk(_RunsDir):
         self.assertEqual(runs[0]["label"], "second.pdf")
         self.assertEqual(runs[0]["origin"], "audit")
 
+    def test_an_origin_filter_applies_before_the_limit(self):
+        # Every cite/verify job is saved as a run: 25 newer draft runs must not hide an older audit.
+        run_jobs.save_run("audit1", {"seed_path": "a.pdf"}, label="a.pdf", origin="audit")
+        os.utime(run_jobs.run_path("audit1"), (1_700_000_000, 1_700_000_000))
+        for i in range(25):
+            run_jobs.save_run(f"draft{i}", {}, label=f"d{i}", origin="draft")
+            os.utime(run_jobs.run_path(f"draft{i}"), (1_700_000_100 + i, 1_700_000_100 + i))
+        self.assertEqual([r["job_id"] for r in run_jobs.list_runs(origin="audit")], ["audit1"])
+        self.assertEqual(len(run_jobs.list_runs(origin="draft")), 20)
+        self.assertNotIn("audit1", [r["job_id"] for r in run_jobs.list_runs()])
+
     def test_recent_runs_list_only_finished_runs(self):
         _wait(run_jobs.start_job("ok1", "a.pdf", lambda: {"seed_path": "a.pdf"}, origin="audit"))
         _wait(run_jobs.start_job("bad1", "b.pdf", lambda: (_ for _ in ()).throw(RuntimeError("x")), origin="audit"))

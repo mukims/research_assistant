@@ -250,12 +250,18 @@ def load_run(job_id: str) -> Optional[dict]:
         return None
 
 
-def list_runs(limit: int = 20, states: Optional[tuple[str, ...]] = ("done",)) -> list[dict]:
+def list_runs(
+    limit: int = 20,
+    states: Optional[tuple[str, ...]] = ("done",),
+    origin: Optional[str] = None,
+) -> list[dict]:
     """Newest first: what the "Recent runs" picker shows.
 
     Only finished runs by default: failed and cancelled runs are saved too (the UI
     reads them after a restart to say what happened), but they are not runs to open.
-    states=None lists every state. A record saved before states existed counts as done."""
+    states=None lists every state. A record saved before states existed counts as done.
+    origin keeps one tab's runs, before the limit: every cite/verify job is saved as a
+    run, so cutting first let 20 draft runs empty the auditor and idea pickers."""
     directory = runs_dir()
     if not os.path.isdir(directory):
         return []
@@ -268,6 +274,8 @@ def list_runs(limit: int = 20, states: Optional[tuple[str, ...]] = ("done",)) ->
         if not record:
             continue
         if states is not None and record.get("state", "done") not in states:
+            continue
+        if origin is not None and record.get("origin", "") != origin:
             continue
         entries.append({
             "job_id": record.get("job_id", name[:-5]),

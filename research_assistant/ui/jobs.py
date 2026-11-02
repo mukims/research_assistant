@@ -448,7 +448,7 @@ def _render_recent_runs(origin: str) -> None:
     """Open a finished run from disk without re-uploading anything."""
     from research_assistant.shared import run_jobs
 
-    runs = [r for r in run_jobs.list_runs() if r.get("origin", "audit") == origin]
+    runs = run_jobs.list_runs(origin=origin)
     if not runs:
         return
     options = {f"{r['label'] or r['seed_name'] or r['job_id']} — {r['saved_at'][:16].replace('T', ' ')}": r["job_id"] for r in runs}
