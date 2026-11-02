@@ -453,6 +453,47 @@ class TestDraftJobs(unittest.TestCase):
         warn.assert_not_called()
         self.assertNotIn("active_job", self.st.session_state)
 
+    def test_a_failed_job_is_reported_once_not_on_every_rerun(self):
+        from unittest.mock import patch
+        from streamlit.testing.v1 import AppTest
+        from research_assistant.ui import draft_tab
+
+        def script():
+            from research_assistant.ui.draft_tab import render_draft_tab
+            render_draft_tab(5)
+
+        with patch.object(draft_tab, "get_cached_search_resources", return_value=None), \
+             patch("research_assistant.agents.agent5_batch_citer.run_batch_citer", side_effect=RuntimeError("model down")):
+            job_id = draft_tab._start_draft_job("cite", "A claim.")
+            self.assertEqual(self._wait(job_id).state, "failed")
+        # The job id rides in the URL; this is the refresh (or next rerun) that finds it.
+        at = AppTest.from_function(script)
+        at.query_params["job"] = job_id
+        at = _run_app_test(at)
+        self.assertEqual([e.value for e in at.exception], [])
+        self.assertEqual([e.value for e in at.error], ["Citing failed: model down"])
+        self.assertNotIn("job", at.query_params)
+        # The next rerun, and a fresh upload error beside it, see no leftover.
+        at.text_area[0].set_value("   ")
+        at.button[0].click()
+        at = _run_app_test(at)
+        self.assertEqual([e.value for e in at.error], ["The draft is empty."])
+
+    def test_a_cancelled_draft_job_is_forgotten_after_its_warning(self):
+        from unittest.mock import patch
+        self.st.session_state["active_job"] = "j"
+        self.st.session_state["active_job_origin"] = "draft"
+        self.st.query_params["job"] = "j"
+        with patch("research_assistant.ui.jobs._resolve_job", return_value=("cancelled", None, "User cancelled", "draft")), \
+             patch.object(ui_jobs.st, "warning") as warn:
+            self.assertFalse(ui_jobs._handle_job_state("draft"))
+            warn.assert_called_once()
+            self.assertNotIn("active_job", self.st.session_state)
+            self.assertNotIn("active_job_origin", self.st.session_state)
+            self.assertNotIn("job", self.st.query_params)
+            ui_jobs._handle_job_state("draft")
+            warn.assert_called_once()
+
     def test_failed_verification_job_says_verification_failed(self):
         from unittest.mock import patch
         from research_assistant.ui import draft_tab

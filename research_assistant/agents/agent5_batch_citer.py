@@ -448,7 +448,7 @@ def _generate_report(
 
         lines.append("---\n")
 
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
     logger.info("Saved citation report to %s", report_path)
@@ -469,7 +469,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         logger.error("File %s not found.", file_path)
         return None
 
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         draft_text = f.read()
 
     if search_resources:
@@ -625,7 +625,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         pos += len(para)
     final_draft = "\n\n".join(p for p in rebuilt if p)
 
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(final_draft)
     logger.info("Saved cited draft to %s", out_path)
 
@@ -651,7 +651,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     )
 
     mapping_file = out_path.replace(".txt", "_citations.json")
-    with open(mapping_file, "w") as f:
+    with open(mapping_file, "w", encoding="utf-8") as f:
         json.dump(citation_mapping, f, indent=4)
     logger.info("Saved citation mapping to %s", mapping_file)
 
@@ -667,7 +667,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             used_evidence[k_item] = v_item
 
     evidence_file = out_path.replace(".txt", "_citation_evidence.json")
-    with open(evidence_file, "w") as f:
+    with open(evidence_file, "w", encoding="utf-8") as f:
         json.dump(used_evidence, f, indent=4)
     logger.info("Saved citation evidence to %s", evidence_file)
 

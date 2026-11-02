@@ -223,6 +223,53 @@ class TestRunBatchCiter(unittest.TestCase):
             self.assertIn("| Cited | 0 |", report)
             self.assertIn("**Needed a citation, none made** | **1**", report)
 
+    def test_non_ascii_draft_round_trips_through_every_file(self):
+        """The draft is read, and the outputs written, as UTF-8 whatever the locale.
+
+        The tab and agent 8 use UTF-8; under a cp1252 or Latin-1 locale the
+        old locale-default opens turned "Psi" and a right curly quote into
+        mojibake or a UnicodeDecodeError.
+        """
+        text = "Café Ψ shows −0.5 eV ”quoted” at low temperature."
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft_path = os.path.join(tmpdir, "draft.txt")
+            with open(draft_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            out_path = os.path.join(tmpdir, "cited.txt")
+            with patch(
+                "research_assistant.agents.agent5_batch_citer.load_search_resources",
+                return_value=(None, None, [], []),
+            ), patch(
+                "research_assistant.agents.agent5_batch_citer.hybrid_search",
+                return_value=[{"text": "Ψ at −0.5 eV.", "metadata": {"citation_source": "Müller, J. (2020)"}}],
+            ), patch(
+                "research_assistant.agents.agent5_batch_citer.chat",
+                side_effect=[_reply("1. YES"), _reply("CITED: " + text + "\nREASON: Unsupported.")],
+            ) as chat_mock:
+                self.assertEqual(run_batch_citer(draft_path, out_path), out_path)
+            # The model was asked about the sentence as written, not as mojibake.
+            self.assertIn(text, str(chat_mock.call_args_list[0]))
+            with open(out_path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), text)
+            with open(out_path.replace(".txt", "_report.md"), encoding="utf-8") as f:
+                self.assertIn("Ψ", f.read())
+
+    def test_every_text_open_in_the_citer_names_its_encoding(self):
+        """A bare open() takes the locale's codec; this module must not."""
+        import ast
+        import inspect
+
+        from research_assistant.agents import agent5_batch_citer
+
+        tree = ast.parse(inspect.getsource(agent5_batch_citer))
+        bare = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open":
+                mode = node.args[1].value if len(node.args) > 1 and isinstance(node.args[1], ast.Constant) else "r"
+                if "b" not in mode and not any(k.arg == "encoding" for k in node.keywords):
+                    bare.append(node.lineno)
+        self.assertEqual(bare, [], f"open() without encoding= at lines {bare}")
+
     def test_failed_citation_need_check_aborts_without_writing(self):
         """A citation-need check that fails after retries must write nothing.
 

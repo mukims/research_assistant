@@ -411,12 +411,20 @@ def _handle_job_state(origin: str) -> bool:
             return True
         return False
     if state in ("failed", "cancelled"):
-        if origin == "draft" and state == "failed":
-            # One accurate error, not a traceback plus an unrelated message.
+        if origin == "draft":
+            # Say it once, then forget the job: left in the URL, a failed run's
+            # error would repeat on every rerun and stack up beside the next,
+            # unrelated one (a fresh upload error, say).
+            kind = _draft_job_kind(job_id)
             st.session_state.pop("active_job", None)
             st.session_state.pop("active_job_origin", None)
-            what = "Verification" if _draft_job_kind(job_id) == "verify" else "Citing"
-            st.error(f"{what} failed: {error}", icon="❌")
+            st.query_params.pop("job", None)
+            if state == "failed":
+                # One accurate error, not a traceback plus an unrelated message.
+                what = "Verification" if kind == "verify" else "Citing"
+                st.error(f"{what} failed: {error}", icon="❌")
+            else:
+                st.warning("The run was stopped before it finished.", icon="⏹️")
             return False
         if origin == "audit":
             _render_interrupted_run_prompt(origin=origin, state=state, error=error, job_id=job_id, final=final)
