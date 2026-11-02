@@ -21,7 +21,7 @@ This system builds and searches an evidence-grounded academic literature corpus,
 | Tab | Purpose | Primary Input | Key Deliverables |
 |---|---|---|---|
 | **Tab 1: Citation auditor** | Upload a published paper, fetch open-access references, and audit whether citations support the claims | One PDF to audit; one or more PDFs, or a ZIP archive, to add to the library | In-text citation audit, 5 metric tiles, missing paywall upload cards, per-claim evidence viewer, synthesis across collection |
-| **Tab 2: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
+| **Tab 2: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Draft (`.txt`, `.md`, `.tex` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
 | **Tab 3: Research idea** | Discover literature from an idea, download open-access papers, and synthesize established findings & gaps | Topic query or arXiv/PDF link | Discovered seed paper, per-paper reading notes, structured 3-part synthesis, key evidence passages |
 | **Tab 4: Research chat** | Conversational research studio grounded in your local library | Plain-English research questions | Token-by-token streaming answers, 5 analytical lenses, keyed sources `[S#]`, clickable follow-up chips, persistent scratchpad |
 | **Tab 5: Corpus library** | Bulk ingest local files, scan directories, and inspect database state | Folder path, ZIP archive, or list of DOIs/arXiv IDs | Direct batch ingestion into LanceDB & BM25, EasyOCR/Vision LLM processing for scanned papers, and interactive corpus inspector |
@@ -126,7 +126,7 @@ Use Tab 2 to take an un-cited or draft manuscript and execute a two-stage attrib
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                              Stage 1: Batch Citation (Agent 5)                         │
-│  Upload manuscript (.txt) or paste text ──▶ [ Cite the draft ] ──▶ Fully cited text    │
+│  Upload manuscript (.txt/.md/.tex) or paste ──▶ [ Cite the draft ] ──▶ Fully cited text│
 │                                                                                        │
 │                              Stage 2: Rigorous Audit (Agent 8)                         │
 │  [ Verify citations ] ──▶ 5 Metric Tiles ──▶ Rubric V1.6 Slot Report ──▶ Download .md │
@@ -134,7 +134,9 @@ Use Tab 2 to take an un-cited or draft manuscript and execute a two-stage attrib
 ```
 
 #### Stage 1: Automated Batch Citation (Agent 5)
-1. **Input**: Upload a plain-text file (`.txt`) via **Draft (.txt)** or paste your manuscript into the text area.
+1. **Input**: Upload a `.txt`, `.md` or `.tex` file via **Draft (.txt, .md, .tex)**, or paste your manuscript into the text area.
+   - **LaTeX (`.tex`)**: only the text between `\begin{document}` and `\end{document}` is used. Comments, equations, figures and tables are dropped, section titles become paragraphs, `\emph`/`\textbf`/`\textit` are unwrapped, and any `\cite`, `\citep` or `\citet` already in the draft are kept as they are.
+   - **The output is text with `\cite` keys, not a compilable `.tex` file.** Paste the cited text back into your manuscript yourself.
 2. **Click "Cite the draft"**:
    - **Sentence Segmentation**: The manuscript is split into grammatical sentences (with built-in preservation of author initials like *Smith, J. et al.* and scientific abbreviations).
    - **Citation-Need Detection**: The model evaluates each sentence to determine whether it is a factual assertion requiring citation or non-assertive prose (introductory remarks, methodologies, transitions).

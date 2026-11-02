@@ -98,7 +98,8 @@ def render_draft_tab(chunks):
     """Tab: cite and verify a whole draft. `chunks` is the corpus size shown in the sidebar."""
     st.subheader("✍️ Cite a Research Draft")
     st.caption(
-        "Upload a plain-text draft (.txt or .md) or paste it below. Every sentence that makes a factual claim "
+        "Upload a draft (.txt, .md or .tex) or paste it below. A .tex file is read as its body text, with "
+        "existing \\cite keys kept. Every sentence that makes a factual claim "
         "is checked against your indexed corpus, cited where a source supports it, and verified for accuracy."
     )
     if chunks == 0:
@@ -109,7 +110,7 @@ def render_draft_tab(chunks):
     if _handle_job_state("draft"):
         return
 
-    uploaded = st.file_uploader("Draft (.txt, .md)", type=["txt", "md"], key="batch_upload")
+    uploaded = st.file_uploader("Draft (.txt, .md, .tex)", type=["txt", "md", "tex"], key="batch_upload")
     pasted = st.text_area("…or paste it here", height=200, key="batch_paste")
     run_batch = st.button("Cite the draft", type="primary", disabled=chunks == 0)
 
