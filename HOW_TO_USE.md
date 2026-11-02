@@ -6,16 +6,16 @@ This system builds and searches an evidence-grounded academic literature corpus,
 
 ---
 
-## 🧭 Interface Overview (The 5 Tabs)
+## 🧭 Interface Overview (The 8 Tabs)
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                                 🤖 Marvin the Citebot                                                  │
-│                                                                                                                        │
-│  [Tab 0: Task planner]   [Tab 1: Citation auditor]   [Tab 2: Idea]   [Tab 3: Cite draft]    [Tab 4: Chat]    [Tab 5]   │
-│  Deconstruct papers into Audit in-text citations     Discover &      Batch-cite & audit     Interactive      Manual    │
-│  agent replication DAGs  against open-access PDFs    synthesize gaps manuscript citations  studio           & FAQ     │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                               🤖 Marvin the Citebot                                                            │
+│                                                                                                                                                │
+│ [Tab 0: Task planner] [Tab 1: Citation auditor] [Tab 2: Idea] [Tab 3: Transfer] [Tab 4: Cite draft] [Tab 5: Chat] [Tab 6: Corpus] [Tab 7: Help] │
+│ Deconstruct papers    Audit in-text citations   Discover &    Cross-domain       Batch-cite & audit   Interactive     Batch library   Manual &     │
+│ into agent DAGs       against open-access PDFs  synthesize    technique transfer manuscript citations studio          bulk ingestion  FAQ          │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Tab | Purpose | Primary Input | Key Deliverables |
@@ -23,9 +23,11 @@ This system builds and searches an evidence-grounded academic literature corpus,
 | **Tab 0: Agent task planner** | Deconstruct scientific papers into dependency DAGs for autonomous AI agents | Paper PDF, TEI XML, or plain text | Dependency DAG flowchart, topological wave schedule, Antigravity agent specs, replication scorecard |
 | **Tab 1: Citation auditor** | Upload a published paper, fetch open-access references, and audit whether citations support the claims | Single PDF, multiple PDFs, or ZIP archive | In-text citation audit, 5 metric tiles, missing paywall upload cards, per-claim evidence viewer, synthesis across collection |
 | **Tab 2: Research idea** | Discover literature from an idea, download open-access papers, and synthesize established findings & gaps | Topic query or arXiv/PDF link | Discovered seed paper, per-paper reading notes, structured 3-part synthesis, key evidence passages |
-| **Tab 3: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
-| **Tab 4: Research chat** | Conversational research studio grounded in your local library | Plain-English research questions | Token-by-token streaming answers, 5 analytical lenses, keyed sources `[S#]`, clickable follow-up chips, persistent scratchpad |
-| **Tab 5: How to use** | Interactive documentation, architecture guide, and FAQ | None | This user guide rendered live inside the application |
+| **Tab 3: Technique transfer** | Discover and adapt methods from other scientific fields to solve target bottlenecks | Problem statement or computational bottleneck | Candidate technique cards, role-by-role analogy mappings, identifiability analysis, critic debate, prior-art verification, and Markdown reports |
+| **Tab 4: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
+| **Tab 5: Research chat** | Conversational research studio grounded in your local library | Plain-English research questions | Token-by-token streaming answers, 5 analytical lenses, keyed sources `[S#]`, clickable follow-up chips, persistent scratchpad |
+| **Tab 6: Corpus library** | Bulk ingest local files, scan directories, and inspect database state | Folder path, ZIP archive, or list of DOIs/arXiv IDs | Direct batch ingestion into LanceDB & BM25, EasyOCR/Vision LLM processing for scanned papers, and interactive corpus inspector |
+| **Tab 7: How to use** | Interactive documentation, architecture guide, and FAQ | None | This user guide rendered live inside the application |
 
 ---
 
@@ -37,16 +39,18 @@ The left sidebar provides persistent visibility and control over background oper
 - **Status Indicator**: Shows `⚡ Pipeline Active` during execution or `🟢 Pipeline: Idle` when ready.
 - **Stage Progression**: Tracks the active pipeline stage (Step 1: Discovery → Step 2: Seed Ingest → Step 3: Reference Extraction → Step 4: PDF Fetching → Step 5: Reference Ingestion & Synthesis).
 - **Active Item & Progress Bar**: Displays the specific paper being downloaded, parsed, or summarized, with elapsed runtime.
-- **Live Event Log**: Expandable rolling log showing the last 15 system events (e.g. `✅ Downloaded 14 reference PDFs`, `✓ Ingested 18 papers into index v2`).
+- **Live Event Log**: Expandable rolling log showing the last 15 system events (e.g. `✅ Downloaded 14 reference PDFs`, `✓ Ingested 18 papers into index v3`).
 
 ### 2. Cooperative Pipeline Cancellation
 - **"🛑 Stop pipeline" Button**: Appears in the sidebar and at the top of active tabs whenever a background job is running.
-- **Safe Item-Boundary Abort**: Cancellation is checked between discrete items (between individual PDF downloads, PDF parsings, summary calls, and graph nodes). It **never** aborts mid-write or inside an in-flight LLM call, ensuring ChromaDB and BM25 index files are never corrupted.
+- **Persistent Job Cancellation Ledger**: Cancellation requests are atomically synchronized across `data/pipeline_status.json` and `data/jobs/<job_id>/status.json`. Flags persist across progress ticks without being overwritten, cleanly halting worker execution loops.
+- **Safe Item-Boundary Abort**: Cancellation is checked between discrete items (between individual PDF downloads, PDF parsings, summary calls, and graph nodes). It **never** aborts mid-write or inside an in-flight LLM call, ensuring LanceDB, ChromaDB, and BM25 index files are never corrupted.
 
 ### 3. Corpus & System Metrics
 - **Corpus Counters**: Total indexed documents, total chunks, median chunk size (typically ~1,000–1,200 characters), and total figure/table captions.
-- **Active Backend Telemetry**: Displays the current inference backend (e.g. Google Gemini `gemini-3.5-flash-lite` or local Ollama `gemma4:e2b`), active embeddings (`embeddinggemma-2`), and GROBID service status.
-- **GROBID Service Controls**: Includes buttons to inspect GROBID health, view diagnostics, or restart the container if running in Docker.
+- **Storage Engine**: LanceDB zero-copy vector store (`physics_papers_v3`, `physics_summaries_v3`) with cosine metric and Tantivy FTS, or legacy ChromaDB server.
+- **Active Backend Telemetry**: Displays the current inference backend (e.g. Google Gemini `gemini-2.5-flash` / `gemini-3.5-flash-lite` or local Ollama `gemma4:e2b-mlx`), active embeddings (`embeddinggemma-2`), and GROBID service status.
+- **GROBID Service Controls**: Includes buttons to inspect GROBID health (cached with 10s TTL), view diagnostics, or restart the container if running in Docker.
 
 ---
 
@@ -202,7 +206,50 @@ Use Tab 2 to explore a new research topic or hypothesis from scratch without upl
 
 ---
 
-### Tab 3 — Cite a draft (Batch Manuscript Citer & Agent 8 Verifier)
+### Tab 3 — Technique transfer (Cross-Disciplinary Methodology Discovery)
+
+Tab 3 discovers and adapts techniques from unrelated scientific disciplines to overcome target bottlenecks in your research.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   Technique Transfer Engine                                      │
+│                                                                                                  │
+│  [Problem / Bottleneck] ──▶ Card Retrieval ──▶ Analogical Mapping ──▶ Critic ──▶ Scored Report  │
+│                               (Abstracted)       (Identifiability)      Debate     (Prior Art)   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1. Input & Discovery Options
+* **Target Problem or Bottleneck**: Enter your specific physical question or mathematical obstacle (e.g. `recovering continuous parameters from noisy spectra` or `phase retrieval in high-dimensional non-convex optimization`).
+* **Example Starters**: Click any of the pre-filled chips to explore canonical transfer scenarios:
+  - *Inverse problem parameter recovery under correlated noise*
+  - *Topological protection in disordered one-dimensional lattices*
+  - *Phase retrieval in high-dimensional non-convex optimization*
+  - *Diffusion-based generative sampling with physical conservation laws*
+* **Candidate Cards to Explore**: Slider (1 to 10 cards, default 3) controlling how many candidate methods from the card index are mapped and evaluated.
+* **Prior Art Cutoff Year**: Optional filter to restrict prior-art validation to literature published before a certain year (useful for retrodiction benchmarks).
+* **Proposal Temperature**: Sampling temperature (default 0.2) balancing conservative analogical mappings with creative cross-disciplinary transfers.
+
+#### 2. The 4 Transfer Pipeline Stages
+1. **Technique Cards & Bottleneck Abstraction**: Matches your problem against pre-extracted technique cards (`data/transfer/cards/`). Each card encapsulates an invariant method (its general objective, 2–5 operational steps, and verbatim source evidence) stripped of domain-specific nouns.
+2. **Analogical Role-by-Role Mapping**: Formulates the transfer:
+   - Maps source variables/entities directly to target domain counterparts.
+   - Assesses mathematical identifiability (whether target observations mathematically determine unknown parameters).
+   - Formulates concrete implementation steps, baseline benchmarks, specific predictions, and refutation criteria.
+3. **Adversarial Critic Debate**: An adversarial reviewer raises strict domain objections (e.g., breakdown of scale separation, gauge ambiguity, non-convexity). The proposer must refute each objection with mathematical reasoning or concede the limitation.
+4. **Deterministic Scoring & Prior Art Verification**:
+   - Gating criteria: Rejects transfers with contradicted premises, fatal conceded assumptions, or unidentified parameters.
+   - Depth checklist: Evaluates 10 structural transfer dimensions.
+   - Prior-art search: Queries arXiv and OpenAlex to confirm that the suggested transfer is novel and has not already been published.
+
+#### 3. Deliverables & Inspection Views
+* **📄 Full Transfer Report**: Formatted Markdown document containing complete mapping tables, mathematical formulations, critic objections and rebuttals, refutation tests, and prior art status.
+* **🌳 Methodology Search Tree**: Interactive Mermaid diagram visualizing the lineage from target bottleneck to source cards, transfer proposals, and final verdicts.
+* **💾 Raw JSON**: Machine-readable JSON export of the entire transfer payload (`RunResult`).
+
+---
+
+### Tab 4 — Cite a draft (Batch Manuscript Citer & Agent 8 Verifier)
 
 Use Tab 3 to take an un-cited or draft manuscript and execute a two-stage attribution and verification workflow.
 
@@ -253,7 +300,7 @@ Once a draft is cited, verify that every cited source actually backs up its assi
 
 ---
 
-### Tab 4 — Research chat (Interactive Brainstorming Studio - Agent 7)
+### Tab 5 — Research chat (Interactive Brainstorming Studio - Agent 7)
 
 Tab 4 is not a generic chatbot. It is an **interactive research brainstorming studio** designed for pair-thinking, hypothesis generation, and literature debate over your indexed library.
 
@@ -323,9 +370,38 @@ Use the dropdown at the top left to switch the analytical focus of the discussio
 
 ---
 
-### Tab 5 — How to use (In-App Reference)
+### Tab 6 — Corpus library (Bulk Ingestion, Folder Scan & OCR)
 
-Tab 5 renders this complete guide directly within the web application, providing instant access to instructions, toggle descriptions, and troubleshooting steps without needing to inspect code or terminal consoles.
+Tab 6 bypasses web discovery to ingest your existing literature libraries directly into LanceDB and the BM25 search index.
+
+#### 1. Ingestion Sources
+* **📁 Multi-File / ZIP Upload**:
+  - Drag and drop dozens of `.pdf` files or an entire `.zip` archive.
+  - Validates `%PDF-` file magic bytes, verifies file sizes (up to 500 MB total, 100 MB single file limits to prevent ZIP bombs), extracts titles/metadata, and stages them cleanly.
+* **📂 Scan Local Directory**:
+  - Point Marvin to any local directory on disk (e.g. `/Users/you/papers/`).
+  - Toggle **Recursive scanning** to index nested subdirectories.
+* **🌐 Paste DOIs / arXiv IDs / URLs**:
+  - Enter a raw list of identifiers (one per line).
+  - Resolves metadata across Unpaywall, Europe PMC, and arXiv, downloads open-access PDFs, and embeds them into the database.
+
+#### 2. OCR Engine for Scanned Papers & Notes
+Historically, photocopied reprints, older journal scans, handwritten lab notes, and whiteboard photos were discarded as `scanned_or_empty`. Marvin provides built-in OCR:
+* **Automatic Detection**: Detects documents lacking digital text layers (< 50 characters/page) and routes them to OCR.
+* **Engine Selection**:
+  - **Local EasyOCR** (default): Runs offline on Apple Silicon MPS or NVIDIA CUDA GPU using bundled weights. Extracts text in natural reading order and de-hyphenates split words.
+  - **Vision LLM Mode** (`vlm`): Routes page renderings to multimodal vision models (`gemini-2.5-flash` or Ollama vision) for complex formulas, handwritten annotations, or low-contrast scans.
+
+#### 3. Interactive Corpus Explorer
+* Displays an interactive table of all indexed papers, with document keys, chunk counts, publication years, timestamps, and direct DOI/arXiv links.
+* Search and filter papers by title or source key.
+* Real-time metrics for total indexed papers, corpus chunks, and embedding configuration.
+
+---
+
+### Tab 7 — How to use (In-App Reference)
+
+Tab 7 renders this complete guide directly within the web application, providing instant access to instructions, toggle descriptions, and troubleshooting steps without needing to inspect code or terminal consoles.
 
 ---
 
@@ -403,10 +479,13 @@ streamlit run app.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | *(None)* | Setting this automatically activates high-speed Gemini inference (`gemini-3.5-flash-lite`). |
+| `GEMINI_API_KEY` | *(None)* | Setting this automatically activates high-speed Gemini inference (`gemini-2.5-flash` / `gemini-3.5-flash-lite`). |
 | `LLM_BACKEND` | `ollama` (or `openai` if Gemini key set) | Backend engine: `ollama` for local CPU or `openai` for OpenAI/Gemini-compatible endpoints. |
-| `CITATION_CHAT_MODEL` | `gemma4:e2b` (or `gemini-3.5-flash-lite`) | Model used for research chat and literature synthesis. |
+| `CITATION_CHAT_MODEL` | `gemma4:e2b-mlx` (or `gemini-2.5-flash`) | Model used for research chat and literature synthesis. |
+| `CITATION_USE_LANCEDB` | `true` | Default storage backend: LanceDB zero-copy vector store (`true`) or ChromaDB (`false`). |
+| `CITATION_LANCEDB_PATH`| `data/lancedb` | Path to persistent LanceDB tables (`physics_papers_v3`, `physics_summaries_v3`). |
+| `LLM_REQUEST_TIMEOUT` | `60` | Request timeout in seconds for LLM client calls. |
 | `CITATION_EMBED_MODEL`| `embeddinggemma-2` | Embedding model for text and figure images. An index records which one built it and refuses a different one. A value pinned in `.env` or `data/.env` overrides this default. |
 | `CITATION_INDEX_VERSION` | `3` | Which index to read and write. `3` is the current one (GROBID full text, sentence-window chunks, figure images, embeddinggemma-2). `1` and `2` are older, read-only indexes and need `CITATION_EMBED_MODEL=nomic-embed-text`. |
 | `CITATION_CHAT_WINDOW_TOKENS` | `32768` (cloud) / `4096` (Ollama) | Maximum token budget Agent 7 uses for conversation fitting before memory folding. |
-| `CITATION_DATA_DIR` | `data/` | Path to persistent storage volume containing ChromaDB, pulled PDFs, and manifests. |
+| `CITATION_DATA_DIR` | `data/` | Path to persistent storage volume containing LanceDB, ChromaDB, pulled PDFs, and manifests. |

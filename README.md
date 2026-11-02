@@ -53,7 +53,7 @@ With local models he can be miserable for free, forever. See
 
 ## What he does
 
-Seven tabs. The seventh is the instructions, which nobody reads, which he has
+Eight tabs. The eighth is the instructions, which nobody reads, which he has
 noticed.
 
 | Tab | You give him | He gives you |
@@ -61,6 +61,7 @@ noticed.
 | **Agent task planner** | a paper — a PDF from your library, an upload, GROBID TEI XML, or plain-text methods notes | a dependency graph of replication tasks, grouped into parallel waves and assigned to six agent roles; a Mermaid flowchart, a Markdown plan and Antigravity agent specs to download; and a replication scorecard if you run it (a dry run, or autonomously, with the model writing each task's deliverables) |
 | **Citation auditor** | a published paper — one PDF, several, or a ZIP | he parses its in-text citations with GROBID, fetches the open-access references, and checks each citation against the cited paper's text: a verdict, the passage behind it, and an upload card for every paywalled reference he couldn't reach. Scanned papers and notes are automatically salvaged via local OCR. Optionally a related-work synthesis across them |
 | **Research idea** | a research idea, an uploaded seed PDF, or a seed link (arXiv or direct URL) | a corpus built from the literature, starter prompt exploration, a synthesis of what's already been done (deep Map-Reduce notes or fast single-pass), an audit of the seed paper, Markdown/BibTeX export, and an instant handoff button to brainstorm the findings in Research Chat |
+| **Technique transfer** | a problem description or question from your scientific field | a cross-disciplinary technique transfer proposal: bottlenecks restated without field-specific jargon, matching technique cards from other disciplines, role-by-role mappings, refutable predictions, an adversarial critic debate, prior-art checks (arXiv, OpenAlex), and verifiable reward scoring |
 | **Cite a draft** | a `.txt` draft, uploaded or pasted | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
 | **Research chat** | questions | streamed answers grounded in the corpus, with the sources he used |
 | **Corpus library** | a folder of PDFs, a ZIP archive, or a list of DOIs/arXiv IDs/URLs | batch ingestion directly into ChromaDB/LanceDB and BM25 index with parallel workers, OCR for scanned papers, deduplication, and an interactive corpus inspector |
@@ -173,7 +174,7 @@ Chebyshev expansion became a way to get a density of states without diagonalisin
 anything. Marvin's newest job is to find the next one: give him a problem, and he
 looks through the corpus for a technique another field uses on a problem with the
 same shape. Then he proposes the transfer, argues against it, and scores it. It
-runs from the command line, not a tab, in four stages (`research_assistant/transfer/`):
+runs directly from the **Technique transfer** tab in the UI or from the command line in four stages (`research_assistant/transfer/`):
 
 1. **Technique cards.** `scripts/build_cards.py` reads every paper in the corpus
    once and writes a card for each method in it that someone in another field
@@ -372,15 +373,17 @@ the runner refuses to point at the persistent data directory.
 
 | Path | What it is |
 |------|------------|
-| `app.py` | the Streamlit page: sidebar and seven tabs. Each tab's code is in `research_assistant/ui/` |
+| `app.py` | the Streamlit page: sidebar and eight tabs. Each tab's code is in `research_assistant/ui/` |
 | `orchestrate.py` | one research idea end to end, as a LangGraph |
 | `orchestrate_tasks.py` | command line for the Agent task planner: `plan`, `show`, `run` |
 | `watch.py` | directory watcher: drop a PDF or a draft and the matching stage runs |
 | `research_assistant/agents/` | Agents 0–8, one file each (the pipeline above) |
 | `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, the citation audit |
+| `research_assistant/shared/lance_store.py` | LanceDB storage adapter: zero-copy vector search, Tantivy FTS, cosine metric, prefiltering, and file compaction |
 | `research_assistant/shared/ocr.py` | Optical Character Recognition layer: EasyOCR (MPS/GPU) and Vision LLM |
 | `research_assistant/shared/batch_uploader.py` | staging, directory scanning, ZIP extraction, and online URL/DOI fetching |
 | `research_assistant/ui/corpus_tab.py` | Corpus library tab: batch file/folder ingestion and corpus inspector |
+| `research_assistant/ui/transfer_tab.py` | Technique transfer tab: cross-disciplinary transfer proposal generation, card browsing, and prior-art critique |
 | `research_assistant/judgement/` | the claim–evidence judge, source assessor, reliability policy, and the judge's evaluation set |
 | `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
 | `research_assistant/tasks/` | the Agent task planner (Pipeline 2): `models`, `extractor`, `critic`, `iteration`, `retrieval`, `harness`, `roles`, `runner`, `workspace`, `ui` |

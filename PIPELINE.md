@@ -102,13 +102,13 @@ research_assistant/                the checkout root
 ├── .gitignore  .env.example
 ├── model_final.pth                v1 layout checkpoint, no longer read (gitignored; safe to delete)
 │
-├── app.py                         Streamlit page layout: sidebar, six tabs (also the container entry point)
+├── app.py                         Streamlit page layout: sidebar, eight tabs (also the container entry point)
 ├── orchestrate.py                 LangGraph — one research idea, end to end
 ├── orchestrate_tasks.py           CLI for the Agent task planner (plan / show / run)
 ├── watch.py                       watchdog daemon — directory-driven
 │
 ├── README.md  HOW_TO_USE.md  PIPELINE.md  ARCHITECTURE.md  Research_Assistant_GROBID_Guide.md
-│                                  (HOW_TO_USE.md is also rendered in-app, tab 5)
+│                                  (HOW_TO_USE.md is also rendered in-app, tab 7)
 ├── GEMINI.md                      project invariants for the Gemini CLI agent
 │
 ├── research_assistant/            the installable package
@@ -144,29 +144,39 @@ research_assistant/                the checkout root
 │   │   ├── graph.py            DAG checks, topological waves, Mermaid / Markdown / Antigravity export
 │   │   ├── roles.py  prompts.py  models.py   the six agent roles, their prompts, the data classes
 │   │   └── runner.py  harness.py   dry-run or autonomous execution, acceptance tests, scorecard
+│   ├── transfer/               cross-disciplinary technique transfer (Pipeline 3); tab is ui/transfer_tab.py
+│   │   ├── models.py           Card, Bottleneck, Proposal, Objection, Transfer, RunResult schemas
+│   │   ├── stages.py           candidate card selection, problem grounding, bottleneck abstraction
+│   │   ├── engine.py           end-to-end orchestration, proposal generation, and multi-turn critic
+│   │   ├── critic.py           adversarial domain critic, counter-arguments, concession handling
+│   │   ├── scoring.py          deterministic depth rubric, gating criteria, refutation checks
+│   │   ├── prior_art.py        arXiv and OpenAlex novelty verification and date bounds
+│   │   └── render.py           executive Markdown reports, Mermaid methodology trees, JSON export
 │   ├── ui/                     the Streamlit UI that app.py lays out, one module per concern
-│   │   ├── audit_tab.py  idea_tab.py  draft_tab.py  chat_tab.py  help_tab.py   one render_*_tab() each
+│   │   ├── audit_tab.py  idea_tab.py  transfer_tab.py  draft_tab.py  chat_tab.py  corpus_tab.py  help_tab.py
 │   │   ├── common.py       auth, the cached search index, helpers every tab shares
 │   │   ├── results.py      one finished run: trace, seed, shortlist, notes, synthesis
 │   │   ├── audit.py        the citation-audit report and the job that produces it
 │   │   ├── jobs.py         background runs: start, resolve, adopt, show progress
 │   │   └── status.py  grobid.py   the sidebar widgets (the planner tab is tasks/ui.py)
 │   └── shared/
-│       ├── llm.py              backend-agnostic chat / chat_stream / embeddings
+│       ├── llm.py              backend-agnostic chat / chat_stream / embeddings (timeouts, JSON schemas, client pool)
+│       ├── lance_store.py      LanceDB adapter: zero-copy cosine search, Tantivy FTS, prefiltering, compaction
 │       ├── ingestion.py        process → upsert → mark → index
 │       ├── tokenize.py         NFKC normalisation, English Snowball stemming, stopword removal
 │       ├── extract.py          PDF → Document: GROBID full-text TEI with PyMuPDF fallback
-│       ├── chunking.py         sentence windows packed within sections
+│       ├── chunking.py         sentence windows packed within sections (preserves math/quantitative text)
 │       ├── figures.py          figure crops: the cropping and the naming; the image embedding lives in ingest_v2
 │       ├── ingest_v2.py        PDF → corpus entries: extract, chunk, caption, crop, embed the image
-│       ├── batch_uploader.py   multi-PDF / ZIP upload → direct ingestion (UI tab 1)
+│       ├── ocr.py              Optical Character Recognition: local EasyOCR (MPS/CUDA) and Vision LLM
+│       ├── batch_uploader.py   multi-PDF / ZIP upload, directory scanning, and online identifier staging
 │       ├── seed_audit.py       seed paper's own citations → claims → judged against the corpus (UI tab 1)
 │       ├── claim_text.py       GROBID paragraph → judgeable sentences, citation roles, context
 │       ├── run_jobs.py         pipeline runs as server-side jobs that outlive the browser session
-│       ├── pipeline_status.py  file-based progress, events and cancel flag every session polls
+│       ├── pipeline_status.py  file-based progress, persistent cancellation ledger, and event history
 │       ├── chat_context.py     the mechanics of a research-chat turn (pure)
 │       ├── grobid_manager.py   GROBID lifecycle: start / stop / health (Docker, JAR or remote)
-│       ├── manifest.py         what has been ingested (data/ingested.json)
+│       ├── manifest.py         what has been ingested (data/ingested.json, abstract_only tracking)
 │       ├── search.py           hybrid BM25 + dense with Reciprocal Rank Fusion
 │       ├── retrieve.py         two-stage retrieval (summary shortlist → deep chunk search)
 │       ├── fetch.py            stream-a-PDF-to-disk-with-validation
@@ -177,6 +187,9 @@ research_assistant/                the checkout root
 ├── scripts/                        operator CLIs (run as PYTHONPATH=. python scripts/<name>.py)
 │   ├── evaluate_judge.py           judge / verifier evaluation on the held-out set; --compare two runs
 │   ├── evaluate_citer.py           citer evaluation against the seed papers' own citations
+│   ├── evaluate_transfer.py        transfer evaluation and retrodiction benchmark runner
+│   ├── build_cards.py              extract invariant technique cards from ingested corpus
+│   ├── transfer.py                 CLI for technique transfer pipeline (proposals, critic, reports)
 │   ├── judge_harvest.py  judge_label.py  judge_bench.py
 │   ├── export_old_labels.py        the \cite label each paper has in the old Chroma store, read-only (for the migration)
 │   ├── migrate_to_v3.py            re-ingest every paper the old indexes hold into index v3 (runbook in its docstring)
@@ -191,7 +204,10 @@ research_assistant/                the checkout root
     │   └── seed_audits/            cached seed audits, history/ of every run, runs/ (job results)
     ├── pulled_pdfs/                PDFs from Agent 2, or dropped by hand for Agent 6
     ├── drafts/                     drop a .txt here and watch.py runs Agent 5 on it
-    ├── eval/judge/                 evaluation harness results
+    ├── eval/                       evaluation harness results (judge/, transfer/)
+    ├── lancedb/                    persistent LanceDB tables (physics_papers_v3, physics_summaries_v3)
+    ├── transfer/                   technique cards (cards/), runs, and evaluation results
+    ├── jobs/                       server-side job status ledgers (<job_id>/status.json)
     ├── logs/
     ├── physics_vectordb/           persistent ChromaDB store
     ├── seed_papers.json  extracted_citations.json  downloaded.json  failed_downloads.json
@@ -199,7 +215,7 @@ research_assistant/                the checkout root
     ├── ingested_v2.json  bm25_index_v2.pkl    the v2 index, nomic (read-only history; CITATION_INDEX_VERSION=2)
     ├── ingested_v3.json  bm25_index_v3.pkl    the current index (embeddinggemma-2; CITATION_INDEX_VERSION=3)
     ├── images/                     figure crops; the source for any future image re-embed, so keep them
-    ├── pipeline_status.json(.lock) live progress for the sidebar
+    ├── pipeline_status.json(.lock) live progress and persistent cancellation ledger
     └── ingest.lock                 flock held while a batch is ingesting
 ```
 
@@ -319,11 +335,12 @@ streamlit run app.py
 - Writes are anchored to `CITATION_DATA_DIR` (default: `<project>/data`);
   code is anchored to the installed package, so scripts can be run from
   anywhere.
+- Storage: `CITATION_USE_LANCEDB` (`true` default: LanceDB disk-backed zero-copy vector store with cosine metric and Tantivy full-text search), `CITATION_LANCEDB_PATH` (default `<data>/lancedb`).
 - Backend: `LLM_BACKEND`, `EMBED_BACKEND`, `OPENAI_BASE_URL`, `OPENAI_API_KEY` /
-  `HF_TOKEN`, `CITATION_LLM_MODEL`, `CITATION_CHAT_MODEL`, `CITATION_EMBED_MODEL`.
+  `HF_TOKEN`, `CITATION_LLM_MODEL`, `CITATION_CHAT_MODEL`, `CITATION_EMBED_MODEL`, `LLM_REQUEST_TIMEOUT` (default `60`s).
 - Ingestion: `CITATION_IMAGES_DIR`, `CITATION_FIGURE_CROP_DPI`,
   `CITATION_SUMMARY_MODEL`, `CITATION_SUMMARY_MAX_CHARS`, `CITATION_CHUNK_TARGET_CHARS`,
-  `CITATION_CHUNK_MAX_CHARS`, `GROBID_FULLTEXT_TIMEOUT`.
+  `CITATION_CHUNK_MAX_CHARS`, `GROBID_FULLTEXT_TIMEOUT`, `CITATION_OCR_MODEL_DIR`.
 - Index: `CITATION_INDEX_VERSION` (3 default; 1 and 2 open the older read-only indexes and
   need their own `CITATION_EMBED_MODEL`). A collection records its embedder and refuses a different one.
 - Retrieval: `CITATION_DOC_SELECT_K` (stage-1 shortlist size),
@@ -333,11 +350,11 @@ streamlit run app.py
   `CITATION_SYNTHESIS_PER_PAPER_CHUNKS`, `CITATION_SYNTHESIS_PER_PAPER_MAX_CHARS`,
   `CITATION_SYNTHESIS_TEMPERATURE`.
 - Agent 1: `GROBID_SERVER`, `GROBID_BATCH_CONCURRENCY`.
-
 - Agent 0: `CITATION_SEARCH_PROVIDERS` (default `arxiv,openalex,semanticscholar`,
   tried in order), `OPENALEX_MAILTO`, `S2_API_KEY` (optional Semantic Scholar
   key — the keyless pool is heavily rate-limited).
-- Verifier: `CITATION_JUDGEMENT_MODEL`, `CITATION_JUDGEMENT_TOP_K`, `CITATION_JUDGEMENT_ESCALATE_TOP_K`, `CITATION_JUDGEMENT_NEIGHBOUR_WINDOW`, `CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS`.
+- Verifier: `CITATION_JUDGEMENT_MODEL`, `CITATION_JUDGEMENT_TOP_K` (default 3, expands to 6), `CITATION_JUDGEMENT_ESCALATE_TOP_K`, `CITATION_JUDGEMENT_NEIGHBOUR_WINDOW`, `CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS`.
+- Technique Transfer: `CITATION_TRANSFER_CRITIC_MODEL`, `CITATION_TRANSFER_TEMPERATURE`.
 - Misc: `UNPAYWALL_EMAIL`, `CITATION_LOG_DIR`, `CITATION_LOG_FILE=0`.
 
 ## Pipeline 2: Scientific Paper-to-Agent Task Decomposition & Replication
@@ -459,6 +476,67 @@ python orchestrate_tasks.py show plan.json --format mermaid
 
 # 3. Execute the planned task graph (dry-run simulation)
 python orchestrate_tasks.py run plan.json --mode simulation --report-out report.md
+```
+
+## Pipeline 3: Cross-Disciplinary Technique Transfer (Methodology Translation)
+
+**Pipeline 3** (`research_assistant/transfer/`) mines the corpus for foundational techniques established in other disciplines and translates them to overcome target computational or experimental bottlenecks.
+
+```
+                    ┌────────────────────────┐
+                    │ Target Problem Query   │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ Candidate Card Search  │
+                    │ (Abstracted Invariants)│
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ Analogical Mapping     │
+                    │ & Identifiability Check│
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ Adversarial Critic     │
+                    │ Objections & Rebuttals │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ Prior-Art Verification │
+                    │ & Deterministic Score  │
+                    └────────────────────────┘
+```
+
+### Transfer Engine Architecture
+
+| Module | Location | Responsibilities |
+|---|---|---|
+| **Transfer Engine** | `research_assistant.transfer.engine` | Orchestrates end-to-end card matching, proposal drafting, multi-turn critic debates, and report compilation. |
+| **Card Indexing & Mining** | `research_assistant.transfer.stages` | Extracts invariant `Card` structures from corpus papers; abstracts target bottlenecks across 3 tiers (specific, mid, broad) with domain-specific nouns removed. |
+| **Data Models** | `research_assistant.transfer.models` | Dataclasses for `Card`, `Bottleneck`, `Proposal`, `Objection`, `Transfer`, and `RunResult`. |
+| **Adversarial Critic** | `research_assistant.transfer.critic` | Generates rigorous domain-specific objections (scale breakdown, gauge freedom, noise sensitivity); enforces concession of fatal flaws. |
+| **Scoring & Prior Art** | `research_assistant.transfer.scoring`, `prior_art.py` | Applies a 10-point structural depth rubric; queries arXiv and OpenAlex APIs to verify novelty; penalizes trivial parameter tuning. |
+| **Renderer & Reports** | `research_assistant.transfer.render` | Generates formatted Markdown dossiers, Mermaid derivation trees, and structured JSON results saved to `data/transfer/runs/`. |
+
+### CLI Usage
+
+```bash
+# 1. Extract technique cards across the corpus (once; resumes incrementally)
+python scripts/build_cards.py
+
+# 2. Search candidate cards and bottlenecks for a query
+python scripts/transfer.py -q "inverse problem parameter recovery under correlated noise" --show-cards
+
+# 3. Execute full transfer run with adversarial critique and prior art verification
+python scripts/transfer.py -q "inverse problem parameter recovery under correlated noise"
+
+# 4. Evaluate transfer accuracy against retrodiction benchmarks
+python scripts/evaluate_transfer.py --retrieval-only
 ```
 
 ## Development

@@ -15,23 +15,25 @@ products that share a core.
 **The shared core**
 
 - Ingestion and retrieval: GROBID full text, sentence-window chunking,
-  ChromaDB plus BM25, hybrid search with rank fusion, and a two-stage
-  paper-summary shortlist ([ARCHITECTURE.md](ARCHITECTURE.md) §4–5).
+  LanceDB columnar vector store (`shared/lance_store.py`) and Tantivy FTS alongside legacy ChromaDB plus BM25, hybrid search with rank fusion, and a two-stage
+  paper-summary shortlist ([ARCHITECTURE.md](ARCHITECTURE.md) §4–5, §14).
 - A model layer over Ollama, any OpenAI-compatible endpoint, or Gemini
-  (`shared/llm.py`).
+  (`shared/llm.py`), with structured JSON schemas, connection pooling, and privacy guarantees.
+- An OCR layer (`shared/ocr.py`) with local EasyOCR (MPS/CUDA) and multimodal Vision LLMs.
 - The judge: a three-slot claim–evidence rubric whose verdict is derived and
-  enforced in code, with a verbatim-span check (`judgement/judge.py`).
+  enforced in code, with a verbatim-span check and mathematical minus-sign preservation (`judgement/judge.py`).
 - A source assessor and a deterministic reliability policy
   (`judgement/source_assessor.py`, `judgement/policy.py`).
-- Run status, telemetry and cooperative cancellation (`shared/pipeline_status.py`).
+- Run status, telemetry, and a persistent, synchronized job cancellation ledger (`shared/pipeline_status.py`, `shared/run_jobs.py`).
 
-**The three products**
+**The four products**
 
 | Product | What it does | Where it lives | State |
 |---|---|---|---|
-| **A. Citation verification** | Audits a published paper's in-text citations against the cited papers' text; cites a draft; grades each citation | Tabs *Citation auditor*, *Cite a draft*; Agents 5 and 8; `shared/seed_audit.py`; `judgement/` | Most complete, and the only part with an evaluation harness |
-| **B. Literature discovery and synthesis** | Idea → seed paper → reference corpus → related-work synthesis; grounded chat | Tabs *Research idea*, *Research chat*; Agents 0–3, 7; `shared/retrieve.py` | Works end to end; where the project started |
-| **C. Paper-to-agent replication planner** | Paper → dependency graph of replication tasks, assigned to agent roles, schedulable and runnable | Tab *Agent task planner*; `research_assistant/tasks/`; `orchestrate_tasks.py` | Complete with two-level critic rubrics, two-cycle reflexion execution, 150 unit tests, and automatic Markdown bundle materialization |
+| **A. Citation verification** | Audits a published paper's in-text citations against the cited papers' text; cites a draft; grades each citation | Tabs *Citation auditor*, *Cite a draft*; Agents 5 and 8; `shared/seed_audit.py`; `judgement/` | Fully hardened with bipartite evidence keying `(sentence_idx, cite_key)` and evaluation harness |
+| **B. Literature discovery and synthesis** | Idea → seed paper → reference corpus → related-work synthesis; grounded chat | Tabs *Research idea*, *Research chat*; Agents 0–3, 7; `shared/retrieve.py` | Works end to end with dual-mode synthesis (Map-Reduce / single-pass) and 5 chat lenses |
+| **C. Paper-to-agent replication planner** | Paper → dependency graph of replication tasks, assigned to agent roles, schedulable and runnable | Tab *Agent task planner*; `research_assistant/tasks/`; `orchestrate_tasks.py` | Complete with two-level critic rubrics, two-cycle reflexion execution, unit test suite, and automatic Markdown bundle materialization |
+| **D. Cross-disciplinary technique transfer** | Translates foundational methodologies across disciplines to solve target computational/physical bottlenecks | Tab *Technique transfer*; `research_assistant/transfer/`; `scripts/transfer.py` | Complete 4-stage pipeline: card matching, bottleneck abstraction, analogical mapping, adversarial critic, and prior-art scoring |
 
 Around them: a LangGraph orchestrator (`orchestrate.py`), a directory watcher
 (`watch.py`), a Streamlit UI (`app.py`, laid out in `research_assistant/ui/`), and a
@@ -62,12 +64,7 @@ the "venue" is a formatted citation string. The assessor's own rationale text
 says its grades are "not verified against Crossref".
 
 **Coverage the design calls for but the code lacks.**
-There is no abstract-level fallback when a PDF is paywalled, no second hop
-through references, no expert-review queue, no tiering of judge models, and no
-detection of uncited claims in an uploaded paper. These are the open items
-from the pitch gap analysis; the source assessor, reliability policy, judge
-evaluation set and paywall upload flow it listed as missing have since been
-built.
+While Tier-2 abstract-level fallback (`summary_source="abstract"` in manifest and `physics_summaries_v3`) has been implemented to keep paywalled papers retrievable, other forward-looking pitch items remain open: no second hop through references, no expert-review queue, and no automated detection of uncited claims in an uploaded paper.
 
 **Discovery quality.**
 Several stored seeds have junk titles taken from PDF metadata ("PAPER • OPEN

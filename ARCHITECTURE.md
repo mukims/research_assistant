@@ -882,22 +882,31 @@ extra one is inert.
 
 ## 12. Streamlit Application UI Architecture
 
-The interactive user interface is structured into five distinct, specialized workspaces. `app.py` only lays out the page (sidebar, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` and the pieces they share are the other modules in `research_assistant/ui/`:
+The interactive user interface is structured into eight distinct, specialized workspaces. `app.py` only lays out the page (sidebar, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` (and `research_assistant/tasks/ui.py` for the planner), while the pieces they share are the other modules in `research_assistant/ui/`:
 
-1. **⚖️ Tab 1: Citation Auditor (`tab_audit`)**:
+1. **🧩 Tab 0: Agent Task Planner (`tab_planner`)**:
+   - Deconstructs papers into replication DAGs for autonomous AI agents across six canonical phases.
+   - Interactive pan/zoom Mermaid flowcharts, expandable task cards, Antigravity agent specs, and single-click wave execution with reflection scorecards.
+2. **⚖️ Tab 1: Citation Auditor (`tab_audit`)**:
    - The primary research verification tool. Accepts an uploaded seed PDF or searches the literature via arXiv.
-   - Extracts every in-text citation, downloads referenced literature, and computes both factual claim–evidence verdicts and scientific reliability grades.
-   - Features top-level Scientific Evidence Reliability metrics (High, Moderate, Low, Contradicted, Unresolved) and deep per-citation inspection cards with verbatim evidence highlights, source grades, and retry controls.
-2. **💡 Tab 2: Research Idea (`tab_idea`)**:
+   - Extracts every in-text citation with GROBID, downloads referenced literature, and computes both factual claim–evidence verdicts and scientific reliability grades.
+   - Features top-level Scientific Evidence Reliability metrics (Supports, Partially, Contradicts, Does Not Support, Pending Evidence) and deep per-citation inspection cards with verbatim evidence highlights, missing paywall upload cards, and collection-wide synthesis.
+3. **💡 Tab 2: Research Idea (`tab_idea`)**:
    - Exploratory idea discovery engine (Agent 0 & Agent 4). Users type high-level research questions, hypotheses, or topics.
    - Automatically crawls and indexes related literature, synthesizing state-of-the-art overviews and identifying unexplored research gaps.
-3. **✍️ Tab 3: Cite a Draft (`tab_draft`)**:
+4. **🔄 Tab 3: Technique Transfer (`tab_transfer`)**:
+   - Cross-disciplinary method translation engine. Bridges methodologies across scientific disciplines.
+   - Accepts a target physical bottleneck, explores technique cards, maps analogies with identifiability proofs, runs an adversarial critic debate, queries arXiv/OpenAlex for prior art, and renders structured reports and derivation trees.
+5. **✍️ Tab 4: Cite a Draft (`tab_draft`)**:
    - Authoring assistant (Agent 5). Accepts draft paragraphs or LaTeX manuscript sections.
-   - Discovers where citations are needed across the text and injects precision citations matched against the indexed corpus.
-4. **💬 Tab 4: Research Chat (`tab_chat`)**:
+   - Discovers where citations are needed across the text and injects precision citations matched against the indexed corpus, followed by Agent 8 claim-evidence verification.
+6. **💬 Tab 5: Research Chat (`tab_chat`)**:
    - Multi-turn conversational brainstorming partner (Agent 7).
    - Features query condensation (resolving pronouns and implicit references into standalone queries), multi-lens perspective selectors (Methodology, Contradictions, Hypotheses, Gaps, Explore), and persistent evidence scratchpad.
-5. **📖 Tab 5: How to Use (`tab_help`)**:
+7. **📚 Tab 6: Corpus Library (`tab_corpus`)**:
+   - Direct batch ingestion and corpus management bypassing web discovery.
+   - Multi-file / ZIP upload, local folder scanning, DOI/arXiv batch resolving, dual-tier OCR (EasyOCR / Vision LLM) for scanned papers, and interactive corpus inspector.
+8. **📖 Tab 7: How to Use (`tab_help`)**:
    - Comprehensive interactive documentation (`HOW_TO_USE.md`) rendering workflows, troubleshooting guides, and system architecture directly within the interface.
 
 ---
@@ -971,4 +980,71 @@ During autonomous execution (`ExecutionMode.AUTONOMOUS`):
 3. **Structured Failure Diagnostics**: If a test harness fails, `parse_execution_error` parses the exit code, error classification (`AssertionError`, `ImportError`, `TimeoutExpired`), failing assertion line, missing files, and stack trace.
 4. **Reflective Refinement**: The agent receives structured diagnostics and the previous code response, entering a second reflection cycle to refine the deliverables before re-testing.
 5. **Execution Scorecard**: Upon completion, `runner.py` compiles `execution_scorecard.md` recording task durations, SHA-256 artifact hashes, and certification status (`CERTIFIED_REPLICABLE` at 99%+, `PARTIALLY_REPLICATED` at 70%+).
+
+---
+
+## 14. LanceDB Cutover & Columnar Vector Storage Architecture
+
+### 14.1 Motivation & ChromaDB Replacement
+Historically, Marvin used ChromaDB as the primary vector store. While adequate for early prototyping, ChromaDB introduced severe concurrency and scalability bottlenecks:
+1. **Multi-Process Concurrency Issues**: ChromaDB SQLite backend could not safely handle concurrent readers and writers across background ingestion and interactive UI queries without running a dedicated Chroma server.
+2. **Memory Inefficiencies**: ChromaDB lacked true zero-copy disk-backed columnar scans, requiring large batches of vectors and metadata to be loaded into RAM during deduplication and pagination.
+3. **Index Drift**: BM25 keyword search lived as a separate, fragile pickle file that had to be reconstructed and reloaded on each query.
+
+### 14.2 The LanceDB Architecture (`shared/lance_store.py`)
+Marvin defaults to LanceDB (`CITATION_USE_LANCEDB=true`), storing tables directly on disk under `data/lancedb/` (`physics_papers_v3` and `physics_summaries_v3`):
+- **Apache Arrow Columnar Format**: Zero-copy disk-backed data representation allows instant reading of large metadata attributes without loading high-dimensional vector embeddings into memory.
+- **Embedded Tantivy Full-Text Search**: LanceDB natively integrates Tantivy for lexical search. Scientific punctuation characters (`[`, `]`, `:`, `(`, `)`, `^`, `/`, `-`, `\`, `"`) are automatically escaped in `escape_tantivy_query` before dispatch, preventing parser crashes on scientific formulas.
+- **Cosine Metric & Prefiltering**: Vector search explicitly uses `.metric("cosine")` and enables `.prefilter(True)` on document-scoped queries, ensuring that metadata filters are applied before computing vector nearest neighbours.
+- **Content-Addressed Chunk Identifiers**: Chunks are minted with deterministic SHA-256 hashes (`compute_chunk_id(doc_name, chunk_idx, text)`) rather than volatile positional counters, preventing overwrite collisions and duplication.
+- **Table Compaction & Version Pruning**: `LanceTableAdapter.optimize()` wraps `compact_files()` and `cleanup_old_versions()` to merge small Apache Arrow fragments and prune historical versions, preventing fragmentation.
+
+---
+
+## 15. Cross-Disciplinary Technique Transfer Engine Architecture (Pipeline 3)
+
+### 15.1 Scientific Rationale
+Breakthroughs in science frequently occur when a mathematical technique or experimental methodology developed in one discipline is adapted to solve an intractable problem in another (e.g. Monte Carlo methods from statistical mechanics to finance, or diffusion models from nonequilibrium physics to generative AI).
+
+Pipeline 3 (`research_assistant/transfer/`) operationalizes this process through a 4-stage pipeline:
+1. **Invariant Technique Cards (`data/transfer/cards/`)**:
+   - `build_cards.py` scans papers across diverse fields and extracts invariant methodology cards (`Card`).
+   - Each card strips out field-specific nouns (e.g. specific materials, biological organisms, or particle names) and records the abstract problem solved, operational steps (2–5 sequential actions), and verbatim evidence quotes.
+2. **Three-Tier Bottleneck Abstraction**:
+   - When given a target problem, the system extracts its computational bottlenecks and formulates three abstraction tiers: *specific*, *mid-level*, and *broad/domain-agnostic*.
+   - A fourth formulation ("what is inferred from what") is derived for inverse problems.
+3. **Analogical Mapping & Identifiability Analysis**:
+   - Proposes role-by-role mappings between the source technique and the target problem.
+   - Evaluates *identifiability*: rigorously checking whether the observations and measurements available in the target regime mathematically suffice to determine the unknown parameters.
+   - Generates concrete implementation steps, baseline benchmarks, testable predictions, and refutation criteria.
+4. **Adversarial Critique & Deterministic Scoring**:
+   - An adversarial reviewer scrutinizes the proposal for hidden assumptions, scale-separation breakdowns, noise sensitivity, and non-convexities.
+   - The proposer must refute or concede each objection.
+   - The transfer is scored against a 10-point depth checklist and verified against live arXiv and OpenAlex APIs to ensure the idea is truly novel and not already published prior art.
+
+---
+
+## 16. Verification Accuracy & Algorithmic Remediation Hardening
+
+Across the codebase remediation, several critical algorithmic and architectural flaws were permanently hardened:
+
+1. **Minus-Sign & Scientific Quantity Preservation (`judgement/judge.py`)**:
+   - Normalization regexes previously stripped standalone minus signs, rendering `-0.5 eV` identical to `0.5 eV` and `10^-5` identical to `10^5`.
+   - Replaced with lookbehind/lookahead hyphen preservation (`_LINE_HYPHEN_RE = re.compile(r"(?<=[a-zA-Z])-\s*(?=[a-zA-Z])")`) and mapped Unicode minus `\u2212` ('−') to standard ASCII `-`, preserving physical polarity.
+2. **Multi-Sentence Citation Evidence Keying (`agents/agent5_batch_citer.py`)**:
+   - When the same reference was cited across multiple sentences in a draft, evidence dictionaries keyed solely by `cite_key` suffered overwrite collisions.
+   - Keying is now strictly bipartite: `(sentence_idx, cite_key)` and `f"{sentence_idx}:{cite_key}"`, preserving independent evidence trails for every cited claim.
+3. **Structured TEI Extraction & Math Paragraph Retention (`shared/extract.py`, `shared/chunking.py`)**:
+   - Added native parsing for GROBID TEI `<table>/<row>/<cell>` and `<formula>` elements, formatting them as structured Markdown tables and LaTeX math rather than discarding them.
+   - Tuned `alpha_ratio` filtering in `chunking.py` so mathematical and quantitative paragraphs (<60% alphabetic characters) are not discarded as noise.
+4. **Bidirectional Candidate Matching (`agents/agent2_fetcher.py`, `shared/academic_apis.py`)**:
+   - Unidirectional search previously accepted mismatched Crossref or arXiv papers.
+   - Enforced bidirectional title similarity (token Jaccard $\ge 0.7$ and Levenshtein $\ge 0.8$), author surname parsing (handling comma inversion like `Novoselov, K. S.`), and publication year bounds ($\le 1$ year).
+5. **Tier-2 Abstract Fallback Indexing (`agents/agent3_ingestor.py`, `shared/manifest.py`)**:
+   - For paywalled references where full PDFs cannot be retrieved, open-access abstracts are indexed into `physics_summaries_v3` with `summary_source="abstract"`, making the paper discoverable via Stage-1 retrieval while preventing false completion marks.
+6. **Bounded Concurrency (`ThreadPoolExecutor`)**:
+   - Replaced unconstrained serial loops across `seed_audit`, `resolver`, `agent2_fetcher`, and `agent5` with bounded `ThreadPoolExecutor` pools, preventing socket exhaustion while accelerating batch operations.
+7. **LLM Privacy & Structured JSON Schemas (`shared/llm.py`)**:
+   - Eliminated unauthorized fallback from local Ollama to cloud endpoints upon errors, strictly maintaining local data privacy.
+   - Implemented Pydantic-grounded JSON schema enforcement, client connection pooling (`_CLIENT_CACHE`), and mandatory 60s request timeouts.
 
