@@ -53,18 +53,19 @@ With local models he can be miserable for free, forever. See
 
 ## What he does
 
-Eight tabs. The eighth is the instructions, which nobody reads, which he has
-noticed.
+Seven tabs. The seventh is the instructions, which nobody reads, which he has
+noticed. The sixth, **Labs**, holds the Agent task planner and Technique transfer:
+experimental, so treat what they produce as leads, not findings.
 
 | Tab | You give him | He gives you |
 |-----|--------------|--------------|
-| **Agent task planner** | a paper — a PDF from your library, an upload, GROBID TEI XML, or plain-text methods notes | a dependency graph of replication tasks, grouped into parallel waves and assigned to six agent roles; a Mermaid flowchart, a Markdown plan and Antigravity agent specs to download; and a replication scorecard if you run it (a dry run, or autonomously, with the model writing each task's deliverables) |
-| **Citation auditor** | a published paper — one PDF, several, or a ZIP | he parses its in-text citations with GROBID, fetches the open-access references, and checks each citation against the cited paper's text: a verdict, the passage behind it, and an upload card for every paywalled reference he couldn't reach. Scanned papers and notes are automatically salvaged via local OCR. Optionally a related-work synthesis across them |
-| **Research idea** | a research idea, an uploaded seed PDF, or a seed link (arXiv or direct URL) | a corpus built from the literature, starter prompt exploration, a synthesis of what's already been done (deep Map-Reduce notes or fast single-pass), an audit of the seed paper, Markdown/BibTeX export, and an instant handoff button to brainstorm the findings in Research Chat |
-| **Technique transfer** | a problem description or question from your scientific field | a cross-disciplinary technique transfer proposal: bottlenecks restated without field-specific jargon, matching technique cards from other disciplines, role-by-role mappings, refutable predictions, an adversarial critic debate, prior-art checks (arXiv, OpenAlex), and verifiable reward scoring |
+| **Citation auditor** | a published paper — one PDF to **Audit this paper**, or one or more PDFs (or a ZIP) to **Add papers to library** without auditing | he parses its in-text citations with GROBID, fetches the open-access references, and checks each citation against the cited paper's text: a verdict, the passage behind it, and an upload card for every paywalled reference he couldn't reach. Scanned papers and notes are automatically salvaged via local OCR. Optionally a related-work synthesis across them |
 | **Cite a draft** | a `.txt` draft, uploaded or pasted | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
+| **Research idea** | a research idea, an uploaded seed PDF, or a seed link (arXiv or direct URL) | a corpus built from the literature, starter prompt exploration, a synthesis of what's already been done (deep Map-Reduce notes or fast single-pass), an audit of the seed paper, Markdown/BibTeX export, and an instant handoff button to brainstorm the findings in Research Chat |
 | **Research chat** | questions | streamed answers grounded in the corpus, with the sources he used |
 | **Corpus library** | a folder of PDFs, a ZIP archive, or a list of DOIs/arXiv IDs/URLs | batch ingestion directly into ChromaDB/LanceDB and BM25 index with parallel workers, OCR for scanned papers, deduplication, and an interactive corpus inspector |
+| **Labs: Agent task planner** (experimental) | a paper — a PDF from your library, an upload, GROBID TEI XML, or plain-text methods notes | a dependency graph of replication tasks, grouped into parallel waves and assigned to six agent roles; a Mermaid flowchart, a Markdown plan and Antigravity agent specs to download; and a replication scorecard if you run it (a dry run, or autonomously, with the model writing each task's deliverables) |
+| **Labs: Technique transfer** (experimental) | a problem description or question from your scientific field | a cross-disciplinary technique transfer proposal: bottlenecks restated without field-specific jargon, matching technique cards from other disciplines, role-by-role mappings, refutable predictions, an adversarial critic debate, prior-art checks (arXiv, OpenAlex), and verifiable reward scoring |
 | **How to use** | nothing | [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide |
 
 Cite a draft and Research chat need a corpus, so build one in Corpus library,
@@ -380,7 +381,7 @@ or the acknowledgement checkbox in the UI.
 
 | Path | What it is |
 |------|------------|
-| `app.py` | the Streamlit page: sidebar and eight tabs. Each tab's code is in `research_assistant/ui/` |
+| `app.py` | the Streamlit page: sidebar and seven tabs (the last but one, Labs, holds two more). Each tab's code is in `research_assistant/ui/` |
 | `orchestrate.py` | one research idea end to end, as a LangGraph |
 | `orchestrate_tasks.py` | command line for the Agent task planner: `plan`, `show`, `run` |
 | `watch.py` | directory watcher: drop a PDF or a draft and the matching stage runs |

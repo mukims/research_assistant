@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from typing import Literal
 
 import streamlit as st
 
@@ -35,6 +36,21 @@ def _research_answer_for_session(query: str, on_progress):
     )
 
 
+AUDIT_ONE_PAPER_ONLY = "Audit takes exactly one paper. To index several, use **Add papers to library**."
+
+
+def _audit_mode(n_files: int, action: Literal["audit", "library"]) -> Literal["audit", "library", "error"]:
+    """What a button press does, given how many PDFs the upload staged.
+
+    The form used to guess from the count (one PDF audited, several were only
+    indexed) and said so only in a tooltip. Now the button is the intent and the
+    count can only contradict it: auditing needs exactly one paper.
+    """
+    if action == "library":
+        return "library"
+    return "audit" if n_files == 1 else "error"
+
+
 def render_audit_tab():
     """Tab: audit the citations of an uploaded manuscript against its references."""
     _render_live_pipeline_status("tab_audit")
@@ -51,47 +67,58 @@ def render_audit_tab():
             "Select research paper(s) (.pdf or .zip)",
             type=["pdf", "zip"],
             accept_multiple_files=True,
-            help="Upload one or multiple PDF papers, or a .zip archive. If 1 paper is uploaded, its in-text citations are audited; if multiple papers are uploaded, all are directly indexed into the corpus.",
+            help="Upload one PDF to audit its citations, or several PDFs (or a .zip archive) to add to your library. "
+            "The button you press decides which.",
         )
         pdf_query = st.text_input(
             "Research topic / question (optional)",
             placeholder="e.g. computational modeling of lipid nanocarriers (leave blank to infer from papers)",
             help="If provided, used to synthesize an answer across the papers at the end.",
         )
-        c1, c2, c3, c4 = st.columns(4)
-        audit_citations = c1.toggle(
-            "Audit citations",
-            value=True,
-            help="Audit in-text citations in uploaded paper against fetched references using Gemma 4 / Gemini.",
-        )
-        ask = c2.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis.")
-        force = c3.toggle("Force re-run", value=False)
-        enable_ocr = c4.toggle(
+        c1, c2, c3 = st.columns(3)
+        ask = c1.toggle("Synthesize answer", value=True, help="Formulate related-work synthesis.")
+        force = c2.toggle("Force re-run", value=False)
+        enable_ocr = c3.toggle(
             "Enable OCR",
             value=True,
             help="Enable OCR for scanned papers or notes without a digital text layer.",
         )
-        submitted_upload = st.form_submit_button("Audit Citations & Index Paper(s)", type="primary")
+        b1, b2, _ = st.columns([1, 1, 2])
+        submitted_audit = b1.form_submit_button(
+            "Audit this paper",
+            type="primary",
+            help="Audit the in-text citations of one paper against the references it cites.",
+        )
+        submitted_library = b2.form_submit_button(
+            "Add papers to library",
+            help="Index one or more papers (or a .zip) into your corpus without auditing them.",
+        )
 
-    if submitted_upload:
+    action = "audit" if submitted_audit else "library" if submitted_library else None
+    if action:
         if not uploaded_files:
             st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
         else:
             from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
 
             staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
-            for item in staged:
-                try:
-                    from research_assistant.tasks.workspace import materialize_paper_upload
-                    materialize_paper_upload(item["path"], filename=os.path.basename(item["path"]))
-                except Exception as exc:
-                    logger.debug("Could not materialize workspace for staged paper: %s", exc)
+            # A ZIP counts by the PDFs staged from it, so the mode is decided here.
+            mode = _audit_mode(len(staged), action)
+            if staged and mode != "error":
+                for item in staged:
+                    try:
+                        from research_assistant.tasks.workspace import materialize_paper_upload
+                        materialize_paper_upload(item["path"], filename=os.path.basename(item["path"]))
+                    except Exception as exc:
+                        logger.debug("Could not materialize workspace for staged paper: %s", exc)
             if not staged:
                 st.error(
                     "No valid PDF documents found in the uploaded files. Check that files contain valid PDF headers (%PDF-).",
                     icon="⚠️",
                 )
-            elif len(staged) == 1:
+            elif mode == "error":
+                st.error(AUDIT_ONE_PAPER_ONLY, icon="⚠️")
+            elif mode == "audit":
                 seed_file_path = staged[0]["path"]
                 effective_q = pdf_query.strip()
                 from research_assistant.shared.seed_audit import (
@@ -162,7 +189,7 @@ def render_audit_tab():
                         seed_file_path=seed_file_path,
                         ask=ask,
                         force=force,
-                        audit_citations=audit_citations,
+                        audit_citations=True,
                         origin="audit",
                     )
             else:

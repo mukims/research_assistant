@@ -2,9 +2,11 @@
 Streamlit front-end for the Research Assistant pipeline (also the container entry
 point).
 
-This file lays out the page: the sidebar, then six tabs. What each tab does lives in
-research_assistant/ui/, one module per tab (audit_tab, idea_tab, draft_tab, chat_tab,
-help_tab; the planner tab is research_assistant/tasks/ui.py). The modules they share
+This file lays out the page: the sidebar, then the tabs in ui/layout.py (the auditor
+first; the experimental planner and technique transfer sit under Labs). What each tab
+does lives in research_assistant/ui/, one module per tab (audit_tab, idea_tab,
+draft_tab, chat_tab, help_tab, transfer_tab; the planner tab is
+research_assistant/tasks/ui.py). The modules they share
 are common (auth, the cached search index), results (showing one finished run),
 audit (the citation-audit report), jobs (background runs), status and grobid (the
 sidebar widgets).
@@ -23,6 +25,7 @@ from research_assistant.ui.draft_tab import render_draft_tab
 from research_assistant.ui.grobid import _render_docker_fallback_notice, _render_grobid_controls
 from research_assistant.ui.help_tab import render_help_tab
 from research_assistant.ui.idea_tab import render_idea_tab
+from research_assistant.ui.layout import LAB_TABS, MAIN_TABS
 from research_assistant.ui.preflight import render_preflight_banner, render_preflight_sidebar
 from research_assistant.ui.transfer_tab import render_transfer_tab
 from research_assistant.ui.status import _render_live_pipeline_status, _render_sidebar_pipeline_status
@@ -118,33 +121,32 @@ st.caption(
 
 _render_docker_fallback_notice()
 
-tab_planner, tab_audit, tab_idea, tab_transfer, tab_draft, tab_chat, tab_corpus, tab_help = st.tabs(
-    ["Agent task planner", "Citation auditor", "Research idea", "Technique transfer", "Cite a draft", "Research chat",
-     "Corpus library", "How to use"]
-)
-
-with tab_planner:
-    _render_live_pipeline_status("tab_planner")
-    from research_assistant.tasks.ui import render_planner_tab
-    render_planner_tab()
+(tab_audit, tab_draft, tab_idea, tab_chat, tab_corpus, tab_labs, tab_help) = st.tabs(MAIN_TABS)
 
 with tab_audit:
     render_audit_tab()
 
-with tab_idea:
-    render_idea_tab()
-
-with tab_transfer:
-    render_transfer_tab()
-
 with tab_draft:
     render_draft_tab(chunks)
+
+with tab_idea:
+    render_idea_tab()
 
 with tab_chat:
     render_chat_tab(chunks)
 
 with tab_corpus:
     render_corpus_tab(chunks, papers)
+
+with tab_labs:
+    st.caption("Experimental. Treat what these produce as leads, not findings.")
+    lab_planner, lab_transfer = st.tabs(LAB_TABS)
+    with lab_planner:
+        _render_live_pipeline_status("tab_planner")
+        from research_assistant.tasks.ui import render_planner_tab
+        render_planner_tab()
+    with lab_transfer:
+        render_transfer_tab()
 
 with tab_help:
     render_help_tab()

@@ -6,27 +6,27 @@ This system builds and searches an evidence-grounded academic literature corpus,
 
 ---
 
-## 🧭 Interface Overview (The 8 Tabs)
+## 🧭 Interface Overview (The 7 Tabs)
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                                               🤖 Marvin the Citebot                                                            │
-│                                                                                                                                                │
-│ [Tab 0: Task planner] [Tab 1: Citation auditor] [Tab 2: Idea] [Tab 3: Transfer] [Tab 4: Cite draft] [Tab 5: Chat] [Tab 6: Corpus] [Tab 7: Help] │
-│ Deconstruct papers    Audit in-text citations   Discover &    Cross-domain       Batch-cite & audit   Interactive     Batch library   Manual &     │
-│ into agent DAGs       against open-access PDFs  synthesize    technique transfer manuscript citations studio          bulk ingestion  FAQ          │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                  🤖 Marvin the Citebot                                                          │
+│                                                                                                                                 │
+│ [Tab 1: Citation auditor] [Tab 2: Cite draft] [Tab 3: Idea] [Tab 4: Chat] [Tab 5: Corpus] [Tab 6: Labs] [Tab 7: Help]          │
+│ Audit in-text citations   Batch-cite & audit  Discover &    Interactive   Batch library   Planner &       Manual &             │
+│ against open-access PDFs  manuscript          synthesize    studio        bulk ingestion  transfer (exp.) FAQ                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Tab | Purpose | Primary Input | Key Deliverables |
 |---|---|---|---|
-| **Tab 0: Agent task planner** | Deconstruct scientific papers into dependency DAGs for autonomous AI agents | Paper PDF, TEI XML, or plain text | Dependency DAG flowchart, topological wave schedule, Antigravity agent specs, replication scorecard |
-| **Tab 1: Citation auditor** | Upload a published paper, fetch open-access references, and audit whether citations support the claims | Single PDF, multiple PDFs, or ZIP archive | In-text citation audit, 5 metric tiles, missing paywall upload cards, per-claim evidence viewer, synthesis across collection |
-| **Tab 2: Research idea** | Discover literature from an idea, download open-access papers, and synthesize established findings & gaps | Topic query or arXiv/PDF link | Discovered seed paper, per-paper reading notes, structured 3-part synthesis, key evidence passages |
-| **Tab 3: Technique transfer** | Discover and adapt methods from other scientific fields to solve target bottlenecks | Problem statement or computational bottleneck | Candidate technique cards, role-by-role analogy mappings, identifiability analysis, critic debate, prior-art verification, and Markdown reports |
-| **Tab 4: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
-| **Tab 5: Research chat** | Conversational research studio grounded in your local library | Plain-English research questions | Token-by-token streaming answers, 5 analytical lenses, keyed sources `[S#]`, clickable follow-up chips, persistent scratchpad |
-| **Tab 6: Corpus library** | Bulk ingest local files, scan directories, and inspect database state | Folder path, ZIP archive, or list of DOIs/arXiv IDs | Direct batch ingestion into LanceDB & BM25, EasyOCR/Vision LLM processing for scanned papers, and interactive corpus inspector |
+| **Tab 1: Citation auditor** | Upload a published paper, fetch open-access references, and audit whether citations support the claims | One PDF to audit; one or more PDFs, or a ZIP archive, to add to the library | In-text citation audit, 5 metric tiles, missing paywall upload cards, per-claim evidence viewer, synthesis across collection |
+| **Tab 2: Cite a draft** | Batch-cite and rigorously audit an entire academic manuscript draft | Plain-text draft (`.txt` or pasted) | Fully cited draft, BibTeX mapping, sentence-by-sentence citation report, Agent 8 verification audit with 5 metric tiles |
+| **Tab 3: Research idea** | Discover literature from an idea, download open-access papers, and synthesize established findings & gaps | Topic query or arXiv/PDF link | Discovered seed paper, per-paper reading notes, structured 3-part synthesis, key evidence passages |
+| **Tab 4: Research chat** | Conversational research studio grounded in your local library | Plain-English research questions | Token-by-token streaming answers, 5 analytical lenses, keyed sources `[S#]`, clickable follow-up chips, persistent scratchpad |
+| **Tab 5: Corpus library** | Bulk ingest local files, scan directories, and inspect database state | Folder path, ZIP archive, or list of DOIs/arXiv IDs | Direct batch ingestion into LanceDB & BM25, EasyOCR/Vision LLM processing for scanned papers, and interactive corpus inspector |
+| **Tab 6 (Labs): Agent task planner (experimental)** | Deconstruct scientific papers into dependency DAGs for autonomous AI agents | Paper PDF, TEI XML, or plain text | Dependency DAG flowchart, topological wave schedule, Antigravity agent specs, replication scorecard |
+| **Tab 6 (Labs): Technique transfer (experimental)** | Discover and adapt methods from other scientific fields to solve target bottlenecks | Problem statement or computational bottleneck | Candidate technique cards, role-by-role analogy mappings, identifiability analysis, critic debate, prior-art verification, and Markdown reports |
 | **Tab 7: How to use** | Interactive documentation, architecture guide, and FAQ | None | This user guide rendered live inside the application |
 
 ---
@@ -58,82 +58,33 @@ The left sidebar provides persistent visibility and control over background oper
 
 ---
 
-### Tab 0 — Agent task planner (Scientific Paper-to-Agent Task Decomposition)
-
-Tab 0 deconstructs complex scientific papers into structured Directed Acyclic Graphs (DAGs) of executable tasks assigned to specialized AI subagents for autonomous replication.
-
-#### 1. Input Options & Automatic Workspace Creation
-* **Select Ingested Paper**: Pick an existing paper from your local library or TEI extraction directory.
-* **Upload New Paper**: Upload a new `.pdf`, GROBID `.tei.xml`, or plain text `.txt` methodology notes.
-* **📁 Instant Workspace Materialization**: As soon as a paper is uploaded or deconstructed, the system automatically creates a dedicated root directory at `workspace_runs/<paper_id>/` (anchored safely outside persistent databases). It copies the manuscript and immediately drops:
-  - `README.md`: Workspace overview and execution waves manifest.
-  - `paper_summary.md`: Extracted abstract, theoretical methodology sections, and tables.
-
-#### 2. Configuration & Synthesis
-* **⚡ Fast Heuristic Mode**: Instantly generates an authentic replication graph covering all scientific phases without querying an external LLM (ideal for offline use and fast CI).
-* **Execution Mode**: Choose between:
-  - **🧪 Dry-Run Simulation**: Validates graph acyclicity, generates task rationales, checks prerequisite inputs, and writes deterministic dummy deliverables.
-  - **🤖 Autonomous Agent Execution**: Uses specialized coding subagents to synthesize code, executes tasks against generated test harnesses in a subprocess, and applies Two-Cycle Reflexion with structured failure diagnostics if an assertion fails.
-* Click **⚡ Deconstruct into Task Graph**.
-
-#### 3. Complete Markdown Bundle Materialization
-Upon deconstruction, the paper's root directory (`workspace_runs/<paper_id>/`) is automatically populated with a full suite of Markdown files:
-- [`plan.md`](#): The complete replication DAG specification with wave sequencing, inputs, deliverables, and acceptance criteria.
-- [`dag.md`](#): Interactive Mermaid flowchart dependency diagram.
-- [`scorecard.md`](#): Quantitative rubric scorecard from the Two-Level Critic Engine.
-- [`paper_summary.md`](#): Formatted abstract, methodology, equations, and tables extracted from the paper.
-- [`rationale.md`](#): Master scientific hypothesis, physical invariants, and complexity bounds.
-- [`rationales/<task_id>_rationale.md`](#): Individual task rationales documenting *Problem Knowledge*, *Scientific Insight*, and *Implementation Strategy & Complexity Bounds*.
-- [`plan.json`](#) & [`antigravity_specs.json`](#): Machine-readable execution specifications.
-
-#### 4. The Two-Level Critic Engine & Quantitative Rubric
-Before any task executes, the graph is scrutinized by a Two-Level Critic:
-* **MacroCritic**:
-  - Checks for DAG cycles, self-loops, and missing upstream dependencies.
-  - Enforces mandatory coverage across the **6 Scientific Replication Phases**: `environment_setup`, `data_preprocessing`, `model_implementation`, `sanity_smoke_test`, `training_or_simulation`, and `metric_evaluation` / `verification_audit`.
-  - Flags **cross-task deliverable collisions** (`macro_duplicate_output_*` as `BLOCKING`) to prevent output ownership conflicts.
-  - Warns against over-fragmented graph bloat (>12 tasks).
-* **MicroCritic**:
-  - Enforces operational instruction specificity (mathematical formulations, cutoff wavevectors).
-  - Enforces formal `ArtifactContract` schemas (tensor shapes, dtypes, tabular columns, JSON keys).
-  - Enforces single-threaded CPU safety (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`).
-  - Flags intra-task duplicate outputs (`BLOCKING`), deliverable bloat (>8 deliverables), and unpruned tensor dimensionality bloat (>50,000 dimensions).
-* **Rubric Scorecard (0–100)**: Computes quantitative scores for topology, contracts, and testability.
-
-#### 5. Deliverables & Views
-* **📊 Interactive DAG Flowchart**: Dynamic pan/zoom Mermaid diagram color-coded by task category and agent role.
-* **📑 Execution Schedule & Tasks**: Tasks grouped into parallel execution waves with expandable task cards showing objectives, required input artifacts, deliverables, acceptance criteria checkboxes, and context excerpts from the paper.
-* **🤖 Antigravity Agent Specs**: Formatted subagent invocation specs ready for multi-agent delegation.
-* **🚀 Dispatch & Execution**: Single-click execution across waves with progress tracking, artifact hash calculation, and automated generation of a **Replication Scorecard** (`CERTIFIED_REPLICABLE`, `PARTIALLY_REPLICATED`, `REPLICATION_FAILED`).
-* **📥 Downloads**: Export the complete plan as JSON, Markdown, or Antigravity JSON.
-
----
-
 ### Tab 1 — Citation auditor (Seed Paper Citation Auditor & Ingestion)
 
 Tab 1 is the dedicated engine for auditing citations in published research papers and ingesting paper collections into your local library.
 
 #### 1. Input Options
-* **Single PDF Upload (Seed Audit Mode)**:
-  1. Drag and drop a single `.pdf` research manuscript.
+Two buttons sit under the upload form. The button you press decides what happens; the number of files only has to agree with it.
+* **Audit this paper (exactly one PDF)**:
+  1. Drag and drop a single `.pdf` research manuscript. (A `.zip` works too if it holds exactly one PDF.)
   2. *(Optional)* Enter a **Research topic / question** to guide the final synthesis across the literature (e.g. `mechanical properties of MXene monolayers`). If left blank, the topic is automatically inferred from the paper's title.
-  3. Configure toggles (Audit citations, Synthesize answer, Force re-run).
-  4. Click **Audit Citations & Index Paper(s)**.
+  3. Configure toggles (Synthesize answer, Force re-run, Enable OCR).
+  4. Click **Audit this paper**.
   5. *What happens:* The system ingests your seed paper, parses its bibliography using GROBID TEI, downloads all open-access references from Unpaywall, Europe PMC, and arXiv, indexes full text into sentence windows, writes a multi-paper synthesis, and executes a full scientific audit of the seed paper's in-text citations.
-* **Batch Upload (Multiple PDFs or ZIP Archive)**:
-  1. Drag and drop several PDFs or a `.zip` archive containing papers.
-  2. Click **Audit Citations & Index Paper(s)**.
-  3. *What happens:* Direct batch ingestion. All papers are parsed, chunked, embedded, and added to the ChromaDB vector database and BM25 index in a single locked pass.
+  6. If you uploaded several papers, Marvin stops with *"Audit takes exactly one paper. To index several, use **Add papers to library**."*
+* **Add papers to library (one or more PDFs, or a ZIP archive)**:
+  1. Drag and drop one or several PDFs, or a `.zip` archive containing papers.
+  2. Click **Add papers to library**.
+  3. *What happens:* Direct batch ingestion with no citation audit. All papers are parsed, chunked, embedded, and added to the ChromaDB vector database and BM25 index in a single locked pass.
 
 ---
 
-#### 2. The Four Execution Toggles
+#### 2. The Three Execution Toggles
 
 | Toggle | Default | What It Does | When to Change |
 |---|---|---|---|
-| **Audit citations** | `ON` | Evaluates every in-text citation in the uploaded seed paper against the full text of the downloaded references using Rubric V1.6. | Turn `OFF` if you only want literature ingestion and synthesis, skipping citation checking. |
 | **Synthesize answer** | `ON` | Generates a structured Map-Reduce synthesis of the shortlisted papers at the end of the run. | Turn `OFF` if you only want to download and index literature without generating a summary. |
 | **Force re-run** | `OFF` | Bypasses cached seed papers and re-fetches all references from scratch. | Turn `ON` if you modified pipeline parameters or want to refresh cached web downloads. |
+| **Enable OCR** | `ON` | Runs OCR on scanned papers or notes that have no digital text layer. | Turn `OFF` if your papers all have a text layer and you want faster ingestion. |
 
 ---
 
@@ -168,90 +119,9 @@ Once execution finishes, Tab 1 displays the following sections:
 
 ---
 
-### Tab 2 — Research idea (Literature Discovery & Synthesis)
+### Tab 2 — Cite a draft (Batch Manuscript Citer & Agent 8 Verifier)
 
-Use Tab 2 to explore a new research topic or hypothesis from scratch without uploading a PDF.
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Research idea:                                                                         │
-│ [ topological protection in disordered quantum wires                                  ]│
-│                                                                                        │
-│ Seed paper URL (optional):                                                             │
-│ [ https://arxiv.org/abs/2401.12345                                                    ]│
-│                                                                                        │
-│ [x] Synthesize answer   [ ] Force re-run                                               │
-│ [ Explore Research Idea ]                                                              │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Step-by-Step Instructions:
-1. **Enter your topic**: Type your research question or idea into **Research idea**.
-2. *(Optional)* **Anchor with a Seed URL**: Paste a direct arXiv or PDF link if you want the search anchored to a specific landmark paper.
-3. **Configure Toggles**: Turn on **Synthesize answer** to get a structured literature review.
-4. **Click "Explore Research Idea"**:
-   - **Agent 0** searches arXiv, OpenAlex, and Semantic Scholar for candidate literature and downloads the seed paper.
-   - **Agents 1 & 2** extract the seed's references and fetch open-access connected literature.
-   - **Agent 3** chunks, embeds, and indexes all papers into ChromaDB and the BM25 keyword index.
-   - **Synthesis Engine** reads shortlisted papers and formulates a structured 3-part related-work synthesis.
-
-#### Tab 2 Deliverables:
-- **Seed & Downloads Card**: Lists the anchor paper and all successfully downloaded literature with DOIs.
-- **Per-Paper Notes**: What each shortlisted paper establishes, its experimental/theoretical methods, and its caveats.
-- **Related-Work Synthesis**:
-  1. *What is established*: Consensus findings across papers.
-  2. *Where the papers differ*: Competing hypotheses, contradictory observations, or divergent conditions.
-  3. *The gap*: Unaddressed questions and future research directions.
-- **Evidence Passages**: Verbatim excerpts from the literature with cosine similarity scores.
-
----
-
-### Tab 3 — Technique transfer (Cross-Disciplinary Methodology Discovery)
-
-Tab 3 discovers and adapts techniques from unrelated scientific disciplines to overcome target bottlenecks in your research.
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                   Technique Transfer Engine                                      │
-│                                                                                                  │
-│  [Problem / Bottleneck] ──▶ Card Retrieval ──▶ Analogical Mapping ──▶ Critic ──▶ Scored Report  │
-│                               (Abstracted)       (Identifiability)      Debate     (Prior Art)   │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-#### 1. Input & Discovery Options
-* **Target Problem or Bottleneck**: Enter your specific physical question or mathematical obstacle (e.g. `recovering continuous parameters from noisy spectra` or `phase retrieval in high-dimensional non-convex optimization`).
-* **Example Starters**: Click any of the pre-filled chips to explore canonical transfer scenarios:
-  - *Inverse problem parameter recovery under correlated noise*
-  - *Topological protection in disordered one-dimensional lattices*
-  - *Phase retrieval in high-dimensional non-convex optimization*
-  - *Diffusion-based generative sampling with physical conservation laws*
-* **Candidate Cards to Explore**: Slider (1 to 10 cards, default 3) controlling how many candidate methods from the card index are mapped and evaluated.
-* **Prior Art Cutoff Year**: Optional filter to restrict prior-art validation to literature published before a certain year (useful for retrodiction benchmarks).
-* **Proposal Temperature**: Sampling temperature (default 0.2) balancing conservative analogical mappings with creative cross-disciplinary transfers.
-
-#### 2. The 4 Transfer Pipeline Stages
-1. **Technique Cards & Bottleneck Abstraction**: Matches your problem against pre-extracted technique cards (`data/transfer/cards/`). Each card encapsulates an invariant method (its general objective, 2–5 operational steps, and verbatim source evidence) stripped of domain-specific nouns.
-2. **Analogical Role-by-Role Mapping**: Formulates the transfer:
-   - Maps source variables/entities directly to target domain counterparts.
-   - Assesses mathematical identifiability (whether target observations mathematically determine unknown parameters).
-   - Formulates concrete implementation steps, baseline benchmarks, specific predictions, and refutation criteria.
-3. **Adversarial Critic Debate**: An adversarial reviewer raises strict domain objections (e.g., breakdown of scale separation, gauge ambiguity, non-convexity). The proposer must refute each objection with mathematical reasoning or concede the limitation.
-4. **Deterministic Scoring & Prior Art Verification**:
-   - Gating criteria: Rejects transfers with contradicted premises, fatal conceded assumptions, or unidentified parameters.
-   - Depth checklist: Evaluates 10 structural transfer dimensions.
-   - Prior-art search: Queries arXiv and OpenAlex to confirm that the suggested transfer is novel and has not already been published.
-
-#### 3. Deliverables & Inspection Views
-* **📄 Full Transfer Report**: Formatted Markdown document containing complete mapping tables, mathematical formulations, critic objections and rebuttals, refutation tests, and prior art status.
-* **🌳 Methodology Search Tree**: Interactive Mermaid diagram visualizing the lineage from target bottleneck to source cards, transfer proposals, and final verdicts.
-* **💾 Raw JSON**: Machine-readable JSON export of the entire transfer payload (`RunResult`).
-
----
-
-### Tab 4 — Cite a draft (Batch Manuscript Citer & Agent 8 Verifier)
-
-Use Tab 3 to take an un-cited or draft manuscript and execute a two-stage attribution and verification workflow.
+Use Tab 2 to take an un-cited or draft manuscript and execute a two-stage attribution and verification workflow.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -300,7 +170,45 @@ Once a draft is cited, verify that every cited source actually backs up its assi
 
 ---
 
-### Tab 5 — Research chat (Interactive Brainstorming Studio - Agent 7)
+### Tab 3 — Research idea (Literature Discovery & Synthesis)
+
+Use Tab 3 to explore a new research topic or hypothesis from scratch without uploading a PDF.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ Research idea:                                                                         │
+│ [ topological protection in disordered quantum wires                                  ]│
+│                                                                                        │
+│ Seed paper URL (optional):                                                             │
+│ [ https://arxiv.org/abs/2401.12345                                                    ]│
+│                                                                                        │
+│ [x] Synthesize answer   [ ] Force re-run                                               │
+│ [ Explore Research Idea ]                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Step-by-Step Instructions:
+1. **Enter your topic**: Type your research question or idea into **Research idea**.
+2. *(Optional)* **Anchor with a Seed URL**: Paste a direct arXiv or PDF link if you want the search anchored to a specific landmark paper.
+3. **Configure Toggles**: Turn on **Synthesize answer** to get a structured literature review.
+4. **Click "Explore Research Idea"**:
+   - **Agent 0** searches arXiv, OpenAlex, and Semantic Scholar for candidate literature and downloads the seed paper.
+   - **Agents 1 & 2** extract the seed's references and fetch open-access connected literature.
+   - **Agent 3** chunks, embeds, and indexes all papers into ChromaDB and the BM25 keyword index.
+   - **Synthesis Engine** reads shortlisted papers and formulates a structured 3-part related-work synthesis.
+
+#### Tab 3 Deliverables:
+- **Seed & Downloads Card**: Lists the anchor paper and all successfully downloaded literature with DOIs.
+- **Per-Paper Notes**: What each shortlisted paper establishes, its experimental/theoretical methods, and its caveats.
+- **Related-Work Synthesis**:
+  1. *What is established*: Consensus findings across papers.
+  2. *Where the papers differ*: Competing hypotheses, contradictory observations, or divergent conditions.
+  3. *The gap*: Unaddressed questions and future research directions.
+- **Evidence Passages**: Verbatim excerpts from the literature with cosine similarity scores.
+
+---
+
+### Tab 4 — Research chat (Interactive Brainstorming Studio - Agent 7)
 
 Tab 4 is not a generic chatbot. It is an **interactive research brainstorming studio** designed for pair-thinking, hypothesis generation, and literature debate over your indexed library.
 
@@ -370,9 +278,9 @@ Use the dropdown at the top left to switch the analytical focus of the discussio
 
 ---
 
-### Tab 6 — Corpus library (Bulk Ingestion, Folder Scan & OCR)
+### Tab 5 — Corpus library (Bulk Ingestion, Folder Scan & OCR)
 
-Tab 6 bypasses web discovery to ingest your existing literature libraries directly into LanceDB and the BM25 search index.
+Tab 5 bypasses web discovery to ingest your existing literature libraries directly into LanceDB and the BM25 search index.
 
 #### 1. Ingestion Sources
 * **📁 Multi-File / ZIP Upload**:
@@ -396,6 +304,104 @@ Historically, photocopied reprints, older journal scans, handwritten lab notes, 
 * Displays an interactive table of all indexed papers, with document keys, chunk counts, publication years, timestamps, and direct DOI/arXiv links.
 * Search and filter papers by title or source key.
 * Real-time metrics for total indexed papers, corpus chunks, and embedding configuration.
+
+---
+
+### Tab 6 — Labs (experimental)
+
+Labs holds two features that work but are not yet as mature as the rest. Treat what they produce as leads, not findings. It has two sub-tabs: **Agent task planner (experimental)** and **Technique transfer (experimental)**.
+
+#### Labs: Agent task planner (experimental — Scientific Paper-to-Agent Task Decomposition)
+
+The Agent task planner (the first sub-tab under **Labs**) deconstructs complex scientific papers into structured Directed Acyclic Graphs (DAGs) of executable tasks assigned to specialized AI subagents for autonomous replication.
+
+##### 1. Input Options & Automatic Workspace Creation
+* **Select Ingested Paper**: Pick an existing paper from your local library or TEI extraction directory.
+* **Upload New Paper**: Upload a new `.pdf`, GROBID `.tei.xml`, or plain text `.txt` methodology notes.
+* **📁 Instant Workspace Materialization**: As soon as a paper is uploaded or deconstructed, the system automatically creates a dedicated root directory at `workspace_runs/<paper_id>/` (anchored safely outside persistent databases). It copies the manuscript and immediately drops:
+  - `README.md`: Workspace overview and execution waves manifest.
+  - `paper_summary.md`: Extracted abstract, theoretical methodology sections, and tables.
+
+##### 2. Configuration & Synthesis
+* **⚡ Fast Heuristic Mode**: Instantly generates an authentic replication graph covering all scientific phases without querying an external LLM (ideal for offline use and fast CI).
+* **Execution Mode**: Choose between:
+  - **🧪 Dry-Run Simulation**: Validates graph acyclicity, generates task rationales, checks prerequisite inputs, and writes deterministic dummy deliverables.
+  - **🤖 Autonomous Agent Execution**: Uses specialized coding subagents to synthesize code, executes tasks against generated test harnesses in a subprocess, and applies Two-Cycle Reflexion with structured failure diagnostics if an assertion fails.
+* Click **⚡ Deconstruct into Task Graph**.
+
+##### 3. Complete Markdown Bundle Materialization
+Upon deconstruction, the paper's root directory (`workspace_runs/<paper_id>/`) is automatically populated with a full suite of Markdown files:
+- [`plan.md`](#): The complete replication DAG specification with wave sequencing, inputs, deliverables, and acceptance criteria.
+- [`dag.md`](#): Interactive Mermaid flowchart dependency diagram.
+- [`scorecard.md`](#): Quantitative rubric scorecard from the Two-Level Critic Engine.
+- [`paper_summary.md`](#): Formatted abstract, methodology, equations, and tables extracted from the paper.
+- [`rationale.md`](#): Master scientific hypothesis, physical invariants, and complexity bounds.
+- [`rationales/<task_id>_rationale.md`](#): Individual task rationales documenting *Problem Knowledge*, *Scientific Insight*, and *Implementation Strategy & Complexity Bounds*.
+- [`plan.json`](#) & [`antigravity_specs.json`](#): Machine-readable execution specifications.
+
+##### 4. The Two-Level Critic Engine & Quantitative Rubric
+Before any task executes, the graph is scrutinized by a Two-Level Critic:
+* **MacroCritic**:
+  - Checks for DAG cycles, self-loops, and missing upstream dependencies.
+  - Enforces mandatory coverage across the **6 Scientific Replication Phases**: `environment_setup`, `data_preprocessing`, `model_implementation`, `sanity_smoke_test`, `training_or_simulation`, and `metric_evaluation` / `verification_audit`.
+  - Flags **cross-task deliverable collisions** (`macro_duplicate_output_*` as `BLOCKING`) to prevent output ownership conflicts.
+  - Warns against over-fragmented graph bloat (>12 tasks).
+* **MicroCritic**:
+  - Enforces operational instruction specificity (mathematical formulations, cutoff wavevectors).
+  - Enforces formal `ArtifactContract` schemas (tensor shapes, dtypes, tabular columns, JSON keys).
+  - Enforces single-threaded CPU safety (`OMP_NUM_THREADS=1`, `torch.set_num_threads(1)`).
+  - Flags intra-task duplicate outputs (`BLOCKING`), deliverable bloat (>8 deliverables), and unpruned tensor dimensionality bloat (>50,000 dimensions).
+* **Rubric Scorecard (0–100)**: Computes quantitative scores for topology, contracts, and testability.
+
+##### 5. Deliverables & Views
+* **📊 Interactive DAG Flowchart**: Dynamic pan/zoom Mermaid diagram color-coded by task category and agent role.
+* **📑 Execution Schedule & Tasks**: Tasks grouped into parallel execution waves with expandable task cards showing objectives, required input artifacts, deliverables, acceptance criteria checkboxes, and context excerpts from the paper.
+* **🤖 Antigravity Agent Specs**: Formatted subagent invocation specs ready for multi-agent delegation.
+* **🚀 Dispatch & Execution**: Single-click execution across waves with progress tracking, artifact hash calculation, and automated generation of a **Replication Scorecard** (`CERTIFIED_REPLICABLE`, `PARTIALLY_REPLICATED`, `REPLICATION_FAILED`).
+* **📥 Downloads**: Export the complete plan as JSON, Markdown, or Antigravity JSON.
+
+---
+
+#### Labs: Technique transfer (experimental — Cross-Disciplinary Methodology Discovery)
+
+The Technique transfer sub-tab (the second one under **Labs**) discovers and adapts techniques from unrelated scientific disciplines to overcome target bottlenecks in your research.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   Technique Transfer Engine                                      │
+│                                                                                                  │
+│  [Problem / Bottleneck] ──▶ Card Retrieval ──▶ Analogical Mapping ──▶ Critic ──▶ Scored Report  │
+│                               (Abstracted)       (Identifiability)      Debate     (Prior Art)   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+##### 1. Input & Discovery Options
+* **Target Problem or Bottleneck**: Enter your specific physical question or mathematical obstacle (e.g. `recovering continuous parameters from noisy spectra` or `phase retrieval in high-dimensional non-convex optimization`).
+* **Example Starters**: Click any of the pre-filled chips to explore canonical transfer scenarios:
+  - *Inverse problem parameter recovery under correlated noise*
+  - *Topological protection in disordered one-dimensional lattices*
+  - *Phase retrieval in high-dimensional non-convex optimization*
+  - *Diffusion-based generative sampling with physical conservation laws*
+* **Candidate Cards to Explore**: Slider (1 to 10 cards, default 3) controlling how many candidate methods from the card index are mapped and evaluated.
+* **Prior Art Cutoff Year**: Optional filter to restrict prior-art validation to literature published before a certain year (useful for retrodiction benchmarks).
+* **Proposal Temperature**: Sampling temperature (default 0.2) balancing conservative analogical mappings with creative cross-disciplinary transfers.
+
+##### 2. The 4 Transfer Pipeline Stages
+1. **Technique Cards & Bottleneck Abstraction**: Matches your problem against pre-extracted technique cards (`data/transfer/cards/`). Each card encapsulates an invariant method (its general objective, 2–5 operational steps, and verbatim source evidence) stripped of domain-specific nouns.
+2. **Analogical Role-by-Role Mapping**: Formulates the transfer:
+   - Maps source variables/entities directly to target domain counterparts.
+   - Assesses mathematical identifiability (whether target observations mathematically determine unknown parameters).
+   - Formulates concrete implementation steps, baseline benchmarks, specific predictions, and refutation criteria.
+3. **Adversarial Critic Debate**: An adversarial reviewer raises strict domain objections (e.g., breakdown of scale separation, gauge ambiguity, non-convexity). The proposer must refute each objection with mathematical reasoning or concede the limitation.
+4. **Deterministic Scoring & Prior Art Verification**:
+   - Gating criteria: Rejects transfers with contradicted premises, fatal conceded assumptions, or unidentified parameters.
+   - Depth checklist: Evaluates 10 structural transfer dimensions.
+   - Prior-art search: Queries arXiv and OpenAlex to confirm that the suggested transfer is novel and has not already been published.
+
+##### 3. Deliverables & Inspection Views
+* **📄 Full Transfer Report**: Formatted Markdown document containing complete mapping tables, mathematical formulations, critic objections and rebuttals, refutation tests, and prior art status.
+* **🌳 Methodology Search Tree**: Interactive Mermaid diagram visualizing the lineage from target bottleneck to source cards, transfer proposals, and final verdicts.
+* **💾 Raw JSON**: Machine-readable JSON export of the entire transfer payload (`RunResult`).
 
 ---
 

@@ -326,7 +326,10 @@ class TestFeature17TransferEngineRemediation(unittest.TestCase):
         with open(app_file, "r", encoding="utf-8") as f:
             app_code = f.read()
         self.assertIn("render_transfer_tab", app_code)
-        self.assertIn('"Technique transfer"', app_code)
+        self.assertIn("LAB_TABS", app_code)
+        from research_assistant.ui.layout import LAB_TABS
+
+        self.assertIn("Technique transfer (experimental)", LAB_TABS)
 
     def test_transfer_tab_renders_cleanly(self):
         from research_assistant.ui.transfer_tab import render_transfer_tab
