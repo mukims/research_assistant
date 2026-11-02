@@ -12,6 +12,7 @@ As the corpus grows this keeps the detailed search bounded to a handful of
 papers instead of the whole store.
 """
 
+import concurrent.futures
 import re
 import time
 
@@ -40,7 +41,7 @@ from research_assistant.prompts import (
 from research_assistant.shared.db import check_embedder, load_search_resources, open_store
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.search import hybrid_search
+from research_assistant.shared.search import hybrid_search, rerank_candidates
 
 
 logger = get_logger("retrieve")
@@ -214,6 +215,7 @@ def passages_per_paper(query: str, selected: list[dict], per_paper: int) -> dict
             top_k=per_paper, doc_filter={r["document"]},
             exclude_types=EXCLUDED_FROM_EVIDENCE,
         )
+        hits = rerank_candidates(query, hits, top_k=per_paper)
         for h in hits:
             h["key"] = r["key"]
         out[r["key"]] = hits
@@ -241,10 +243,11 @@ def format_passages(hits: list[dict], max_chars: int) -> str:
 def deep_search(query: str, documents, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     """Hybrid chunk search restricted to `documents`."""
     collection, bm25, texts, metadatas = load_search_resources()
-    return hybrid_search(
+    hits = hybrid_search(
         query, collection, bm25, texts, metadatas,
         top_k=top_k, doc_filter=set(documents),
     )
+    return rerank_candidates(query, hits, top_k=top_k)
 
 
 
@@ -337,7 +340,8 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
     notes, t_map = [], 0.0
     if mode == "map_reduce":
         t0 = time.perf_counter()
-        for r in selected:
+
+        def _get_note(r):
             key, title = r["key"], keys[r["key"]]
             hits = passages.get(key) or []
             t1 = time.perf_counter()
@@ -349,10 +353,21 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
                     text, relevant, hits = r.get("summary", ""), True, []
             else:
                 text, relevant = r.get("summary", ""), True
-            note = {"key": key, "document": r["document"], "citation": title, "notes": text,
+            return {"key": key, "document": r["document"], "citation": title, "notes": text,
                     "relevant": relevant, "passages_used": len(hits), "seconds": round(time.perf_counter() - t1, 1)}
-            notes.append(note)
-            emit("notes", note)
+
+        workers = min(len(selected), 8) if selected else 1
+        if workers <= 1:
+            for r in selected:
+                note = _get_note(r)
+                notes.append(note)
+                emit("notes", note)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                notes = list(executor.map(_get_note, selected))
+            for note in notes:
+                emit("notes", note)
+
         t_map = time.perf_counter() - t0
         material = "\n\n".join(f"[{n['key']}] {n['citation']}\n{n['notes']}" for n in notes)
     else:

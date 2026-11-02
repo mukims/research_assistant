@@ -143,7 +143,25 @@ def _cache_key():
     lance_mtime = None
     if os.path.exists(LANCEDB_PATH):
         try:
-            lance_mtime = os.path.getmtime(LANCEDB_PATH)
+            candidates = [os.path.getmtime(LANCEDB_PATH)]
+            table_dir = os.path.join(LANCEDB_PATH, f"{COLLECTION_NAME}.lance")
+            if os.path.exists(table_dir):
+                candidates.append(os.path.getmtime(table_dir))
+                versions_dir = os.path.join(table_dir, "_versions")
+                if os.path.exists(versions_dir):
+                    candidates.append(os.path.getmtime(versions_dir))
+                    try:
+                        for vf in os.scandir(versions_dir):
+                            candidates.append(vf.stat().st_mtime)
+                    except OSError:
+                        pass
+                hint_json = os.path.join(table_dir, "latest_version_hint.json")
+                if os.path.exists(hint_json):
+                    candidates.append(os.path.getmtime(hint_json))
+                hint_file = os.path.join(table_dir, "_latest_version")
+                if os.path.exists(hint_file):
+                    candidates.append(os.path.getmtime(hint_file))
+            lance_mtime = max(candidates) if candidates else None
         except OSError:
             pass
     return (USE_LANCEDB, LANCEDB_PATH, VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime, lance_mtime)
@@ -154,13 +172,19 @@ class StoreUnavailable(RuntimeError):
 
 
 def open_store():
-    """The client for the store (LanceDB if ready, ChromaDB as fallback). Every process goes through here.
+    """The client for the store (LanceDB if enabled and available, ChromaDB as fallback). Every process goes through here.
 
     With config.CHROMA_SERVER set, the server owns VECTORDB_PATH and this connects to it
     (see config.chroma_server_from for why); otherwise the files are opened directly,
     which is only safe when no other process has them open."""
-    if is_lance_ready():
-        return open_lance_store()
+    if USE_LANCEDB and lancedb is not None:
+        try:
+            return open_lance_store()
+        except Exception as exc:
+            logger.warning(
+                "LanceDB preferred but open_lance_store failed: %s; falling back to Chroma",
+                exc,
+            )
 
     import chromadb
     from urllib.parse import urlparse

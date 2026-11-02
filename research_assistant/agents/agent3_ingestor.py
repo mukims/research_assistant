@@ -34,12 +34,14 @@ def _pdfs_from_manifest(downloaded: dict) -> dict[str, str]:
             logger.warning("Skipping malformed manifest entry %s: %s", key, exc)
             continue
         path = paper.path
+        if not path:
+            continue
         label = paper.title or paper.raw_reference or paper.key
-        pdfs[path] = label
         if not os.path.exists(path):
             candidate = os.path.join(PULLED_PDFS_DIR, os.path.basename(path))
             if os.path.exists(candidate):
-                pdfs[candidate] = label
+                path = candidate
+        pdfs[path] = label
     return pdfs
 
 
@@ -110,11 +112,15 @@ def run_ingestor(workers: int = 1, force: bool = False):
         pdfs = _pdfs_from_manifest(downloaded)
 
         # Ingest abstract-only tier fallbacks
+        from research_assistant.shared import manifest
         abstract_corpus = []
+        abstract_keys = []
         for key, record in downloaded.items():
             if record.get("evidence_tier") == "abstract_only" and record.get("abstract"):
-                label = record.get("title") or record.get("raw_reference") or key
                 doc_key = record.get("key") or key
+                if not force and manifest.contains(doc_key):
+                    continue
+                label = record.get("title") or record.get("raw_reference") or key
                 abstract_corpus.append({
                     "document": doc_key,
                     "citation": label,
@@ -131,10 +137,27 @@ def run_ingestor(workers: int = 1, force: bool = False):
                         "citation_count": record.get("citation_count"),
                     },
                 })
+                # summary_source ensures abstract papers are indexed in physics_summaries_v3 for Stage-1 retrieval
+                abstract_corpus.append({
+                    "document": doc_key,
+                    "citation": label,
+                    "page": 1,
+                    "type": "summary_source",
+                    "content": f"Title: {label}\nAbstract: {record['abstract']}",
+                    "meta": {
+                        "stored_form": "abstract_only",
+                        "tier": "abstract_only",
+                    },
+                })
+                abstract_keys.append(doc_key)
         if abstract_corpus:
-            logger.info("Ingesting %d abstract-only paper(s)...", len(abstract_corpus))
-            from research_assistant.shared.ingestion import upsert_corpus
+            logger.info("Ingesting %d abstract-only paper(s)...", len(abstract_keys))
+            from research_assistant.shared.ingestion import upsert_corpus, last_summary_run
             upsert_corpus(abstract_corpus)
+            failed_summary_docs = set(last_summary_run.get("failed_docs", []))
+            marked_abstracts = [k for k in abstract_keys if k not in failed_summary_docs]
+            if marked_abstracts:
+                manifest.add_many(marked_abstracts)
 
         if not pdfs:
             if abstract_corpus:

@@ -129,6 +129,33 @@ def pack_windows(paragraphs, target: int, hard_max: int) -> list[tuple[str, int,
 DROP_KINDS = frozenset({"acknowledgements"})
 
 
+_MATH_QUANT_RE = re.compile(
+    r"(\\([a-zA-Z]+)|[=≈±×≤≥^_{}]|\b\d+(\.\d+)?\s*(eV|meV|GeV|keV|K|mK|μK|nm|μm|mm|cm|m|s|ms|ns|fs|ps|Hz|kHz|MHz|GHz|THz|T|mT|Oe|Ohm|%)\b|\b(Tc|T_c|Hc|H_c)\b)"
+)
+
+
+def is_math_or_quantitative(s: str) -> bool:
+    """Detect if text contains mathematical formulas, notation, or quantitative measurements."""
+    if not s:
+        return False
+    return bool(_MATH_QUANT_RE.search(s))
+
+
+def should_keep_chunk(text: str, min_chars: int = 200, min_alpha: float = 0.6) -> bool:
+    """Determine whether a chunk should be retained or filtered out.
+
+    Exempts math-dense passages and short quantitative measurements from the strict
+    60% alphabetic ratio and 200 character minimum bounds while rejecting OCR garbage.
+    """
+    if not text or not text.strip():
+        return False
+    ratio = alpha_ratio(text)
+    if is_math_or_quantitative(text):
+        if ratio >= 0.35 and len(text.strip()) >= 10:
+            return True
+    return len(text) >= min_chars and ratio >= min_alpha
+
+
 def alpha_ratio(s: str) -> float:
     if not s:
         return 0.0
@@ -142,7 +169,10 @@ def filter_document(doc: Document, min_alpha: float = 0.6, min_section_chars: in
     for sec in doc.sections:
         if sec.kind in DROP_KINDS:
             continue
-        paras = [p for p in sec.paragraphs if alpha_ratio(p.text) >= min_alpha]
+        paras = [
+            p for p in sec.paragraphs
+            if alpha_ratio(p.text) >= min_alpha or (is_math_or_quantitative(p.text) and alpha_ratio(p.text) >= 0.35)
+        ]
         if not paras:
             continue
         kept.append(Section(sec.heading, sec.kind, paras))
@@ -161,7 +191,10 @@ def filter_document(doc: Document, min_alpha: float = 0.6, min_section_chars: in
         else:
             merged.append(Section("", "other", pending))
 
-    abstract = [p for p in doc.abstract if alpha_ratio(p.text) >= min_alpha]
+    abstract = [
+        p for p in doc.abstract
+        if alpha_ratio(p.text) >= min_alpha or (is_math_or_quantitative(p.text) and alpha_ratio(p.text) >= 0.35)
+    ]
     return Document(doc.key, doc.title, abstract, merged, doc.figures, doc.extraction, doc.n_bib)
 
 
@@ -188,7 +221,7 @@ def chunk_document(doc: Document, target: int, hard_max: int,
 
     def emit_text(paragraphs, kind, heading):
         for text, p0, p1 in pack_windows(paragraphs, target, hard_max):
-            if len(text) < min_chars or alpha_ratio(text) < min_alpha:
+            if not should_keep_chunk(text, min_chars=min_chars, min_alpha=min_alpha):
                 continue
             chunks.append(Chunk(text, "text", kind, heading, p0, p1, len(chunks)))
 
@@ -203,4 +236,19 @@ def chunk_document(doc: Document, target: int, hard_max: int,
             continue
         chunks.append(Chunk(text, "caption", "caption", fig.label, fig.page, fig.page, len(chunks),
                             figure_id=fig.id, figure_kind=fig.kind, figure_label=fig.label))
+
+    for form in getattr(doc, "formulas", []):
+        if form.text and form.text.strip():
+            chunks.append(
+                Chunk(
+                    form.text,
+                    "formula",
+                    "formula",
+                    form.id,
+                    form.page,
+                    form.page,
+                    len(chunks),
+                    figure_id=form.id,
+                )
+            )
     return chunks

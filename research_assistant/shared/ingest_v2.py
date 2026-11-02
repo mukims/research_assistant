@@ -62,7 +62,7 @@ def process_pdf_v2(
     images_dir = images_dir or IMAGES_DIR
     key = _pdf_key(pdf_path)
     doc = extract(pdf_path, key=key, enable_ocr=enable_ocr, ocr_engine=ocr_engine)
-    title = doc.title or citation_string
+    title = (doc.title if doc.title and doc.title != key else None) or citation_string or key
     chunks = chunk_document(doc, CHUNK_TARGET_CHARS, CHUNK_MAX_CHARS,
                             min_chars=CHUNK_MIN_CHARS, min_alpha=CHUNK_MIN_ALPHA)
     figures = {f.id: f for f in doc.figures}

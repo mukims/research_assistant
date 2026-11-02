@@ -289,7 +289,7 @@ def extract_ocr(
 
     return Document(
         key=key,
-        title=key,
+        title="",
         abstract=[],
         sections=[Section("", "other", body)],
         figures=[],

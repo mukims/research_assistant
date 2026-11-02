@@ -266,7 +266,7 @@ class TestIngestReportsExtractionModes(IngestPdfsCase):
         with patch.object(ing, "process_pdf", fake_process):
             result = ing.ingest_pdfs([good, scan], rebuild_index=False)
 
-        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 1})
+        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 1, "ocr": 0})
 
     def test_every_page_of_one_document_counts_once(self):
         """The tally is per document, not per corpus entry."""
@@ -282,7 +282,7 @@ class TestIngestReportsExtractionModes(IngestPdfsCase):
         with patch.object(ing, "process_pdf", fake_process):
             result = ing.ingest_pdfs([pdf], rebuild_index=False)
 
-        self.assertEqual(result["extraction"], {"grobid": 0, "pymupdf": 1})
+        self.assertEqual(result["extraction"], {"grobid": 0, "pymupdf": 1, "ocr": 0})
 
 
 class TestRequireGrobid(IngestPdfsCase):
@@ -315,7 +315,7 @@ class TestRequireGrobid(IngestPdfsCase):
         self.assertEqual(result["fell_back"], ["b.pdf"])
         self.assertEqual([os.path.basename(p) for p in result["failed"]], ["b.pdf"])
         self.assertEqual(sorted(manifest_mod.load()), ["a.pdf", "c.pdf"])
-        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 0})
+        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 0, "ocr": 0})
 
     def test_a_second_run_retries_only_what_fell_back(self):
         self._setup()
@@ -331,7 +331,7 @@ class TestRequireGrobid(IngestPdfsCase):
         seen = self._setup()
         result = ing.ingest_pdfs(list(self.pdfs.values()), rebuild_index=False)
         self.assertEqual({e["document"] for e in seen["corpus"]}, {"a.pdf", "b.pdf", "c.pdf"})
-        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 1})
+        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 1, "ocr": 0})
         self.assertNotIn("fell_back", result)
 
 
@@ -390,7 +390,7 @@ class TestProcessPdfIsTheV2Processor(ManifestBackedTestCase):
     result reports how each document was extracted and how many figure images
     were embedded."""
 
-    def _entries(self, path, label, images_dir=None):
+    def _entries(self, path, label, images_dir=None, **kwargs):
         key = ing.pdf_key(path)
         base = {"document": key, "citation": label, "page": 0, "extraction": "grobid"}
         return [
@@ -402,21 +402,21 @@ class TestProcessPdfIsTheV2Processor(ManifestBackedTestCase):
     def test_process_pdf_delegates_and_takes_no_figure_switch(self):
         with patch("research_assistant.shared.ingest_v2.process_pdf_v2", return_value=[]) as v2:
             ing.process_pdf("/x/a.pdf", "A")
-        v2.assert_called_once_with("/x/a.pdf", "A", images_dir=None)
+        v2.assert_called_once_with("/x/a.pdf", "A", images_dir=None, enable_ocr=None, ocr_engine=None)
 
     def test_result_reports_modes_and_embedded_figure_images(self):
         pdf = _touch(self.tmp, "a.pdf")
         with patch("research_assistant.shared.ingest_v2.process_pdf_v2", side_effect=self._entries), \
              patch.object(ing, "upsert_corpus", return_value=2), patch.object(ing, "rebuild_bm25"):
             result = ing.ingest_pdfs({pdf: "A"})
-        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 0})
+        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 0, "ocr": 0})
         self.assertEqual(result["figure_images"], 1)
         self.assertNotIn("described", result)
 
     def test_a_pymupdf_fallback_is_warned_about(self):
         pdf = _touch(self.tmp, "a.pdf")
 
-        def pymupdf_entries(path, label, images_dir=None):
+        def pymupdf_entries(path, label, images_dir=None, **kwargs):
             return [{**self._entries(path, label)[0], "extraction": "pymupdf"}]
 
         with patch("research_assistant.shared.ingest_v2.process_pdf_v2", side_effect=pymupdf_entries), \

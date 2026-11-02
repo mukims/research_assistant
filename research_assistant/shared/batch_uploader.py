@@ -10,6 +10,9 @@ import os
 import re
 import hashlib
 import zipfile
+import ipaddress
+import socket
+from urllib.parse import urlparse
 from typing import Any
 
 from research_assistant.shared.pdf_metadata import (
@@ -22,6 +25,79 @@ from research_assistant.config import RAW_DIR
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("batch_uploader")
+
+MAX_TOTAL_UNCOMPRESSED_SIZE = 500 * 1024 * 1024  # 500 MB
+MAX_SINGLE_FILE_SIZE = 100 * 1024 * 1024        # 100 MB
+MAX_ZIP_FILE_COUNT = 500                        # 500 files
+
+
+def is_safe_path(path: str, allowed_roots: list[str] | None = None) -> bool:
+    """Validate that path does not traverse outside permitted directories or touch system roots."""
+    if not path or not isinstance(path, str):
+        return False
+    if "\0" in path:
+        return False
+    norm_path = path.replace("\\", "/").strip()
+    try:
+        real_path = os.path.realpath(os.path.expanduser(norm_path))
+    except (ValueError, OSError):
+        return False
+
+    forbidden = [
+        "/etc", "/bin", "/sbin", "/usr", "/var/log", "/dev", "/proc", "/sys",
+        "/private/etc", "/private/var/log", "/private/var/root", "/private/var/db",
+        "/System", "/Library",
+    ]
+    if real_path == "/" or any(real_path == fb or real_path.startswith(fb + "/") for fb in forbidden):
+        return False
+
+    if allowed_roots is None:
+        import tempfile
+        allowed_roots = [
+            os.getcwd(),
+            os.path.expanduser("~"),
+            tempfile.gettempdir(),
+            "/tmp",
+        ]
+    try:
+        real_allowed = [os.path.realpath(os.path.expanduser(r)) for r in allowed_roots if r]
+    except (ValueError, OSError):
+        return False
+    return any(real_path == r or real_path.startswith(r.rstrip(os.sep) + os.sep) for r in real_allowed)
+
+
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_safe_url(url: str) -> bool:
+    """Validate that the URL uses HTTP/HTTPS and resolves to a public, non-private IP."""
+    try:
+        parsed = urlparse(url.strip())
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "metadata.google.internal"):
+            return False
+        addr_info = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or not ip.is_global
+                or (ip.version == 4 and ip in _CGNAT_NETWORK)
+                or (bool(getattr(ip, "ipv4_mapped", None)) and ip.ipv4_mapped in _CGNAT_NETWORK)
+            ):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _safe_filename(name: str) -> str:
@@ -131,13 +207,26 @@ def unpack_and_stage_uploads(
             continue
 
         # Check if ZIP archive
-        if name_lower.endswith('.zip') or data[:4] == b'PK':
+        if name_lower.endswith('.zip') or data.startswith(b'PK\x03\x04'):
             logger.info('Extracting ZIP archive: %s (%d bytes)', name, len(data))
             try:
+                total_uncompressed = 0
+                file_count = 0
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     for member in zf.infolist():
                         if member.is_dir():
                             continue
+                        file_count += 1
+                        if file_count > MAX_ZIP_FILE_COUNT:
+                            logger.error("ZIP bomb detected: exceeds max file count (%d)", MAX_ZIP_FILE_COUNT)
+                            break
+                        if member.file_size > MAX_SINGLE_FILE_SIZE:
+                            logger.error("ZIP member %s exceeds max single file size (%d bytes)", member.filename, MAX_SINGLE_FILE_SIZE)
+                            continue
+                        total_uncompressed += member.file_size
+                        if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_SIZE:
+                            logger.error("ZIP bomb detected: exceeds max total uncompressed size (%d bytes)", MAX_TOTAL_UNCOMPRESSED_SIZE)
+                            break
                         m_name = member.filename
                         # Skip hidden / macOS metadata
                         if m_name.startswith('__MACOSX') or '/.' in m_name or os.path.basename(m_name).startswith('.'):
@@ -179,23 +268,27 @@ def scan_and_stage_directory(
     Returns:
         List of dicts describing staged papers.
     """
-    if not os.path.isdir(folder_path):
-        logger.warning("Directory does not exist: %s", folder_path)
+    real_folder = os.path.realpath(os.path.expanduser(folder_path.strip()))
+    if not is_safe_path(real_folder):
+        logger.error("Directory traversal blocked: %s is not a safe workspace path", folder_path)
+        return []
+    if not os.path.isdir(real_folder):
+        logger.warning("Directory does not exist: %s", real_folder)
         return []
 
     pdf_files: list[str] = []
     if recursive:
-        for root, _, files in os.walk(folder_path):
+        for root, _, files in os.walk(real_folder):
             for f in files:
                 if f.lower().endswith(".pdf") and not f.startswith("."):
                     pdf_files.append(os.path.join(root, f))
     else:
-        for f in os.listdir(folder_path):
-            full_p = os.path.join(folder_path, f)
+        for f in os.listdir(real_folder):
+            full_p = os.path.join(real_folder, f)
             if os.path.isfile(full_p) and f.lower().endswith(".pdf") and not f.startswith("."):
                 pdf_files.append(full_p)
 
-    logger.info("Found %d PDF file(s) in %s (recursive=%s)", len(pdf_files), folder_path, recursive)
+    logger.info("Found %d PDF file(s) in %s (recursive=%s)", len(pdf_files), real_folder, recursive)
     return unpack_and_stage_uploads(pdf_files, destination_dir=destination_dir)
 
 
@@ -231,6 +324,9 @@ def fetch_and_stage_urls_or_dois(
             # Convert arXiv abs to pdf link if applicable
             if "arxiv.org/abs/" in url:
                 url = url.replace("arxiv.org/abs/", "arxiv.org/pdf/") + ".pdf"
+            if not is_safe_url(url):
+                logger.warning("SSRF protection: rejected private, loopback, or invalid URL: %s", url)
+                continue
             orig_name = os.path.basename(url.split("?")[0]) or "url_paper.pdf"
             try:
                 resp = requests.get(

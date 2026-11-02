@@ -14,7 +14,8 @@ columnar store supporting:
 import hashlib
 import json
 import os
-from typing import Any, Optional
+import re
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -50,6 +51,15 @@ def compute_chunk_id(document: str, stored_form: str, seq: int, text: str) -> st
 def compute_summary_id(document: str) -> str:
     """Deterministic ID for document summary."""
     return f"sum::{document}"
+
+
+def escape_tantivy_query(query: str) -> str:
+    r"""Sanitize and escape scientific query punctuation for Tantivy FTS.
+    Escapes: [, ], :, (, ), ^, /, -, \, "
+    """
+    if not query:
+        return ""
+    return re.sub(r'([\\\[\]:()^/\-"])', r"\\\1", query)
 
 
 def get_papers_schema(dim: int = 768) -> "pa.Schema":
@@ -142,10 +152,21 @@ class LanceTableAdapter:
         return self.count()
 
     def create_fts_index(self, column: str = "text"):
-        """Create or replace Tantivy FTS index on the target text column."""
+        """Create or replace Tantivy FTS index on target text columns.
+        Indexes citation_source alongside text and summary.
+        """
         try:
-            self.table.create_index(column, config=lancedb.index.FTS(), replace=True)
-            logger.info("Created Tantivy FTS index on table %s (column=%s)", self.name, column)
+            target_cols = [column] if isinstance(column, str) else list(column)
+            schema_names = set(self.table.schema.names) if hasattr(self.table, "schema") and hasattr(self.table.schema, "names") else set()
+            if "citation_source" in schema_names and "citation_source" not in target_cols:
+                target_cols.append("citation_source")
+            for col in target_cols:
+                if not schema_names or col in schema_names:
+                    try:
+                        self.table.create_index(col, config=lancedb.index.FTS(), replace=True)
+                        logger.info("Created Tantivy FTS index on table %s (column=%s)", self.name, col)
+                    except Exception as e:
+                        logger.warning("FTS index creation warning for %s col %s: %s", self.name, col, e)
         except Exception as e:
             logger.warning("FTS index creation warning for %s: %s", self.name, e)
 
@@ -167,6 +188,71 @@ class LanceTableAdapter:
             clauses.append(f"stored_form NOT IN ({quoted})")
         return " AND ".join(clauses) if clauses else None
 
+    def search_vector(
+        self,
+        vector: list[float],
+        top_k: int = DEFAULT_TOP_K,
+        doc_filter: Optional[Union[str, set]] = None,
+        exclude_types: Optional[set] = None,
+        exclude_docs: Optional[set] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict]:
+        """Execute vector search with metric='cosine' and prefilter=True."""
+        if limit is not None:
+            top_k = limit
+        doc_filter_set = {doc_filter} if isinstance(doc_filter, str) else doc_filter
+        where_sql = self._build_where_sql(doc_filter_set, exclude_types, exclude_docs)
+        vec_q = self.table.search(vector, query_type="vector")
+        if hasattr(vec_q, "metric") and callable(getattr(vec_q, "metric")):
+            try:
+                vec_q = vec_q.metric("cosine")
+            except Exception:
+                pass
+        if where_sql:
+            try:
+                vec_q = vec_q.where(where_sql, prefilter=True)
+            except TypeError:
+                vec_q = vec_q.where(where_sql)
+            if hasattr(vec_q, "prefilter") and callable(getattr(vec_q, "prefilter")):
+                try:
+                    res = vec_q.prefilter(True)
+                    if res is not None:
+                        vec_q = res
+                except Exception:
+                    pass
+        hits = vec_q.limit(top_k).to_list()
+        results = []
+        for h in hits:
+            meta = {
+                "document": h.get("document", ""),
+                "citation_source": h.get("citation_source", ""),
+                "stored_form": h.get("stored_form", "text_chunk"),
+                "section": h.get("section", ""),
+                "seq": h.get("seq", 0),
+                "page": h.get("page", 1),
+                "page_first": h.get("page_first", h.get("page", 1)),
+                "page_last": h.get("page_last", h.get("page", 1)),
+                "type": h.get("stored_form", "text_chunk"),
+                "tier": h.get("tier", "full_text"),
+                "content_hash": h.get("content_hash", ""),
+            }
+            if h.get("metadata_json"):
+                try:
+                    extra = json.loads(h["metadata_json"])
+                    if isinstance(extra, dict):
+                        meta.update(extra)
+                except Exception:
+                    pass
+            results.append({
+                "chunk_id": h.get("chunk_id") or h.get("summary_id", ""),
+                "chunk_index": int(h.get("seq", 0)),
+                "text": h.get("text") or h.get("summary", ""),
+                "metadata": meta,
+                "score": float(h.get("_distance", 0.0)),
+                "_distance": float(h.get("_distance", 0.0)),
+            })
+        return results
+
     def search_hybrid(
         self,
         query: str,
@@ -176,19 +262,37 @@ class LanceTableAdapter:
         doc_filter: Optional[set] = None,
         exclude_types: Optional[set] = None,
         exclude_docs: Optional[set] = None,
+        limit: Optional[int] = None,
     ) -> list[dict]:
         """
         Executes hybrid search combining dense vector search and Tantivy FTS,
         fused via Reciprocal Rank Fusion (RRF).
         """
+        if limit is not None:
+            top_k = limit
         where_sql = self._build_where_sql(doc_filter, exclude_types, exclude_docs)
         k_cand = max(60, top_k * 10) if (doc_filter or exclude_docs) else max(15, top_k * 3)
 
         # 1. Vector Search
         try:
             vec_q = self.table.search(query_vector, query_type="vector")
+            if hasattr(vec_q, "metric") and callable(getattr(vec_q, "metric")):
+                try:
+                    vec_q = vec_q.metric("cosine")
+                except Exception:
+                    pass
             if where_sql:
-                vec_q = vec_q.where(where_sql)
+                try:
+                    vec_q = vec_q.where(where_sql, prefilter=True)
+                except TypeError:
+                    vec_q = vec_q.where(where_sql)
+                if hasattr(vec_q, "prefilter") and callable(getattr(vec_q, "prefilter")):
+                    try:
+                        res = vec_q.prefilter(True)
+                        if res is not None:
+                            vec_q = res
+                    except Exception:
+                        pass
             vec_hits = vec_q.limit(k_cand).to_list()
         except Exception as e:
             logger.warning("LanceDB vector search failed: %s", e)
@@ -196,7 +300,8 @@ class LanceTableAdapter:
 
         # 2. Tantivy Full-Text Search
         try:
-            fts_q = self.table.search(query, query_type="fts")
+            sanitized_query = escape_tantivy_query(query)
+            fts_q = self.table.search(sanitized_query, query_type="fts")
             if where_sql:
                 fts_q = fts_q.where(where_sql)
             fts_hits = fts_q.limit(k_cand).to_list()
@@ -413,6 +518,23 @@ class LanceTableAdapter:
         target_col = "summary" if self.is_summary else column
         self.create_fts_index(target_col)
 
+    def optimize(self, cleanup_older_than_days: int = 7):
+        """Compact small files and clean up old table versions."""
+        try:
+            if hasattr(self.table, "compact_files"):
+                self.table.compact_files()
+                logger.info("Compacted files for LanceDB table %s", self.name)
+        except Exception as exc:
+            logger.warning("Table compact_files failed on %s: %s", self.name, exc)
+
+        try:
+            if hasattr(self.table, "cleanup_old_versions"):
+                from datetime import timedelta
+                self.table.cleanup_old_versions(older_than=timedelta(days=cleanup_older_than_days))
+                logger.info("Cleaned up old versions older than %d days for LanceDB table %s", cleanup_older_than_days, self.name)
+        except Exception as exc:
+            logger.warning("Table cleanup_old_versions failed on %s: %s", self.name, exc)
+
     def query(
         self,
         query_embeddings: Optional[list] = None,
@@ -426,11 +548,24 @@ class LanceTableAdapter:
 
         vec = query_embeddings[0]
         q = self.table.search(vec, query_type="vector")
+        if hasattr(q, "metric") and callable(getattr(q, "metric")):
+            try:
+                q = q.metric("cosine")
+            except Exception:
+                pass
 
         if where:
             where_sql = self._parse_chroma_where(where)
             if where_sql:
-                q = q.where(where_sql)
+                try:
+                    q = q.where(where_sql, prefilter=True)
+                except TypeError:
+                    q = q.where(where_sql)
+                if hasattr(q, "prefilter") and callable(getattr(q, "prefilter")):
+                    try:
+                        q = q.prefilter(True)
+                    except Exception:
+                        pass
 
         hits = q.limit(n_results).to_list()
         ids = [h.get("chunk_id") or h.get("summary_id", "") for h in hits]
@@ -486,8 +621,12 @@ class LanceTableAdapter:
             q = q.where(" AND ".join(conds))
         if offset:
             q = q.offset(offset)
-        if limit:
+        if limit is not None:
             q = q.limit(limit)
+        else:
+            total_rows = self.count()
+            if total_rows > 0:
+                q = q.limit(total_rows)
 
         try:
             hits = q.to_list()
@@ -573,3 +712,7 @@ class LanceStoreClient:
         if name not in tables:
             raise KeyError(f"Table {name} not found in LanceDB (existing: {tables})")
         return LanceTableAdapter(self.db.open_table(name), is_summary=("summar" in name.lower()))
+
+
+# Alias for backward and facade compatibility
+LanceCollection = LanceTableAdapter

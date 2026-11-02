@@ -50,6 +50,39 @@ class Figure:
     page: int
     bbox: tuple | None              # (x0, y0, x1, y1) in PDF points, or None
     refs: list = field(default_factory=list)   # body sentences that cite it
+    table_markdown: str = ""
+
+
+def _format_tei_table(table_el) -> str:
+    """Format TEI <table> rows and cells as a clean Markdown table."""
+    if table_el is None:
+        return ""
+    rows = []
+    if hasattr(table_el, "find_all"):
+        # BeautifulSoup / Tag
+        for row in table_el.find_all("row"):
+            cells = [cell.get_text(strip=True).replace("|", "\\|") for cell in row.find_all("cell")]
+            if cells:
+                rows.append(cells)
+    elif hasattr(table_el, "findall"):
+        # lxml or xml.etree Element
+        row_elements = table_el.findall(f"{TEI}row") or table_el.findall("row")
+        for row in row_elements:
+            cell_elements = row.findall(f"{TEI}cell") or row.findall("cell")
+            cells = [_text(cell).replace("|", "\\|") for cell in cell_elements]
+            if cells:
+                rows.append(cells)
+
+    if not rows:
+        return ""
+    num_cols = max(len(r) for r in rows)
+    norm_rows = [r + [""] * (num_cols - len(r)) for r in rows]
+    header = norm_rows[0]
+    md_lines = ["| " + " | ".join(header) + " |"]
+    md_lines.append("| " + " | ".join(["---"] * num_cols) + " |")
+    for r in norm_rows[1:]:
+        md_lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(md_lines)
 
 
 @dataclass
@@ -57,6 +90,15 @@ class Section:
     heading: str
     kind: str
     paragraphs: list
+
+
+@dataclass
+class Formula:
+    id: str
+    text: str
+    page: int
+    coords: str | None = None
+    bbox: tuple | None = None
 
 
 @dataclass
@@ -68,6 +110,7 @@ class Document:
     figures: list
     extraction: str                 # "grobid" | "pymupdf" | "ocr"
     n_bib: int = 0
+    formulas: list = field(default_factory=list)
 
 
 # ─── Section kinds ───────────────────────────────────────────────────────────
@@ -204,6 +247,14 @@ def parse_tei(xml: bytes, key: str) -> Document:
                 continue
             sections.append(Section(heading, normalise_section_kind(heading), paras))
 
+    formulas: list[Formula] = []
+    if body is not None:
+        for i, form in enumerate(body.findall(f".//{TEI}formula")):
+            fid = form.get(XML_ID) or f"formula_{i}"
+            ftext = _text(form)
+            coords = form.get("coords")
+            formulas.append(Formula(fid, ftext, _first_page(coords), coords, _union_box(coords)))
+
     figures: list[Figure] = []
     by_id: dict[str, Figure] = {}
     if body is not None:
@@ -214,9 +265,13 @@ def parse_tei(xml: bytes, key: str) -> Document:
             label_num = _text(fig.find(f"{TEI}label"))
             label = head or (f"{'Table' if kind == 'table' else 'Figure'} {label_num}".strip())
             caption = _text(fig.find(f"{TEI}figDesc"))
+            table_el = fig.find(f"{TEI}table")
+            table_md = _format_tei_table(table_el) if table_el is not None else ""
+            if table_md:
+                caption = f"{caption}\n\n{table_md}".strip() if caption else table_md
             graphic = fig.find(f"{TEI}graphic")
             coords = graphic.get("coords") if graphic is not None and graphic.get("coords") else fig.get("coords")
-            f = Figure(fid, kind, label, caption, _first_page(coords), _union_box(coords))
+            f = Figure(fid, kind, label, caption, _first_page(coords), _union_box(coords), table_markdown=table_md)
             figures.append(f)
             by_id[fid] = f
 
@@ -234,7 +289,7 @@ def parse_tei(xml: bytes, key: str) -> Document:
     n_bib = len(root.findall(f".//{TEI}listBibl/{TEI}biblStruct"))
 
     return Document(key=key, title=title, abstract=abstract, sections=sections,
-                    figures=figures, extraction="grobid", n_bib=n_bib)
+                    figures=figures, extraction="grobid", n_bib=n_bib, formulas=formulas)
 
 
 # ─── GROBID call + cache ─────────────────────────────────────────────────────
@@ -301,11 +356,13 @@ def grobid_fulltext(pdf_path: str, server: str = GROBID_SERVER,
         # figure coords give the bitmap box. segmentSentences wraps sentences
         # in <s>, which is what lets a figure reference carry its sentence.
         data = [
-            ("consolidateHeader", "0"),
+            ("consolidateHeader", "1"),
             ("segmentSentences", "1"),
             ("teiCoordinates", "p"),
             ("teiCoordinates", "head"),
             ("teiCoordinates", "figure"),
+            ("teiCoordinates", "table"),
+            ("teiCoordinates", "formula"),
         ]
         resp = requests.post(f"{server.rstrip('/')}/api/processFulltextDocument",
                              files={"input": fh}, data=data, timeout=timeout)
@@ -358,7 +415,7 @@ def extract_pymupdf(pdf_path: str, key: str) -> Document:
 
     return Document(key=key, title=key, abstract=[],
                     sections=[Section("", "other", body)], figures=[],
-                    extraction="pymupdf")
+                    extraction="pymupdf", formulas=[])
 
 
 # ─── Entry point ─────────────────────────────────────────────────────

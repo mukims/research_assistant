@@ -50,9 +50,14 @@ from research_assistant.config import (
     EMBED_BATCH_SIZE,
     EMBED_MAX_CHARS,
     SUMMARY_MODEL,
+    SUMMARY_FALLBACK_MODEL,
+    SUMMARY_FALLBACK_BACKEND,
     LLM_MODEL,
     SUMMARY_MAX_CHARS,
+    PULLED_PDFS_DIR,
+    RAW_DIR,
 )
+from research_assistant import config
 from research_assistant.prompts import DOCUMENT_SUMMARY
 from research_assistant.shared.atomic import atomic_write
 from research_assistant.shared.log import get_logger
@@ -148,7 +153,7 @@ def process_pdf(
 # What the most recent upsert_summaries() call attempted and lost. upsert_corpus()
 # returns a bare chunk count, so this is how ingest_pdfs() learns that summaries
 # failed without changing that return type. Reset at the start of every call.
-last_summary_run: dict = {"attempted": 0, "made": 0, "failed": 0, "error": ""}
+last_summary_run: dict = {"attempted": 0, "made": 0, "failed": 0, "error": "", "failed_docs": []}
 
 
 def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
@@ -176,51 +181,115 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
 
     made = 0
     failed = 0
+    failed_docs = set()
     last_error = ""
-    last_summary_run.update(attempted=0, made=0, failed=0, error="")
+    last_summary_run.update(attempted=0, made=0, failed=0, error="", failed_docs=[])
     to_summarize = [doc for doc, text in per_doc_text.items() if doc not in have and text.strip()]
     total_to_sum = len(to_summarize)
     model_name = SUMMARY_MODEL or LLM_MODEL
     if total_to_sum:
         pipeline_status.add_event(f"📝 Generating summaries for {total_to_sum} paper(s) with {model_name}…")
 
-    for idx, doc in enumerate(to_summarize, 1):
+    def _summarize_doc(doc):
         if pipeline_status.is_cancel_requested():
-            logger.info("Summary generation stopped early by user request at %d/%d", idx, total_to_sum)
-            break
-        pipeline_status.update_progress(
-            item_current=idx,
-            item_total=total_to_sum,
-            current_item_name=doc,
-            detail=f"Generating summary with {model_name} ({idx}/{total_to_sum})",
-        )
+            return doc, None, "cancelled"
         text = per_doc_text[doc]
+        msg = [{"role": "user", "content": DOCUMENT_SUMMARY.format(text=text[:SUMMARY_MAX_CHARS])}]
         try:
             summary = chat(
-                [{"role": "user", "content": DOCUMENT_SUMMARY.format(text=text[:SUMMARY_MAX_CHARS])}],
+                msg,
                 model=SUMMARY_MODEL,
             ).content.strip()
+            if not summary:
+                raise ValueError("the model returned an empty summary")
+            return doc, summary, None
         except Exception as e:
-            logger.error("Summary failed for %s: %s", doc, e)
-            failed += 1
-            last_error = str(e)
-            continue
-        if not summary:
-            logger.error("Summary for %s came back empty", doc)
-            failed += 1
-            last_error = last_error or "the model returned an empty summary"
-            continue
-        col.add(
-            ids=[f"sum::{doc}"],
-            documents=[summary],
-            # A stored summary is a document, not a query: under the v2 nomic
-            # prefixes the two are embedded differently. Identical for v1.
-            embeddings=embeddings.embed_documents([summary]),
-            metadatas=[{"document": doc, "citation_source": per_doc_citation.get(doc, "")}],
-        )
-        made += 1
+            # Fallback to Ollama gemma4:e2b-mlx if primary summary model fails
+            fb_model = getattr(config, "SUMMARY_FALLBACK_MODEL", "gemma4:e2b-mlx")
+            fb_backend = getattr(config, "SUMMARY_FALLBACK_BACKEND", "ollama")
+            is_same = (SUMMARY_MODEL or LLM_MODEL) == fb_model and (config.LLM_BACKEND == fb_backend)
+            if not is_same and not pipeline_status.is_cancel_requested():
+                logger.warning(
+                    "Primary summary model (%s) failed on %s: %s. Falling back to %s (%s)...",
+                    model_name, doc, e, fb_backend, fb_model,
+                )
+                try:
+                    fb_summary = chat(
+                        msg,
+                        model=fb_model,
+                        backend=fb_backend,
+                    ).content.strip()
+                    if fb_summary:
+                        logger.info("Summary generated with fallback %s for %s", fb_model, doc)
+                        return doc, fb_summary, None
+                    logger.warning("Fallback model %s returned an empty summary for %s", fb_model, doc)
+                except Exception as fb_err:
+                    logger.error("Summary fallback model (%s) also failed on %s: %s", fb_model, doc, fb_err)
+                    return doc, None, f"primary ({model_name}): {e} | fallback ({fb_model}): {fb_err}"
+            return doc, None, str(e)
 
-    last_summary_run.update(attempted=total_to_sum, made=made, failed=failed, error=last_error)
+    workers = min(4, total_to_sum) if total_to_sum else 1
+    summaries = []
+    if workers <= 1:
+        for idx, doc in enumerate(to_summarize, 1):
+            if pipeline_status.is_cancel_requested():
+                logger.info("Summary generation stopped early by user request at %d/%d", idx, total_to_sum)
+                for unfinished_doc in to_summarize[idx - 1:]:
+                    failed_docs.add(unfinished_doc)
+                break
+            pipeline_status.update_progress(
+                item_current=idx,
+                item_total=total_to_sum,
+                current_item_name=doc,
+                detail=f"Generating summary with {model_name} ({idx}/{total_to_sum})",
+            )
+            doc_id, summary_text, err = _summarize_doc(doc)
+            if err:
+                failed += 1
+                failed_docs.add(doc)
+                last_error = err
+            else:
+                summaries.append((doc_id, summary_text))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            fut_to_doc = {executor.submit(_summarize_doc, doc): doc for doc in to_summarize}
+            done_count = 0
+            for fut in concurrent.futures.as_completed(fut_to_doc):
+                done_count += 1
+                doc_id, summary_text, err = fut.result()
+                pipeline_status.update_progress(
+                    item_current=done_count,
+                    item_total=total_to_sum,
+                    current_item_name=doc_id,
+                    detail=f"Generating summary with {model_name} ({done_count}/{total_to_sum})",
+                )
+                if err:
+                    failed += 1
+                    failed_docs.add(doc_id)
+                    last_error = err
+                else:
+                    summaries.append((doc_id, summary_text))
+
+    if summaries:
+        try:
+            docs_list = [d for d, _ in summaries]
+            sums_list = [s for _, s in summaries]
+            embs = _embed_documents_safe(embeddings, sums_list, sub_batch_size=16)
+            col.add(
+                ids=[f"sum::{d}" for d in docs_list],
+                documents=sums_list,
+                embeddings=embs,
+                metadatas=[{"document": d, "citation_source": per_doc_citation.get(d, "")} for d in docs_list],
+            )
+            made += len(summaries)
+        except Exception as e:
+            logger.error("Failed to add summaries to store: %s", e)
+            for d, _ in summaries:
+                failed += 1
+                failed_docs.add(d)
+            last_error = str(e)
+
+    last_summary_run.update(attempted=total_to_sum, made=made, failed=failed, error=last_error, failed_docs=list(failed_docs))
     if made:
         pipeline_status.add_event(f"✓ Generated {made} paper summaries with {model_name}")
         logger.info("✓ Wrote %d document summary/-ies.", made)
@@ -272,7 +341,7 @@ def _embed_documents_safe(embeddings, texts: list[str], sub_batch_size: int = 32
 
 
 def upsert_corpus(corpus: list[dict]):
-    """Embed the corpus entries and upsert them into ChromaDB.
+    """Embed the corpus entries and upsert them into the vector store (LanceDB or ChromaDB).
 
     Entries arrive already chunked (ingest_v2). A text entry is embedded here
     from its ``embed_text``; a ``figure_image`` entry already carries its image
@@ -289,8 +358,8 @@ def upsert_corpus(corpus: list[dict]):
 
     t0 = time.perf_counter()
     embeddings = get_embeddings()
-    chroma_client = open_store()
-    collection = chroma_client.get_or_create_collection(
+    store_client = open_store()
+    collection = store_client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine", **embedder_record(embeddings)},
     )
@@ -315,19 +384,32 @@ def upsert_corpus(corpus: list[dict]):
     # and a global key silently dropped the second paper's copy, leaving that
     # passage attributed to whichever paper was ingested first. Within one
     # document a repeat is still a duplicate and is still skipped.
-    existing_chunks = set()
-    limit, offset = 5000, 0
-    while True:
-        batch = collection.get(
-            include=["documents", "metadatas"], limit=limit, offset=offset
-        )
-        if not batch or not batch["documents"]:
-            break
-        for stored, meta in zip(batch["documents"], batch["metadatas"] or []):
-            existing_chunks.add(((meta or {}).get("document"), stored))
-        offset += limit
+    from research_assistant.shared.lance_store import compute_chunk_id
 
-    current_index = get_max_chunk_index(collection)
+    is_lance = getattr(collection, "is_lancedb", False)
+    existing_chunks = set()
+    incoming_docs = {entry["document"] for entry in total_corpus if entry.get("document")}
+    if incoming_docs:
+        doc_list = sorted(incoming_docs)
+        # Targeted per-document deduplication checks instead of O(N) full-table RAM scan
+        batch_size = 50
+        for i in range(0, len(doc_list), batch_size):
+            sub_docs = doc_list[i : i + batch_size]
+            try:
+                where_clause = {"document": {"$in": sub_docs}} if len(sub_docs) > 1 else {"document": sub_docs[0]}
+                batch = collection.get(
+                    where=where_clause,
+                    include=["documents", "metadatas"],
+                )
+                if batch and batch.get("documents"):
+                    for stored, meta in zip(batch["documents"], batch.get("metadatas") or []):
+                        doc_name = (meta or {}).get("document")
+                        if doc_name in incoming_docs:
+                            existing_chunks.add((doc_name, stored))
+            except Exception as exc:
+                logger.warning("Targeted deduplication check error: %s", exc)
+
+    current_index = get_max_chunk_index(collection) if not is_lance else 0
     documents, embed_texts, metadatas, ids, seen = [], [], [], [], set()
     precomputed = []                    # per entry: a ready vector (figure images) or None
 
@@ -359,18 +441,23 @@ def upsert_corpus(corpus: list[dict]):
         embed_texts.append((entry.get("embed_text") or content)[:EMBED_MAX_CHARS])
         precomputed.append(entry.get("embedding"))
         metadatas.append(meta)
-        ids.append(f"chunk_{current_index}")
-        current_index += 1
+        if is_lance:
+            seq = int(meta.get("seq", 0))
+            ids.append(compute_chunk_id(entry["document"], stored_form, seq, content))
+        else:
+            ids.append(f"chunk_{current_index}")
+            current_index += 1
 
     if documents:
-        logger.info("Embedding and ingesting %d chunks…", len(documents))
+        db_name = "LanceDB" if is_lance else "ChromaDB"
+        logger.info("Embedding and ingesting %d chunks into %s…", len(documents), db_name)
         pipeline_status.update_progress(
             item_current=0,
             item_total=len(documents),
-            current_item_name="ChromaDB Vectors",
+            current_item_name=f"{db_name} Vectors",
             detail=f"Embedding {len(documents)} chunks",
         )
-        pipeline_status.add_event(f"🧠 Embedding {len(documents)} chunks into ChromaDB…")
+        pipeline_status.add_event(f"🧠 Embedding {len(documents)} chunks into {db_name}…")
         embed_t0 = time.perf_counter()
         for i in range(0, len(documents), EMBED_BATCH_SIZE):
             if pipeline_status.is_cancel_requested():
@@ -397,9 +484,14 @@ def upsert_corpus(corpus: list[dict]):
         embed_elapsed = time.perf_counter() - embed_t0
         pipeline_status.add_event(f"✅ Embedded and indexed {len(documents)} chunks")
         logger.info(
-            "✓ Ingested %d chunks into ChromaDB in %.1fs (embed: %.1fs, total: %.1fs)",
-            len(documents), elapsed, embed_elapsed, elapsed,
+            "✓ Ingested %d chunks into %s in %.1fs (embed: %.1fs, total: %.1fs)",
+            len(documents), db_name, elapsed, embed_elapsed, elapsed,
         )
+        if hasattr(collection, "optimize"):
+            try:
+                collection.optimize()
+            except Exception as exc:
+                logger.warning("Post-ingest collection optimization skipped: %s", exc)
     else:
         logger.info("No new chunks to insert (all duplicates or empty).")
 
@@ -409,7 +501,14 @@ def upsert_corpus(corpus: list[dict]):
     except Exception as e:
         logger.error("Summary index update failed: %s", e)
         pipeline_status.add_event(f"⚠️ Summary index update failed: {e}")
-        last_summary_run.update(failed=max(last_summary_run["failed"], 1), error=str(e))
+        failed_doc_ids = set(last_summary_run.get("failed_docs", []))
+        if per_doc_text:
+            failed_doc_ids.update(per_doc_text.keys())
+        last_summary_run.update(
+            failed=max(last_summary_run.get("failed", 0), len(failed_doc_ids), 1),
+            error=str(e),
+            failed_docs=list(failed_doc_ids),
+        )
 
     return len(documents)
 
@@ -457,8 +556,8 @@ def rebuild_bm25():
         detail="Rebuilding BM25 keyword index…",
     )
     pipeline_status.add_event("📚 Rebuilding BM25 index…")
-    chroma_client = open_store()
-    collection = chroma_client.get_collection(name=COLLECTION_NAME)
+    store_client = open_store()
+    collection = store_client.get_collection(name=COLLECTION_NAME)
 
     if getattr(collection, "is_lancedb", False):
         logger.info("LanceDB active; refreshing Tantivy FTS index…")
@@ -583,8 +682,17 @@ def _ingest_pdfs_locked(
 
     candidates = {}
     for path, label in pdfs.items():
-        if os.path.exists(path):
-            candidates[path] = label
+        resolved_path = path
+        if not os.path.exists(resolved_path):
+            cand = os.path.join(PULLED_PDFS_DIR, os.path.basename(path))
+            if os.path.exists(cand):
+                resolved_path = cand
+            else:
+                raw_cand = os.path.join(RAW_DIR, os.path.basename(path))
+                if os.path.exists(raw_cand):
+                    resolved_path = raw_cand
+        if os.path.exists(resolved_path):
+            candidates[resolved_path] = label
         else:
             logger.warning("%sFile not found, skipping: %s", log_prefix, path)
             result["failed"].append(path)
@@ -738,7 +846,7 @@ def _ingest_pdfs_locked(
             )
 
         if corpus:
-            last_summary_run.update(attempted=0, made=0, failed=0, error="")
+            last_summary_run.update(attempted=0, made=0, failed=0, error="", failed_docs=[])
             result["inserted"] = upsert_corpus(corpus)
             result["summaries"] = dict(last_summary_run)
             logger.info("%sInserted %d new chunk(s).", log_prefix, result["inserted"])
@@ -752,11 +860,25 @@ def _ingest_pdfs_locked(
         # on is also in candidates, and marking it too would hide the crash: only
         # --force (which reprocesses everything) would ever recover it.
         failed_paths = set(result["failed"])
+        failed_summary_docs = set(last_summary_run.get("failed_docs", []))
+        if last_summary_run.get("failed", 0) > 0 and not failed_summary_docs:
+            failed_summary_docs = {entry.get("document") for entry in corpus if entry.get("document")}
+        if failed_summary_docs:
+            logger.warning("Excluding %d paper(s) from manifest because summary generation failed or was cancelled.", len(failed_summary_docs))
         if pipeline_status.is_cancel_requested():
             docs_in_corpus = {entry.get("document") for entry in corpus if entry.get("document")}
-            marked = [path for path in candidates if path not in failed_paths and pdf_key(path) in docs_in_corpus]
+            marked = [
+                path for path in candidates
+                if path not in failed_paths
+                and pdf_key(path) in docs_in_corpus
+                and pdf_key(path) not in failed_summary_docs
+            ]
         else:
-            marked = [path for path in candidates if path not in failed_paths]
+            marked = [
+                path for path in candidates
+                if path not in failed_paths
+                and pdf_key(path) not in failed_summary_docs
+            ]
         if marked:
             manifest.add_many(pdf_key(path) for path in marked)
 
@@ -768,6 +890,14 @@ def _ingest_pdfs_locked(
         # the index must also exist for search to work at all.
         if rebuild_index and (result["inserted"] or not os.path.exists(BM25_INDEX_PATH)):
             rebuild_bm25()
+
+        try:
+            store_client = open_store()
+            col = store_client.get_collection(COLLECTION_NAME)
+            if hasattr(col, "optimize"):
+                col.optimize()
+        except Exception as exc:
+            logger.debug("Post-batch optimization notice: %s", exc)
 
         pipeline_status.add_event(
             f"✅ Ingested {result['processed']} PDFs ({result['inserted']} chunks)"
@@ -808,3 +938,8 @@ def _ingest_pdfs_locked(
                     detail=f"Ingestion failed: {detail_str}",
                 )
         raise
+
+
+# Backward compatibility alias
+extract_pdf = process_pdf
+

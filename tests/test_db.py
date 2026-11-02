@@ -42,6 +42,8 @@ class LoadTestCase(unittest.TestCase):
         )
         p = patch.dict(sys.modules, {"chromadb": chroma}); p.start(); self.addCleanup(p.stop)
         p = patch.object(db, "BM25_INDEX_PATH", self.pkl); p.start(); self.addCleanup(p.stop)
+        p = patch.object(db, "USE_LANCEDB", False); p.start(); self.addCleanup(p.stop)
+        p = patch.object(db, "CHROMA_SERVER", ""); p.start(); self.addCleanup(p.stop)
 
     def test_legacy_bare_pickle_is_tagged_v1(self):
         with open(self.pkl, "wb") as f:
@@ -101,6 +103,11 @@ class OpenStoreTestCase(unittest.TestCase):
     writes and 17,201 vectors were lost. A Chroma server owns the store; the files are opened
     directly only for tests, scratch trials and offline repair."""
 
+    def setUp(self):
+        p = patch.object(db, "USE_LANCEDB", False)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _chroma(self, heartbeat=lambda: 1):
         calls = []
         chroma = types.ModuleType("chromadb")
@@ -113,6 +120,21 @@ class OpenStoreTestCase(unittest.TestCase):
         chroma.PersistentClient = lambda path: calls.append(("persistent", path)) or "local"
         p = patch.dict(sys.modules, {"chromadb": chroma}); p.start(); self.addCleanup(p.stop)
         return calls
+
+    def test_lancedb_is_preferred_when_enabled(self):
+        with patch.object(db, "USE_LANCEDB", True), patch.object(db, "lancedb", object()):
+            with patch.object(db, "open_lance_store", return_value="lance_client") as mock_lance:
+                client = db.open_store()
+                self.assertEqual(client, "lance_client")
+                mock_lance.assert_called_once()
+
+    def test_lancedb_failure_falls_back_to_chroma(self):
+        calls = self._chroma()
+        with patch.object(db, "USE_LANCEDB", True), patch.object(db, "lancedb", object()):
+            with patch.object(db, "open_lance_store", side_effect=RuntimeError("lance down")):
+                with patch.object(db, "CHROMA_SERVER", ""):
+                    client = db.open_store()
+                    self.assertEqual(client, "local")
 
     def test_a_configured_server_is_used_over_http(self):
         calls = self._chroma()

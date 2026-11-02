@@ -28,14 +28,26 @@ logger = get_logger("manifest")
 MANIFEST_PATH = INGESTED_MANIFEST_PATH
 
 
+def _get_path() -> str:
+    import sys
+    mod = sys.modules.get("research_assistant.shared.manifest") or sys.modules.get(__name__)
+    if mod:
+        if hasattr(mod, "INGESTED_MANIFEST_PATH") and mod.INGESTED_MANIFEST_PATH != INGESTED_MANIFEST_PATH:
+            return mod.INGESTED_MANIFEST_PATH
+        if hasattr(mod, "MANIFEST_PATH") and mod.MANIFEST_PATH:
+            return mod.MANIFEST_PATH
+    return globals().get("MANIFEST_PATH", INGESTED_MANIFEST_PATH)
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def load() -> dict[str, str]:
     """Return ``{pdf_key: iso8601}``. Unreadable or absent means empty."""
+    path = _get_path()
     try:
-        with open(MANIFEST_PATH, "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         return {}
@@ -44,25 +56,30 @@ def load() -> dict[str, str]:
             "Ingestion manifest at %s is unreadable (%s) — treating as empty. "
             "Already-ingested PDFs may be re-parsed; rebuild_from_collection() "
             "recovers it from the vector store.",
-            MANIFEST_PATH, exc,
+            path, exc,
         )
         return {}
 
     if not isinstance(data, dict):
         logger.warning(
             "Ingestion manifest at %s is a %s, expected an object — treating as "
-            "empty.", MANIFEST_PATH, type(data).__name__,
+            "empty.", path, type(data).__name__,
         )
         return {}
     return data
 
 
 def _write(data: dict[str, str]) -> None:
-    atomic_write_json(MANIFEST_PATH, data, sort_keys=True)
+    atomic_write_json(_get_path(), data, sort_keys=True)
 
 
 def contains(pdf_key: str) -> bool:
     return pdf_key in load()
+
+
+def clear() -> None:
+    """Clear all records from the manifest."""
+    _write({})
 
 
 def add(pdf_key: str) -> None:
