@@ -13,6 +13,7 @@ from research_assistant.config import (
     OPENALEX_URL,
     TRANSFER_PRIOR_ART_DONE,
     TRANSFER_PRIOR_ART_PARTIAL,
+    USER_AGENT,
 )
 from research_assistant.transfer.models import PriorArt
 
@@ -101,14 +102,14 @@ def parse_arxiv(xml_text: str) -> list[dict]:
 
 def default_get_json(url: str, params: dict) -> dict:
     import requests
-    resp = requests.get(url, params=params, timeout=20)
+    resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
     resp.raise_for_status()
     return resp.json()
 
 
 def default_get_text(url: str, params: dict) -> str:
     import requests
-    resp = requests.get(url, params=params, timeout=20)
+    resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
     resp.raise_for_status()
     return resp.text
 

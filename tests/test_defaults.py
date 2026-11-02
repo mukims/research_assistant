@@ -9,6 +9,8 @@ Crossref, OpenAlex and Unpaywall. These tests hold the line.
 import glob
 import os
 import re
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -56,18 +58,45 @@ class TestDefaults(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
+    def _user_agent_in_fresh_interpreter(self, email):
+        # USER_AGENT is computed at import; reloading config in-process would leak
+        # constants into other modules, so ask a subprocess with no .env.
+        env = {**os.environ, "CITATION_DISABLE_DOTENV": "1"}
+        env.pop("UNPAYWALL_EMAIL", None)
+        if email is not None:
+            env["UNPAYWALL_EMAIL"] = email
+        out = subprocess.run(
+            [sys.executable, "-c", "from research_assistant import config; print(config.USER_AGENT)"],
+            env=env, cwd=str(ROOT), capture_output=True, text=True, timeout=120, check=True,
+        )
+        return out.stdout.strip()
+
     def test_user_agent_carries_the_contact_only_when_set(self):
-        self.assertTrue(config.USER_AGENT.startswith("research_assistant/0.2 (+"))
-        if config.UNPAYWALL_EMAIL is None:
-            self.assertNotIn("mailto", config.USER_AGENT)
-        else:
-            self.assertTrue(config.USER_AGENT.endswith(f"; mailto:{config.UNPAYWALL_EMAIL}"))
+        base = "research_assistant/0.2 (+https://github.com/mukims/research_assistant"
+        self.assertEqual(self._user_agent_in_fresh_interpreter(None), base + ")")
+        self.assertEqual(
+            self._user_agent_in_fresh_interpreter("you@example.org"),
+            base + "; mailto:you@example.org)",
+        )
 
     def test_every_module_sends_the_one_user_agent(self):
         from research_assistant.shared import academic_apis, fetch
 
         self.assertEqual(fetch.HEADERS["User-Agent"], config.USER_AGENT)
         self.assertEqual(academic_apis.DEFAULT_HEADERS["User-Agent"], config.USER_AGENT)
+
+    def test_prior_art_requests_send_the_one_user_agent(self):
+        from research_assistant.transfer import prior_art
+
+        response = MagicMock()
+        response.json.return_value = {}
+        response.text = ""
+        with patch("requests.get", return_value=response) as get:
+            prior_art.default_get_json("https://api.openalex.org/works", {})
+            prior_art.default_get_text("https://export.arxiv.org/api/query", {})
+        self.assertEqual(get.call_count, 2)
+        for call in get.call_args_list:
+            self.assertEqual(call.kwargs["headers"], {"User-Agent": config.USER_AGENT})
 
     def test_unset_contact_skips_unpaywall(self):
         from research_assistant.agents import agent2_fetcher

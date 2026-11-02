@@ -416,9 +416,11 @@ DEFAULT_WORKERS          = 1
 PROJECT_URL       = "https://github.com/mukims/research_assistant"
 UNPAYWALL_EMAIL   = os.environ.get("UNPAYWALL_EMAIL") or None
 # What every outbound scholarly-API request identifies itself as.
-USER_AGENT        = f"research_assistant/0.2 (+{PROJECT_URL})" + (
+# The contact goes inside the parentheses: the convention Crossref and OpenAlex
+# read their polite-pool address from.
+USER_AGENT        = "research_assistant/0.2 (+" + PROJECT_URL + (
     f"; mailto:{UNPAYWALL_EMAIL}" if UNPAYWALL_EMAIL else ""
-)
+) + ")"
 
 # ─── Agent 0 — Discoverer ────────────────────────────────────────────────────
 # Agent 0 searches a scholarly index whose results come back ranked by
