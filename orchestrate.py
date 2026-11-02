@@ -45,6 +45,7 @@ from langgraph.graph import START, END, StateGraph
 from research_assistant.agents import (
     agent0_discoverer, agent1_extractor, agent2_fetcher, agent3_ingestor,
 )
+from research_assistant import config
 from research_assistant.config import GROBID_SERVER
 from research_assistant.shared.ingestion import ingest_pdfs
 from research_assistant.shared.log import get_logger

@@ -46,10 +46,11 @@ class JobBusy(RuntimeError):
 
 
 class Job:
-    def __init__(self, job_id: str, label: str, origin: str):
+    def __init__(self, job_id: str, label: str, origin: str, metadata: Optional[dict] = None):
         self.job_id = job_id
         self.label = label
         self.origin = origin
+        self.metadata = metadata or {}
         self.state = "running"          # running | done | failed | cancelled
         self.started_at = _now()
         self.finished_at: Optional[str] = None
@@ -63,6 +64,7 @@ class Job:
             "job_id": self.job_id, "label": self.label, "origin": self.origin,
             "state": self.state, "started_at": self.started_at,
             "finished_at": self.finished_at, "error": self.error,
+            "metadata": self.metadata,
         }
 
 
@@ -89,7 +91,29 @@ def active_job() -> Optional[Job]:
     return None
 
 
-def start_job(job_id: str, label: str, runner: Callable, origin: str = "audit") -> Job:
+def cancel_job(job_id: str, reason: str = "User cancelled job") -> None:
+    """Request cancellation of job_id and mark the in-memory job cancelled."""
+    pipeline_status.request_cancel(reason=reason, job_id=job_id)
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job and job.state == "running":
+            job.state = "cancelled"
+            job.error = reason
+
+
+def remove_job(job_id: str) -> None:
+    """Remove a job from the in-memory registry."""
+    with _LOCK:
+        _JOBS.pop(job_id, None)
+
+
+def start_job(
+    job_id: str,
+    label: str,
+    runner: Callable,
+    origin: str = "audit",
+    metadata: Optional[dict] = None,
+) -> Job:
     """Run *runner* in a daemon thread and register it under *job_id*.
 
     *runner* is called with no arguments, or with ``on_snapshot`` if it
@@ -106,29 +130,45 @@ def start_job(job_id: str, label: str, runner: Callable, origin: str = "audit") 
         for other in _JOBS.values():
             if other.state == "running":
                 raise JobBusy(other)
-        job = Job(job_id, label, origin)
+        job = Job(job_id, label, origin, metadata=metadata)
         _JOBS[job_id] = job
 
     def _run():
         with pipeline_status.job_status_context(job_id):
             try:
+                if pipeline_status.is_cancel_requested(job_id):
+                    raise pipeline_status.PipelineCancelledError(f"Run {job_id} cancelled before execution")
                 final = _call_runner(runner, job)
+                if pipeline_status.is_cancel_requested(job_id):
+                    raise pipeline_status.PipelineCancelledError(f"Run {job_id} cancelled during execution")
                 job.result = final if isinstance(final, dict) else {}
                 try:
-                    save_run(job_id, job.result, label=label, origin=origin)
+                    save_run(job_id, job.result, label=label, origin=origin, metadata=job.metadata, state="done")
                 except Exception as exc:  # the run succeeded; only its record failed
                     logger.warning("Could not save run %s: %s", job_id, exc)
                 # State flips last: a reader that sees "done" may rely on the
                 # record being on disk already.
                 job.state = "done"
             except BaseException as exc:  # noqa: BLE001 — a thread must never die silently
-                if pipeline_status.is_cancellation(exc):
+                if pipeline_status.is_cancellation(exc) or pipeline_status.is_cancel_requested(job_id):
                     job.state = "cancelled"
                     job.error = pipeline_status.format_exception_detail(exc)
                 else:
                     job.state = "failed"
                     job.error = pipeline_status.format_exception_detail(exc)
                     logger.error("Run %s failed: %s\n%s", job_id, job.error, traceback.format_exc())
+                try:
+                    save_run(
+                        job_id,
+                        job.snapshot or {"stopped": job.error},
+                        label=label,
+                        origin=origin,
+                        metadata=job.metadata,
+                        state=job.state,
+                        error=job.error,
+                    )
+                except Exception as save_err:
+                    logger.warning("Could not save interrupted run %s: %s", job_id, save_err)
             finally:
                 job.finished_at = _now()
 
@@ -165,7 +205,15 @@ def run_path(job_id: str) -> str:
     return os.path.join(runs_dir(), f"{job_id}.json")
 
 
-def save_run(job_id: str, final: dict, label: str, origin: str) -> str:
+def save_run(
+    job_id: str,
+    final: dict,
+    label: str,
+    origin: str,
+    metadata: Optional[dict] = None,
+    state: str = "done",
+    error: Optional[str] = None,
+) -> str:
     """The run's final state, JSON-safe: anything json can't take is stored
     as its str(), because losing one odd value must not lose the run."""
     os.makedirs(runs_dir(), exist_ok=True)
@@ -173,6 +221,9 @@ def save_run(job_id: str, final: dict, label: str, origin: str) -> str:
         "job_id": job_id,
         "label": label,
         "origin": origin,
+        "state": state,
+        "error": error,
+        "metadata": metadata or {},
         "saved_at": _now(),
         "seed_name": os.path.basename(final.get("seed_path") or "") if isinstance(final, dict) else "",
         "final": final,

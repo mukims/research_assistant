@@ -160,6 +160,7 @@ def register_progress_callback(
             if hasattr(_local, "callbacks") and cb in _local.callbacks:
                 _local.callbacks.remove(cb)
 
+        unregister._cb = cb
         return unregister
     else:
         with _global_callbacks_lock:
@@ -170,7 +171,66 @@ def register_progress_callback(
                 if cb in _global_callbacks:
                     _global_callbacks.remove(cb)
 
+        unregister._cb = cb
         return unregister
+
+
+def unregister_progress_callback(callback: Any) -> None:
+    """Safely unregister a progress callback.
+
+    Accepts either the original callback function or the unregister closure
+    returned by register_progress_callback. Thread-safe and tolerant to
+    already-unregistered callbacks.
+    """
+    if callback is None:
+        return
+
+    # 1. If callback is the unregister closure returned by register_progress_callback
+    if callable(callback) and getattr(callback, "__name__", "") == "unregister":
+        try:
+            callback()
+            return
+        except Exception:
+            pass
+
+    # Target callback to remove (either callback directly or callback._cb)
+    target = getattr(callback, "_cb", callback)
+
+    # 2. Check and remove from thread-local callbacks
+    if hasattr(_local, "callbacks") and isinstance(_local.callbacks, list):
+        while target in _local.callbacks:
+            try:
+                _local.callbacks.remove(target)
+            except ValueError:
+                break
+        while callback in _local.callbacks:
+            try:
+                _local.callbacks.remove(callback)
+            except ValueError:
+                break
+
+    # 3. Check and remove from global callbacks
+    with _global_callbacks_lock:
+        while target in _global_callbacks:
+            try:
+                _global_callbacks.remove(target)
+            except ValueError:
+                break
+        while callback in _global_callbacks:
+            try:
+                _global_callbacks.remove(callback)
+            except ValueError:
+                break
+
+    # 4. If callback is any zero-argument callable, invoke it as final fallback
+    if callable(callback):
+        try:
+            import inspect
+            sig = inspect.signature(callback)
+            if len(sig.parameters) == 0:
+                callback()
+        except Exception:
+            pass
 
 
 def _notify_callbacks(status: dict[str, Any]) -> None:
@@ -374,9 +434,9 @@ def _is_pid_running(pid: Any) -> bool:
         return False
 
 
-def _load_status_from_disk() -> dict[str, Any]:
+def _load_status_from_disk(custom_path: Optional[str] = None) -> dict[str, Any]:
     """Read the status file from disk without applying stale resolution."""
-    path = get_status_path()
+    path = custom_path or get_status_path()
     if not os.path.exists(path):
         res = dict(DEFAULT_STATUS)
         res["recent_events"] = []
@@ -401,19 +461,46 @@ def _load_status_from_disk() -> dict[str, Any]:
         return res
 
 
-def _persist_status_locked(status: dict[str, Any]) -> None:
+def _persist_status_locked(status: dict[str, Any], allow_clear_cancel: bool = False) -> None:
     """Write status atomically. Must be called while holding _status_lock or atomic."""
     path = get_status_path()
-    atomic_write_json(path, status, ensure_ascii=False, default=str)
 
-    # If writing to a job-scoped status file, also update global aggregate ledger
+    # Prevent in-flight progress ticks from overwriting cancel_requested: True with False
+    if not allow_clear_cancel and not status.get("cancel_requested", False) and os.path.exists(path):
+        try:
+            disk_prev = _load_status_from_disk(path)
+            if disk_prev.get("cancel_requested", False):
+                status["cancel_requested"] = True
+                status["active"] = False
+        except Exception:
+            pass
+
     active_job = getattr(_local, "current_job_id", None)
-    if active_job and STATUS_PATH_OVERRIDE is None:
+    global_path = None
+    if STATUS_PATH_OVERRIDE is None:
         try:
             from research_assistant import config
             global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(config.DATA_DIR, "pipeline_status.json"))
+            if not allow_clear_cancel and not status.get("cancel_requested", False) and global_path != path and os.path.exists(global_path):
+                global_prev = _load_status_from_disk(global_path)
+                if global_prev.get("cancel_requested", False):
+                    status["cancel_requested"] = True
+                    status["active"] = False
+        except Exception:
+            pass
+
+    atomic_write_json(path, status, ensure_ascii=False, default=str)
+
+    # If writing to a job-scoped status file, also update global aggregate ledger
+    if active_job and STATUS_PATH_OVERRIDE is None and global_path:
+        try:
             summary_status = dict(status)
             summary_status["current_job_id"] = active_job
+            if not allow_clear_cancel and not summary_status.get("cancel_requested", False) and os.path.exists(global_path):
+                global_prev = _load_status_from_disk(global_path)
+                if global_prev.get("cancel_requested", False):
+                    summary_status["cancel_requested"] = True
+                    summary_status["active"] = False
             atomic_write_json(global_path, summary_status, ensure_ascii=False, default=str)
         except Exception as exc:
             logger.debug("Failed updating global summary ledger from job status: %s", exc)
@@ -504,10 +591,32 @@ def set_status(**kwargs) -> dict[str, Any]:
     with _status_lock():
         status = _load_status_from_disk()
         was_active = status.get("active", False)
+        was_cancel_requested = status.get("cancel_requested", False)
+        allow_clear_cancel = bool(kwargs.pop("allow_clear_cancel", False))
         now_active = kwargs.get("active", was_active)
+
+        step_arg = kwargs.get("current_step")
+        item_current = kwargs.get("item_current")
+        item_total = kwargs.get("item_total")
+        is_clean_pipeline_start = (
+            now_active
+            and not was_active
+            and kwargs.get("stage") == "discover"
+            and (step_arg is None or step_arg <= 1)
+            and (item_current is None or item_current == 0)
+            and (item_total is None or item_total == 0)
+        )
+        can_clear_cancel = allow_clear_cancel or (kwargs.get("cancel_requested") is False) or is_clean_pipeline_start
 
         for k, v in kwargs.items():
             status[k] = v
+
+        if was_cancel_requested and not can_clear_cancel:
+            status["cancel_requested"] = True
+            status["active"] = False
+            now_active = False
+        elif can_clear_cancel:
+            status["cancel_requested"] = False
 
         if now_active and not was_active:
             # Fresh start: record new started_at unless caller explicitly provided one
@@ -515,8 +624,6 @@ def set_status(**kwargs) -> dict[str, Any]:
                 status["started_at"] = _now_iso()
             if "pid" not in kwargs:
                 status["pid"] = os.getpid()
-            if "cancel_requested" not in kwargs:
-                status["cancel_requested"] = False
         elif now_active:
             if not status.get("started_at"):
                 status["started_at"] = kwargs.get("started_at") or _now_iso()
@@ -563,7 +670,7 @@ def set_status(**kwargs) -> dict[str, Any]:
         if "updated_at" not in kwargs:
             status["updated_at"] = _now_iso()
 
-        _persist_status_locked(status)
+        _persist_status_locked(status, allow_clear_cancel=can_clear_cancel)
         result = dict(status)
 
     _notify_callbacks(result)
@@ -619,20 +726,75 @@ def clear_status(keep_events: bool = True) -> dict[str, Any]:
         reset["last_summary"] = last_summary
         reset["updated_at"] = _now_iso()
 
-        _persist_status_locked(reset)
+        _persist_status_locked(reset, allow_clear_cancel=True)
         result = dict(reset)
     _notify_callbacks(result)
     return result
 
 
-def request_cancel(reason: str = "User requested stop via UI") -> dict[str, Any]:
-    """Flag pipeline cancellation and immediately transition to stopping/idle state."""
+def request_cancel(
+    reason: Optional[str] = None,
+    job_id: Optional[str] = None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Flag pipeline cancellation and immediately transition to stopping/idle state.
+    Writes cancel_requested: True to both data/pipeline_status.json and
+    job-specific data/jobs/<job_id>/status.json if job_id is provided or active.
+    """
+    if reason is None:
+        reason = "User requested stop via UI"
+
+    target_jobs = set()
+    if job_id:
+        target_jobs.add(job_id)
+    cur_job = getattr(_local, "current_job_id", None)
+    if cur_job:
+        target_jobs.add(cur_job)
+
+    # Also discover any active current_job_id from the global status file
+    try:
+        from research_assistant import config
+        global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(getattr(config, "DATA_DIR", "data"), "pipeline_status.json"))
+        if os.path.exists(global_path):
+            g_st = _load_status_from_disk(global_path)
+            if g_st.get("current_job_id"):
+                target_jobs.add(g_st["current_job_id"])
+    except Exception:
+        pass
+
+    # Update job-specific ledger files
+    for j_id in target_jobs:
+        try:
+            j_path = get_job_status_path(j_id)
+            with _status_lock(j_path + ".lock"):
+                j_status = _load_status_from_disk(j_path)
+                j_status["cancel_requested"] = True
+                j_status["active"] = False
+                j_status["stage"] = "idle"
+                j_status["stage_label"] = "Idle"
+                j_status["current_step"] = 0
+                j_status["item_current"] = 0
+                j_status["item_total"] = 0
+                j_status["detail"] = f"Stopped: {reason}"
+                j_status["pid"] = None
+                events = list(j_status.get("recent_events", []))
+                events.append(f"⏹️ Pipeline stopped by user via UI ({reason})")
+                j_status["recent_events"] = events[-MAX_RECENT_EVENTS:]
+                j_status["updated_at"] = _now_iso()
+                atomic_write_json(j_path, j_status, ensure_ascii=False, default=str)
+        except Exception as e:
+            logger.warning("Failed writing cancel to job status %s: %s", j_id, e)
+
+    # Update global aggregate file (or current status path)
     with _status_lock():
         status = _load_status_from_disk()
         status["cancel_requested"] = True
         status["active"] = False
         status["stage"] = "idle"
         status["stage_label"] = "Idle"
+        status["current_step"] = 0
+        status["item_current"] = 0
+        status["item_total"] = 0
         status["detail"] = f"Stopped: {reason}"
         status["pid"] = None
         events = list(status.get("recent_events", []))
@@ -641,25 +803,101 @@ def request_cancel(reason: str = "User requested stop via UI") -> dict[str, Any]
         status["updated_at"] = _now_iso()
         _persist_status_locked(status)
         result = dict(status)
+
     _notify_callbacks(result)
     logger.info("Pipeline cancellation requested: %s", reason)
     return result
 
 
-def is_cancel_requested() -> bool:
-    """Return True if pipeline cancellation was requested."""
+def is_cancel_requested(job_id: Optional[str] = None) -> bool:
+    """Return True if pipeline cancellation was requested for specified job or globally."""
+    # 1. If explicit job_id provided, check job status
+    if job_id:
+        try:
+            j_path = get_job_status_path(job_id)
+            if os.path.exists(j_path):
+                j_st = _load_status_from_disk(j_path)
+                if j_st.get("cancel_requested"):
+                    return True
+        except Exception:
+            pass
+
+    # 2. Check thread-local active job if set
+    active_job = getattr(_local, "current_job_id", None)
+    if active_job and active_job != job_id:
+        try:
+            j_path = get_job_status_path(active_job)
+            if os.path.exists(j_path):
+                j_st = _load_status_from_disk(j_path)
+                if j_st.get("cancel_requested"):
+                    return True
+        except Exception:
+            pass
+
+    # 3. Check current status path
     status = _load_status_from_disk()
-    return bool(status.get("cancel_requested", False))
+    if status.get("cancel_requested"):
+        return True
+
+    # 4. If currently on a job-specific path, also check global status
+    if active_job or job_id:
+        try:
+            from research_assistant import config
+            global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(getattr(config, "DATA_DIR", "data"), "pipeline_status.json"))
+            if os.path.exists(global_path):
+                g_st = _load_status_from_disk(global_path)
+                if g_st.get("cancel_requested"):
+                    return True
+        except Exception:
+            pass
+
+    return False
 
 
-def clear_cancel_request() -> None:
-    """Clear the cancellation flag."""
+def clear_cancel_request(job_id: Optional[str] = None) -> None:
+    """Clear the cancellation flag on active/global and optional job-scoped status."""
+    target_jobs = set()
+    if job_id:
+        target_jobs.add(job_id)
+    cur_job = getattr(_local, "current_job_id", None)
+    if cur_job:
+        target_jobs.add(cur_job)
+
+    # 1. Clear on all targeted job status ledgers
+    for j_id in target_jobs:
+        try:
+            j_path = get_job_status_path(j_id)
+            if os.path.exists(j_path):
+                with _status_lock(j_path + ".lock"):
+                    j_st = _load_status_from_disk(j_path)
+                    if j_st.get("cancel_requested"):
+                        j_st["cancel_requested"] = False
+                        j_st["updated_at"] = _now_iso()
+                        atomic_write_json(j_path, j_st, ensure_ascii=False, default=str)
+        except Exception as e:
+            logger.warning("Failed clearing cancel on job status %s: %s", j_id, e)
+
+    # 2. Always ensure global pipeline_status.json has cancel_requested = False
+    try:
+        from research_assistant import config
+        global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(getattr(config, "DATA_DIR", "data"), "pipeline_status.json"))
+        if os.path.exists(global_path):
+            with _status_lock(global_path + ".lock"):
+                g_st = _load_status_from_disk(global_path)
+                if g_st.get("cancel_requested"):
+                    g_st["cancel_requested"] = False
+                    g_st["updated_at"] = _now_iso()
+                    atomic_write_json(global_path, g_st, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.warning("Failed clearing cancel on global status: %s", e)
+
+    # 3. Also clear on the active status ledger for current context
     with _status_lock():
         status = _load_status_from_disk()
         if status.get("cancel_requested"):
             status["cancel_requested"] = False
             status["updated_at"] = _now_iso()
-            _persist_status_locked(status)
+            _persist_status_locked(status, allow_clear_cancel=True)
             result = dict(status)
             _notify_callbacks(result)
 
