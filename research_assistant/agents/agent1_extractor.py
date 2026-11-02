@@ -27,6 +27,7 @@ Provides:
 
 import copy
 import glob
+import json
 import os
 import re
 import shutil
@@ -109,9 +110,12 @@ def run_grobid_batch(pdf_dir: str, output_dir: str) -> None:
         consolidate_citations=0,
         consolidate_header=True,
         include_raw_citations=True,
-        force=True,
+        force=False,
     )
     logger.info("GROBID batch complete.")
+
+
+extract_tei = run_grobid_batch
 
 
 def _clean(node):
@@ -403,16 +407,32 @@ def _article_from_grobid(pdf_path: str) -> dict | None:
 
 
 # ─── Regex fallback ──────────────────────────────────────────────────────────
-# Ported from citation_builder/agent1_extractor.py's extract_citations, with
-# each citation now producing a Reference instead of a bare string. Weaker
-# than GROBID — a raw string per reference, no structured fields — but it
-# needs no server, which is the whole point: an unreachable GROBID used to
+# Weaker than GROBID — a raw string per reference, no structured fields —
+# but it needs no server, which is the whole point: an unreachable GROBID used to
 # end the pipeline.
+#
+# A naive line-by-line regex without section or sequence tracking fails
+# spectacularly: equations like (1) and floats/axis labels like 0.0 or 7.99
+# get classified as citations, turning entire bodies of prose into hundreds of
+# fake references.
+#
+# Robust extraction:
+# 1. Detect explicit "References" / "Bibliography" section headings if present.
+# 2. Extract strictly ascending sequential citation runs ([1], [2]... or 1., 2....)
+#    to ignore isolated inline mentions, equation numbers, and floats.
+# 3. Stop before appendices / supplementary information blocks.
 
+REF_HEADING_RE = re.compile(
+    r"^(?:[0-9IVX]+\.?\s*)?(?:references|bibliography|literature cited|references and notes)\s*$",
+    re.IGNORECASE,
+)
+SECTION_STOP_RE = re.compile(
+    r"^(?:SI-[IVX0-9]+|Supplementary|Supporting Information|Extended Data|Acknowledgements|Author Contributions|Appendix|Appendices)\b",
+    re.IGNORECASE,
+)
 CITATION_PATTERNS = [
-    re.compile(r'^\[(\d+)\](?:\s*(.*))?$'),    # [1] Author...
-    re.compile(r'^(\d+)\.(?:\s*(.*))?$'),      # 1. Author...
-    re.compile(r'^\((\d+)\)(?:\s*(.*))?$'),    # (1) Author...
+    re.compile(r"^\[(\d{1,4})\](?:\s*(.*))?$"),       # [1] Author...
+    re.compile(r"^(\d{1,4})\.(?:\s+(.*))?$"),         # 1. Author...
 ]
 
 
@@ -460,41 +480,91 @@ def _pdftotext(pdf_path: str) -> str:
 
 
 def _references_from_regex(pdf_path: str) -> list[Reference]:
-    """Reference strings recovered by numbering pattern alone."""
+    """Reference strings recovered by numbering patterns and sequential context."""
     text = _pdftotext(pdf_path)
     if not text.strip():
         return []
 
     source_file = os.path.basename(pdf_path)
-    references, current, seen = [], None, set()
+    lines = [l.strip() for l in text.splitlines()]
 
-    def _flush():
-        if current is None:
-            return
-        joined = " ".join(current).strip()
-        if len(joined) > 20 and joined not in seen:
-            seen.add(joined)
+    # 1. Search for a section heading
+    heading_idx = None
+    for i, line in enumerate(lines):
+        if REF_HEADING_RE.match(line):
+            heading_idx = i
+            break
+
+    search_lines = lines[heading_idx + 1:] if heading_idx is not None else lines
+    best_cits: list[tuple[int, str]] = []
+
+    for pat in CITATION_PATTERNS:
+        matches = []
+        for i, line in enumerate(search_lines):
+            m = pat.match(line)
+            if m:
+                rest = m.group(2) or ""
+                # If dot-pattern with empty rest (e.g. "1." on its own line),
+                # ensure the subsequent line starts with an uppercase author/title letter
+                if pat == CITATION_PATTERNS[1] and not rest:
+                    if i + 1 < len(search_lines) and not re.match(r"^[A-Z]", search_lines[i + 1]):
+                        continue
+                matches.append((int(m.group(1)), i, rest, line))
+
+        # Look for sequential ascending runs starting at 1 (or 2/3 in case 1 was missed)
+        for start_idx, (num, line_i, rest, _) in enumerate(matches):
+            if num in (1, 2, 3):
+                seq = [(num, line_i, rest)]
+                expected = num + 1
+                prev_line_i = line_i
+                for next_num, next_line_i, next_rest, _ in matches[start_idx + 1:]:
+                    # References in a bibliography are close together (e.g. within 30 lines)
+                    if next_line_i - prev_line_i > 30:
+                        break
+                    if next_num == expected:
+                        seq.append((next_num, next_line_i, next_rest))
+                        expected += 1
+                        prev_line_i = next_line_i
+                    elif next_num == expected + 1 and expected > 2:
+                        seq.append((next_num, next_line_i, next_rest))
+                        expected = next_num + 1
+                        prev_line_i = next_line_i
+
+                if len(seq) > len(best_cits):
+                    cits = []
+                    for idx in range(len(seq)):
+                        n, start_l, r = seq[idx]
+                        end_l = (
+                            seq[idx + 1][1]
+                            if idx + 1 < len(seq)
+                            else min(len(search_lines), start_l + 15)
+                        )
+                        collected = [r] if r else []
+                        for l_idx in range(start_l + 1, end_l):
+                            l = search_lines[l_idx]
+                            if not l:
+                                continue
+                            if SECTION_STOP_RE.match(l):
+                                break
+                            collected.append(l)
+                        full_txt = " ".join(collected).strip()
+                        if len(full_txt) >= 10:
+                            cits.append((n, full_txt))
+                    if len(cits) > len(best_cits):
+                        best_cits = cits
+
+    seen = set()
+    references: list[Reference] = []
+    for _, raw_ref in best_cits:
+        if raw_ref not in seen:
+            seen.add(raw_ref)
             references.append(
                 Reference(
-                    raw_reference=joined,
+                    raw_reference=raw_ref,
                     source_file=source_file,
                     extraction_method="regex",
                 )
             )
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        matched = _match_citation_line(line)
-        if matched:
-            _flush()
-            _, rest = matched
-            current = [rest] if rest else []
-        elif current is not None:
-            # Continuation of the reference started on a previous line.
-            current.append(line)
-    _flush()
 
     return references
 

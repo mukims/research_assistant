@@ -96,3 +96,9 @@ def source_key(record, min_doi_confidence=("high", "medium")):
 def is_authoritative(key):
     """True when the key came from a real identifier rather than a derived one."""
     return bool(key) and key.split(":", 1)[0] in ("doi", "arxiv", "pmid")
+
+
+def pdf_key(pdf_path: str) -> str:
+    """Return the normalised document key for pdf_path."""
+    import os
+    return os.path.basename(pdf_path).strip().replace(" ", "_").lower()

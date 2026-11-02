@@ -39,6 +39,12 @@ from research_assistant.shared.source_key import source_key, normalise_doi, is_a
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for
 from research_assistant.shared import pipeline_status
+from research_assistant.shared import academic_apis
+
+
+def fetch_bibliometrics_and_abstract(*args, **kwargs):
+    return academic_apis.fetch_bibliometrics_and_abstract(*args, **kwargs)
+
 
 logger = get_logger("agent2")
 
@@ -124,7 +130,7 @@ def resolve_doi(ref):
     if not query:
         return None, None
 
-    params = {"query.bibliographic": query, "rows": 1, "select": "DOI,title"}
+    params = {"query.bibliographic": query, "rows": 1, "select": "DOI,title,author,issued"}
     if ref.get("authors"):
         params["query.author"] = ref["authors"][0]
 
@@ -141,7 +147,28 @@ def resolve_doi(ref):
     if not items:
         return (doi, "grobid-unverified") if doi else (None, None)
 
-    return normalise_doi(items[0].get("DOI")), "crossref"
+    cand = items[0]
+    cand_titles = cand.get("title", [])
+    cand_title = cand_titles[0] if isinstance(cand_titles, list) and cand_titles else str(cand_titles)
+    cand_authors = cand.get("author", [])
+    cand_author = None
+    if cand_authors and isinstance(cand_authors, list):
+        first_a = cand_authors[0]
+        cand_author = first_a.get("family") or first_a.get("name")
+    issued = cand.get("issued", {}).get("date-parts", [[None]])
+    cand_year = issued[0][0] if issued and issued[0] else None
+
+    target_title = ref.get("title")
+    target_author = ref.get("authors")[0] if ref.get("authors") else None
+    target_year = ref.get("year")
+
+    from research_assistant.shared.academic_apis import verify_candidate_match
+    if target_title:
+        if not verify_candidate_match(target_title, cand_title, target_author, cand_author, target_year, cand_year):
+            logger.info("Crossref candidate '%s' failed similarity check against target '%s'", cand_title[:40], target_title[:40])
+            return (doi, "grobid-unverified") if doi else (None, None)
+
+    return normalise_doi(cand.get("DOI")), "crossref"
 
 
 
@@ -258,17 +285,24 @@ def arxiv_query_title(title) -> str:
 
 
 def try_arxiv(ref, dest_path):
-    """Fall back to arXiv, searching on title where we have one."""
+    """Fall back to arXiv, searching on title or explicit arxiv_id where we have one."""
+    arxiv_id = ref.get("arxiv_id")
     title = arxiv_query_title(ref.get("title"))
     raw = ref.get("raw_reference")
-    if not (title or raw):
+    if not (arxiv_id or title or raw):
         return False, "nothing to search arXiv with"
 
-    query = f'ti:"{title}"' if title else f'all:"{raw[:200]}"'
-    url = (
-        "http://export.arxiv.org/api/query?search_query="
-        f"{urllib.parse.quote(query)}&max_results=1"
-    )
+    if arxiv_id:
+        url = (
+            "http://export.arxiv.org/api/query?id_list="
+            f"{urllib.parse.quote(arxiv_id)}&max_results=1"
+        )
+    else:
+        query = f'ti:"{title}"' if title else f'all:"{raw[:200]}"'
+        url = (
+            "http://export.arxiv.org/api/query?search_query="
+            f"{urllib.parse.quote(query)}&max_results=1"
+        )
 
     try:
         res = requests.get(url, headers=HEADERS, timeout=20)
@@ -282,14 +316,23 @@ def try_arxiv(ref, dest_path):
     if not entries:
         return False, "not found on arXiv"
 
-    # arXiv title search is loose — confirm the result is actually the paper
-    # we asked for before downloading it.
-    if title:
-        found = " ".join((entries[0].findtext("atom:title", "", ns)).split()).lower()
-        wanted = title.lower()
-        overlap = set(re.findall(r"[a-z0-9]+", found)) & set(re.findall(r"[a-z0-9]+", wanted))
-        if len(overlap) < 0.6 * len(set(re.findall(r"[a-z0-9]+", wanted))):
-            return False, "arXiv match was a different paper"
+    # Enforce candidate verification
+    cand_title = " ".join((entries[0].findtext("atom:title", "", ns)).split())
+    cand_authors = [a.findtext("atom:name", "", ns) for a in entries[0].findall("atom:author", ns)]
+    cand_author = cand_authors[0] if cand_authors else None
+    pub = entries[0].findtext("atom:published", "", ns)
+    cand_year = int(pub[:4]) if pub and pub[:4].isdigit() else None
+
+    target_title = ref.get("title")
+    target_author = ref.get("authors")[0] if ref.get("authors") else None
+    target_year = ref.get("year")
+
+    from research_assistant.shared.academic_apis import verify_candidate_match
+    if target_title:
+        if not verify_candidate_match(target_title, cand_title, target_author, cand_author, target_year, cand_year):
+            return False, "arXiv match was a different paper (similarity verification failed)"
+    elif not arxiv_id:
+        return False, "arXiv match lacked title/ID verification"
 
     pdf_link = None
     for link in entries[0].findall("atom:link", ns):
@@ -410,41 +453,70 @@ def fetch_papers():
                 reasons.append(str(exc))
 
             biblio = {}
-            if not saved and not any(_is_retryable(r) for r in reasons):
+            if not saved:
                 try:
-                    from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
                     biblio = fetch_bibliometrics_and_abstract(doi or ref.get("title") or key)
-                    abstract_cand = (biblio.get("abstract") or "").strip()
-                    if len(abstract_cand) >= 50:
-                        downloaded[key] = DownloadedPaper(
-                            key=key,
-                            path=None,
-                            evidence_tier="abstract_only",
-                            abstract=abstract_cand,
-                            is_retracted=bool(biblio.get("is_retracted", False)),
-                            citation_count=biblio.get("citation_count") if biblio.get("citation_count") is not None else 0,
-                            provider="openalex" if biblio.get("doi") else "abstract_only",
-                            fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                            title=ref.get("title") or biblio.get("title") or "",
-                            raw_reference=ref.get("raw_reference") or "",
-                            doi=doi or biblio.get("doi"),
-                            arxiv_id=ref.get("arxiv_id"),
-                            doi_source=how,
-                            authoritative=is_authoritative(key),
-                            cited_by=ref.get("source_file"),
-                            xml_id=ref.get("xml_id"),
-                        ).to_dict()
-                        saved = True
-                        failed.pop(key, None)
-                        logger.info("    saved abstract-only -> %s", label[:50])
-                        pipeline_status.add_event(f"📄 Abstract-only: {label[:50]}")
+                    oa_url = biblio.get("oa_pdf_url")
+                    if oa_url:
+                        logger.info("    attempting direct OA PDF from bibliometrics: %s", oa_url[:60])
+                        ok, reason = download_pdf(oa_url, dest)
+                        if ok:
+                            downloaded[key] = DownloadedPaper(
+                                key=key,
+                                path=dest,
+                                evidence_tier="full_text",
+                                abstract=(biblio.get("abstract") or "").strip(),
+                                is_retracted=bool(biblio.get("is_retracted", False)),
+                                citation_count=biblio.get("citation_count") if biblio.get("citation_count") is not None else 0,
+                                provider="oa_pdf_url",
+                                fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                title=ref.get("title") or biblio.get("title") or "",
+                                raw_reference=ref.get("raw_reference") or "",
+                                doi=doi or biblio.get("doi"),
+                                arxiv_id=ref.get("arxiv_id"),
+                                doi_source=how,
+                                authoritative=is_authoritative(key),
+                                cited_by=ref.get("source_file"),
+                                xml_id=ref.get("xml_id"),
+                            ).to_dict()
+                            saved = True
+                            failed.pop(key, None)
+                            logger.info("    saved full text via OA URL -> %s", label[:50])
+                            pipeline_status.add_event(f"⬇️ Fetched OA PDF: {label[:50]}")
+                        else:
+                            reasons.append(f"oa_pdf_url failed: {reason}")
+
+                    if not saved:
+                        abstract_cand = (biblio.get("abstract") or "").strip()
+                        if len(abstract_cand) >= 50:
+                            downloaded[key] = DownloadedPaper(
+                                key=key,
+                                path=None,
+                                evidence_tier="abstract_only",
+                                abstract=abstract_cand,
+                                is_retracted=bool(biblio.get("is_retracted", False)),
+                                citation_count=biblio.get("citation_count") if biblio.get("citation_count") is not None else 0,
+                                provider="openalex" if biblio.get("doi") else "abstract_only",
+                                fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                title=ref.get("title") or biblio.get("title") or "",
+                                raw_reference=ref.get("raw_reference") or "",
+                                doi=doi or biblio.get("doi"),
+                                arxiv_id=ref.get("arxiv_id"),
+                                doi_source=how,
+                                authoritative=is_authoritative(key),
+                                cited_by=ref.get("source_file"),
+                                xml_id=ref.get("xml_id"),
+                            ).to_dict()
+                            saved = True
+                            failed.pop(key, None)
+                            logger.info("    saved abstract-only -> %s", label[:50])
+                            pipeline_status.add_event(f"📄 Abstract-only: {label[:50]}")
                 except Exception as exc:
                     logger.debug("Abstract fallback check failed for %s: %s", key, exc)
 
             if saved:
                 if key not in downloaded:
                     try:
-                        from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
                         biblio = fetch_bibliometrics_and_abstract(doi or ref.get("title") or key)
                     except Exception:
                         biblio = {}
@@ -499,7 +571,10 @@ def fetch_papers():
                     detail=f"Downloaded {len(downloaded)} / Unavailable {len(failed)}",
                 )
 
-            _checkpoint(downloaded, failed)
+            if i % 5 == 0 or i == len(remaining):
+                _checkpoint(downloaded, failed)
+
+        _checkpoint(downloaded, failed)
 
         if pipeline_status.is_cancel_requested():
             logger.info("Fetch aborted early due to user stop request.")
@@ -521,6 +596,103 @@ def fetch_papers():
             len(manual),
         )
 
+
+
+def backfill_failed_downloads(
+    failed_path: str = FAILED_DOWNLOADS_PATH,
+    downloaded_path: str = DOWNLOADED_JSON_PATH,
+    output_dir: str = PULLED_PDFS_DIR,
+) -> dict[str, int]:
+    """Unblock and backfill failed downloads in failed_downloads.json.
+    Attempts to resolve via direct oa_pdf_url or fall back to abstract_only.
+    """
+    failed = _load_state(failed_path, {})
+    downloaded = _load_state(downloaded_path, {})
+    if not isinstance(failed, dict) or not failed:
+        return {"attempted": 0, "resolved_oa": 0, "resolved_abstract": 0, "remaining_failed": 0}
+
+    from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
+
+    os.makedirs(output_dir, exist_ok=True)
+    resolved_oa = 0
+    resolved_abstract = 0
+    to_check = [
+        (k, rec) for k, rec in list(failed.items())
+        if isinstance(rec, dict) and k not in downloaded and (rec.get("doi") or rec.get("title"))
+    ]
+
+    for k, rec in to_check:
+        doi = rec.get("doi")
+        title = rec.get("title")
+        raw = rec.get("raw_reference") or ""
+        key = rec.get("key") or k
+        dest_path = os.path.join(output_dir, f"{key.replace(':', '_')}.pdf")
+
+        try:
+            biblio = fetch_bibliometrics_and_abstract(doi or title or key)
+            oa_url = biblio.get("oa_pdf_url")
+            saved = False
+            if oa_url:
+                ok, _ = download_pdf(oa_url, dest_path)
+                if ok:
+                    downloaded[key] = DownloadedPaper(
+                        key=key,
+                        path=dest_path,
+                        evidence_tier="full_text",
+                        abstract=(biblio.get("abstract") or "").strip(),
+                        is_retracted=bool(biblio.get("is_retracted", False)),
+                        citation_count=biblio.get("citation_count") or 0,
+                        provider="oa_pdf_url",
+                        fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        title=title or biblio.get("title") or "",
+                        raw_reference=raw,
+                        doi=doi or biblio.get("doi"),
+                        arxiv_id=rec.get("arxiv_id"),
+                        doi_source="oa_backfill",
+                        authoritative=is_authoritative(key),
+                        cited_by=rec.get("cited_by"),
+                        xml_id=rec.get("xml_id"),
+                    ).to_dict()
+                    failed.pop(k, None)
+                    resolved_oa += 1
+                    saved = True
+
+            if not saved:
+                abstract = (biblio.get("abstract") or "").strip()
+                if len(abstract) >= 50:
+                    downloaded[key] = DownloadedPaper(
+                        key=key,
+                        path=None,
+                        evidence_tier="abstract_only",
+                        abstract=abstract,
+                        is_retracted=bool(biblio.get("is_retracted", False)),
+                        citation_count=biblio.get("citation_count") or 0,
+                        provider="openalex" if biblio.get("doi") else "abstract_only",
+                        fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        title=title or biblio.get("title") or "",
+                        raw_reference=raw,
+                        doi=doi or biblio.get("doi"),
+                        arxiv_id=rec.get("arxiv_id"),
+                        doi_source="abstract_backfill",
+                        authoritative=is_authoritative(key),
+                        cited_by=rec.get("cited_by"),
+                        xml_id=rec.get("xml_id"),
+                    ).to_dict()
+                    failed.pop(k, None)
+                    resolved_abstract += 1
+        except Exception as exc:
+            logger.debug("Failed backfill for %s: %s", k, exc)
+
+    _checkpoint(downloaded, failed)
+    return {
+        "attempted": len(to_check),
+        "resolved_oa": resolved_oa,
+        "resolved_abstract": resolved_abstract,
+        "remaining_failed": len(failed),
+    }
+
+
+fetch_missing_citations = fetch_papers
 
 
 if __name__ == "__main__":

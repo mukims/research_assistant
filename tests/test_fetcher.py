@@ -200,7 +200,7 @@ class TestResolveDoi(unittest.TestCase):
     def test_crossref_success_resolves_via_crossref(self):
         with patch.object(agent2_fetcher.requests, "get",
                            return_value=_FakeCrossrefResponse(
-                               {"message": {"items": [{"DOI": "10.9999/found"}]}})):
+                               {"message": {"items": [{"DOI": "10.9999/found", "title": ["Some title"]}]}})):
             result = agent2_fetcher.resolve_doi(self._ref())
 
         self.assertEqual(result, ("10.9999/found", "crossref"))
@@ -244,6 +244,24 @@ class TestManifestParsing(unittest.TestCase):
             "k": {"key": "k", "path": "a.pdf"},
         })
         self.assertEqual(pdfs, {})
+
+    def test_abstract_only_entry_with_no_path_is_skipped(self):
+        """Abstract-only records (tier-2 fallback) have path=None and must be
+        skipped rather than calling os.path.exists(None)."""
+        from research_assistant.agents.agent3_ingestor import _pdfs_from_manifest
+
+        pdfs = _pdfs_from_manifest({
+            "doi:10.1/good": {
+                "key": "doi:10.1/good", "path": "a.pdf",
+                "provider": "arxiv", "fetched_at": "t", "title": "Good",
+            },
+            "doi:10.1/abstract": {
+                "key": "doi:10.1/abstract", "path": None,
+                "provider": "openalex", "fetched_at": "t", "title": "Abstract Only",
+                "evidence_tier": "abstract_only", "abstract": "Some abstract text...",
+            },
+        })
+        self.assertEqual(pdfs, {"a.pdf": "Good"})
 
 
 class TestFetchPapersSuccessRecord(unittest.TestCase):
@@ -357,6 +375,8 @@ class TestFailureRetryPolicy(unittest.TestCase):
                              return_value=(False, "not in Europe PMC")),
                 patch.object(agent2_fetcher, "try_arxiv",
                              return_value=(False, "not found on arXiv")),
+                patch.object(agent2_fetcher, "fetch_bibliometrics_and_abstract",
+                             return_value={}),
                 patch.object(agent2_fetcher.time, "sleep", lambda s: None),
             ]
             for p in patches:
@@ -472,4 +492,47 @@ class TestAbstractFallback(unittest.TestCase):
             self.assertEqual(record["citation_count"], 42)
             self.assertFalse(record["is_retracted"])
             self.assertIsNone(record["path"])
+
+    def test_fetch_papers_abstract_fallback_on_transient_failure(self):
+        """When full-text download hits a retryable/transient error (e.g. 429 rate limit),
+        abstract fallback still executes to ensure tier-2 abstract evidence is captured."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ref = {
+                "key": "doi:10.1038/s41586-020-1111",
+                "doi": "10.1038/s41586-020-1111",
+                "title": "Quantum Hall Effect Under Pressure",
+                "raw_reference": "Ref text",
+                "source_file": "seed.pdf",
+            }
+            fake_biblio = {
+                "title": "Quantum Hall Effect Under Pressure",
+                "doi": "10.1038/s41586-020-1111",
+                "abstract": "We observe robust quantum Hall plateaus under high hydrostatic pressure in bilayer graphene.",
+                "citation_count": 88,
+                "is_retracted": False,
+            }
+            downloaded_path = os.path.join(tmp, "downloaded.json")
+            failed_path = os.path.join(tmp, "failed.json")
+            pdfs_dir = os.path.join(tmp, "pulled_pdfs")
+
+            with patch.object(agent2_fetcher, "DOWNLOADED_JSON_PATH", downloaded_path), \
+                 patch.object(agent2_fetcher, "FAILED_DOWNLOADS_PATH", failed_path), \
+                 patch.object(agent2_fetcher, "PULLED_PDFS_DIR", pdfs_dir), \
+                 patch.object(agent2_fetcher, "_load_references", return_value=[ref]), \
+                 patch.object(agent2_fetcher, "resolve_doi", return_value=("10.1038/s41586-020-1111", "grobid")), \
+                 patch.object(agent2_fetcher, "try_unpaywall", return_value=(False, "HTTP 429 Too Many Requests")), \
+                 patch.object(agent2_fetcher, "try_europepmc", return_value=(False, "connection timeout")), \
+                 patch.object(agent2_fetcher, "try_arxiv", return_value=(False, "503 Service Unavailable")), \
+                 patch("research_assistant.shared.academic_apis.fetch_bibliometrics_and_abstract", return_value=fake_biblio):
+                agent2_fetcher.fetch_papers()
+
+            with open(downloaded_path) as f:
+                downloaded = json.load(f)
+
+            self.assertEqual(len(downloaded), 1)
+            record = next(iter(downloaded.values()))
+            self.assertEqual(record["evidence_tier"], "abstract_only")
+            self.assertIn("quantum Hall plateaus under high hydrostatic pressure", record["abstract"])
+            self.assertEqual(record["citation_count"], 88)
+
 

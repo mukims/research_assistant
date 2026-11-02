@@ -79,6 +79,26 @@ class TestRegexReferences(unittest.TestCase):
     def test_no_recognisable_references_yields_nothing(self):
         self.assertEqual(self._extract("Just prose, no reference list."), [])
 
+    def test_equations_and_floats_not_extracted_as_citations(self):
+        text = (
+            "0.6% in the total energy of the dissociated s-block dimers\n"
+            "This particular structure is given by\n"
+            "(1)\n"
+            "where N is the occupancy at the site.\n"
+            "(2)\n"
+            "FIG. 1. Deviation of the total energy.\n"
+            "References\n"
+            "[1] Smith J. A first paper. Nature, 2019.\n"
+            "[2] Doe A. A second paper. PRL, 2020.\n"
+            "Appendix\n"
+            "(3)\n"
+            "Some additional derivations.\n"
+        )
+        refs = self._extract(text)
+        self.assertEqual(len(refs), 2)
+        self.assertIn("Smith", refs[0].raw_reference)
+        self.assertIn("Doe", refs[1].raw_reference)
+
 
 class TestPdftotextFallback(unittest.TestCase):
     """With poppler absent and GROBID down, references must still come out."""

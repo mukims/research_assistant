@@ -47,6 +47,132 @@ def _rate_limit(api_name: str, min_interval_seconds: float) -> None:
     _LAST_CALL_TIMESTAMPS[api_name] = time.time()
 
 
+ROMAN_NUMERALS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"}
+
+
+def _extract_author_surname(author: Optional[str]) -> str:
+    """Extract normalized surname from an author string.
+    Handles formats:
+      - "Last, First" or "Last, Initials": returns "Last"
+      - "First Last" or "Initials Last": returns "Last"
+      - Single name "Last": returns "Last"
+      - Compound names "Van der Waals, J. D." -> "vanderwaals"
+    """
+    if not author:
+        return ""
+    cleaned = author.strip()
+    if not cleaned:
+        return ""
+    if "," in cleaned:
+        parts = cleaned.split(",")
+        first_part = parts[0].strip()
+        tokens_before = re.findall(r"\w+", first_part)
+        tokens_after = re.findall(r"\w+", parts[1]) if len(parts) > 1 else []
+        if len("".join(tokens_before)) <= 2 and len("".join(tokens_after)) > 2:
+            surname = tokens_after[0]
+        else:
+            surname = first_part
+    else:
+        tokens = cleaned.split()
+        if not tokens:
+            return ""
+        if len(tokens) > 1 and tokens[-1].lower().rstrip(".") in {"jr", "sr", "ii", "iii", "iv", "v"}:
+            surname = tokens[-2]
+        else:
+            surname = tokens[-1]
+    return re.sub(r"[^\w]", "", surname).lower()
+
+
+def _match_surnames(a1: str, a2: str) -> bool:
+    """Determine whether two author strings represent the same first author surname."""
+    s1 = _extract_author_surname(a1)
+    s2 = _extract_author_surname(a2)
+    if not s1 or not s2:
+        return False
+    if s1 == s2:
+        return True
+    if len(s1) >= 4 and len(s2) >= 4:
+        # Support compound prefix / suffix matching (e.g. "vanderwaals" and "waals")
+        if s1.endswith(s2) or s2.endswith(s1):
+            return True
+        import difflib
+        ratio = difflib.SequenceMatcher(None, s1, s2).ratio()
+        if ratio >= 0.85:
+            return True
+    return False
+
+
+def verify_candidate_match(
+    target_title: str,
+    candidate_title: str,
+    target_author: Optional[str] = None,
+    candidate_author: Optional[str] = None,
+    target_year: Optional[int] = None,
+    candidate_year: Optional[int] = None,
+) -> bool:
+    """Enforce bidirectional title, author, and year similarity between target reference and candidate.
+    Requires:
+      - Conjunctive title similarity: Title token Jaccard >= 0.70 AND SequenceMatcher ratio >= 0.80
+      - Congruent part/volume identifiers: No conflicting Roman numerals, digits, or layer modifiers
+      - First author surname match (if both authors provided)
+      - Publication year within 1 year (if both years provided)
+    """
+    if not target_title or not candidate_title:
+        return False
+
+    t1 = target_title.strip().lower()
+    t2 = candidate_title.strip().lower()
+
+    # 1. Title verification
+    tokens1 = set(re.findall(r"[a-z0-9]+", t1))
+    tokens2 = set(re.findall(r"[a-z0-9]+", t2))
+    if not tokens1 or not tokens2:
+        return False
+
+    jaccard = len(tokens1 & tokens2) / len(tokens1 | tokens2)
+
+    import difflib
+    ratio = difflib.SequenceMatcher(None, t1, t2).ratio()
+
+    # Conjunctive requirement: both metrics must meet thresholds
+    if jaccard < 0.70 or ratio < 0.80:
+        return False
+
+    # Check for differing numbers or Roman numerals (e.g. Part I vs Part II, Vol 1 vs Vol 2)
+    diff1 = tokens1 - tokens2
+    diff2 = tokens2 - tokens1
+
+    digits1 = {t for t in diff1 if t.isdigit()}
+    digits2 = {t for t in diff2 if t.isdigit()}
+    if digits1 and digits2 and digits1 != digits2:
+        return False
+
+    roman1 = {t for t in diff1 if t in ROMAN_NUMERALS}
+    roman2 = {t for t in diff2 if t in ROMAN_NUMERALS}
+    if roman1 and roman2 and roman1 != roman2:
+        return False
+
+    layer_mods = {"monolayer", "bilayer", "trilayer", "multilayer", "fewlayer"}
+    if (diff1 & layer_mods) and (diff2 & layer_mods):
+        return False
+
+    # 2. Author verification
+    if target_author and candidate_author:
+        if not _match_surnames(target_author, candidate_author):
+            return False
+
+    # 3. Year verification
+    if target_year is not None and candidate_year is not None:
+        try:
+            if abs(int(target_year) - int(candidate_year)) > 1:
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    return True
+
+
+
 def call_crossref_api(
     query: str,
     rows: int = 3,

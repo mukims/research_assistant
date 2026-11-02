@@ -16,6 +16,7 @@ from research_assistant.config import (
 )
 from research_assistant.shared.claim_text import clean_text, is_numeric_cite
 from research_assistant.shared.log import get_logger
+from research_assistant.shared import pipeline_status
 from research_assistant.shared.source_key import normalise_doi
 
 logger = get_logger("audit_resolver")
@@ -46,28 +47,119 @@ def _unknown_ref(target: str, txt: str) -> dict:
     }
 
 
+_ROMAN_TO_INT = {
+    "i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000,
+}
+
+
+def _roman_to_int(s: str) -> Optional[int]:
+    """Convert Roman numeral string to integer."""
+    s = s.strip().lower()
+    if not s or not all(c in _ROMAN_TO_INT for c in s):
+        return None
+    val = 0
+    prev = 0
+    for c in reversed(s):
+        curr = _ROMAN_TO_INT[c]
+        if curr >= prev:
+            val += curr
+        else:
+            val -= curr
+        prev = curr
+    return val if val > 0 else None
+
+
+def _int_to_roman(num: int) -> str:
+    """Convert integer to lowercase Roman numeral string."""
+    val_map = [
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+        (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+        (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")
+    ]
+    roman = ""
+    for val, sym in val_map:
+        while num >= val:
+            roman += sym
+            num -= val
+    return roman
+
+
+def _ref_matches_number(entry: Optional[dict], k: Optional[int]) -> bool:
+    if not entry or k is None:
+        return False
+    if entry.get("printed_index") == k:
+        return True
+    raw = (entry.get("raw_reference") or "").strip()
+    if re.match(rf"^\s*\[?{k}\]?[\.\:\s]", raw):
+        return True
+    # Match Roman numeral prefix in raw_reference if 1 <= k <= 100
+    if 1 <= k <= 100:
+        r_str = _int_to_roman(k)
+        if re.match(rf"^\s*\[?{re.escape(r_str)}\]?[\.\:\s]", raw, re.IGNORECASE):
+            return True
+    return False
+
+
 def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map) -> tuple[Optional[dict], str, str]:
-    """(reference, how, note). Two witnesses for a numeric marker: the entry
-    GROBID linked it to, and the entry at that list position. On one paper
-    the links were off by one and position was right; elsewhere a footnote
-    in the list shifts every position after it. So: agreement resolves;
-    disagreement between two real entries is "ambiguous" and never judged;
-    a footnote-like entry at the position yields to the link. A surname
-    match needs the whole word and, when both sides have one, the year."""
+    """(reference, how, note). Resolve in-text citation marker against bibliography.
+    Resolves against printed reference labels/numbers and author-year strings in raw_reference
+    before falling back to positional index to eliminate GROBID index shift.
+    """
     tgt = bib_by_id.get(target)
     if not is_numeric_cite(txt):
         if tgt is not None:
             return tgt, "target", ""
         year = _YEAR_RE.search(txt or "")
+        req_year = int(year.group(1)) if year else None
         for info in bib_by_id.values():
-            surnames = [a.split()[-1] for a in info.get("authors", []) if a.split()]
-            if any(len(s) > 2 and re.search(rf"\b{re.escape(s)}\b", txt) for s in surnames):
-                if year is None or info.get("year") is None or int(year.group(1)) == info["year"]:
+            surnames = []
+            for a in info.get("authors", []):
+                a_clean = a.strip()
+                if not a_clean:
+                    continue
+                if "," in a_clean:
+                    surnames.append(a_clean.split(",")[0].strip())
+                else:
+                    surnames.append(a_clean.split()[-1].strip())
+            raw = info.get("raw_reference") or ""
+            title = info.get("title") or ""
+            surname_tokens = []
+            for s in surnames:
+                surname_tokens.append(s)
+                for tok in s.split():
+                    if len(tok) > 2:
+                        surname_tokens.append(tok)
+            surname_hit = any(len(s) > 1 and re.search(rf"\b{re.escape(s)}\b", txt, re.IGNORECASE) for s in surname_tokens)
+            if not surname_hit:
+                # Match Titlecase names or all-caps institutional acronyms (e.g. IUPAC, NASA)
+                m_authors = re.findall(r"\b(?:[A-Z]{2,}|[A-Z][a-z]{2,})\b", txt)
+                surname_hit = any(
+                    re.search(rf"\b{re.escape(auth)}\b", raw, re.IGNORECASE) or
+                    re.search(rf"\b{re.escape(auth)}\b", title, re.IGNORECASE)
+                    for auth in m_authors
+                )
+            if surname_hit:
+                if req_year is None or info.get("year") == req_year or str(req_year) in raw:
                     return info, "surname", ""
         return None, "unresolved", ""
 
+    k = None
     nums = _NUM_RE.findall(txt)
-    k = int(nums[0]) if nums else None
+    if nums:
+        k = int(nums[0])
+    else:
+        m_roman = re.search(r"\b([ivxlcdm]+)\b", txt, re.IGNORECASE)
+        if m_roman:
+            k = _roman_to_int(m_roman.group(1))
+
+    # Check printed reference match (printed_index or raw_reference starting with [k] or k.)
+    if k is not None:
+        if _ref_matches_number(tgt, k):
+            return tgt, "target", ""
+        for entry in bib_by_id.values():
+            if _ref_matches_number(entry, k):
+                return entry, "printed_label", ""
+
     at_position = bib_by_index.get(k) if k is not None else None
     pos = at_position if _looks_like_reference(at_position) else None
     linked = number_map.get(k) if k is not None else None
@@ -78,12 +170,24 @@ def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map) -> tuple[Opti
     if tgt is not None and pos is not None:
         if tgt is pos:
             return tgt, "target", ""
+        if _ref_matches_number(tgt, k):
+            return tgt, "target", ""
+        if _ref_matches_number(pos, k):
+            return pos, "position", ""
+        if pos.get("position_index") == k and tgt.get("position_index") != k:
+            return pos, "position", ""
+        if tgt.get("position_index") == k and pos.get("position_index") != k:
+            return tgt, "target", ""
         return None, "ambiguous", (
             f"GROBID links {txt} to '{_name(tgt)}' but list position {k} is '{_name(pos)}'; not judged against a guess."
         )
     if tgt is not None:
         return tgt, "target", ""
     if pos is not None and linked is not None and linked is not pos:
+        if _ref_matches_number(pos, k):
+            return pos, "position", ""
+        if _ref_matches_number(linked, k):
+            return linked, "number_map", ""
         return None, "ambiguous", (
             f"{txt} was linked elsewhere to '{_name(linked)}' but list position {k} is '{_name(pos)}'; not judged against a guess."
         )
@@ -250,12 +354,19 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None,
         p_id = c.get("paragraph_id") or "p_0"
         by_paragraph.setdefault(p_id, []).append(c)
 
+    import concurrent.futures
     from research_assistant.shared.llm import chat
 
-    for p_id, p_claims in by_paragraph.items():
+    def _process_paragraph(p_id, p_claims):
+        if pipeline_status.is_cancel_requested():
+            for c in p_claims:
+                if not c.get("search_query"):
+                    c["search_query"] = _fallback_query(c)
+            return
+
         unqueried = [c for c in p_claims if not c.get("search_query")]
         if not unqueried:
-            continue
+            return
 
         first = unqueried[0]
         context_text = first.get("context") or first.get("sentence") or ""
@@ -264,8 +375,6 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None,
             f"- {a['label']}: {a['caption']}" for a in (first.get("artifacts") or []) if a.get("caption")
         )
 
-        # One summary per cited paper per paragraph: the second claim on the
-        # same paper points back at the first instead of repeating 180 words.
         claim_entries = []
         summarised: dict[str, int] = {}
         for idx, c in enumerate(unqueried):
@@ -316,10 +425,18 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None,
                         c["search_query"] = q.strip()
                     else:
                         c["search_query"] = _fallback_query(c)
-                continue
+                return
         except Exception as exc:
             logger.debug("LLM query contextualization failed for paragraph %s: %s", p_id, exc)
 
         for c in unqueried:
             if not c.get("search_query"):
                 c["search_query"] = _fallback_query(c)
+
+    workers = min(4, len(by_paragraph)) if by_paragraph else 1
+    if workers <= 1:
+        for p_id, p_claims in by_paragraph.items():
+            _process_paragraph(p_id, p_claims)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(lambda item: _process_paragraph(item[0], item[1]), by_paragraph.items()))
