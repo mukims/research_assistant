@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import tempfile
 import time
 from typing import Literal
 
@@ -49,6 +51,36 @@ def _audit_mode(n_files: int, action: Literal["audit", "library"]) -> Literal["a
     if action == "library":
         return "library"
     return "audit" if n_files == 1 else "error"
+
+
+def _stage_for_action(
+    uploaded_files, action: Literal["audit", "library"], raw_dir: str | None = None
+) -> tuple[list[dict], Literal["audit", "library", "error"]]:
+    """Stage an upload and decide what the press does; only a valid press leaves files in RAW_DIR.
+
+    agent1_extractor.run_extractor() processes every PDF in RAW_DIR, so PDFs staged there for an
+    audit press that is then refused were processed by the user's next audit. The upload is staged
+    in a temporary directory first (a ZIP counts by the PDFs staged from it) and copied into RAW_DIR,
+    under the name staging gave it, only for a valid mode. Nothing already in RAW_DIR is removed.
+    On "error" the records still describe what was found, but no file is kept.
+    """
+    from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
+
+    raw_dir = raw_dir or config.RAW_DIR
+    tmp = tempfile.mkdtemp(prefix="marvin-upload-")
+    try:
+        staged = unpack_and_stage_uploads(uploaded_files, destination_dir=tmp)
+        mode = _audit_mode(len(staged), action)
+        if mode != "error" and staged:
+            os.makedirs(raw_dir, exist_ok=True)
+            for item in staged:
+                dest = os.path.join(raw_dir, os.path.basename(item["path"]))
+                # Overwrites a same-named file, as staging straight into RAW_DIR always did.
+                shutil.copyfile(item["path"], dest)
+                item["path"] = dest
+        return staged, mode
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def render_audit_tab():
@@ -99,11 +131,7 @@ def render_audit_tab():
         if not uploaded_files:
             st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
         else:
-            from research_assistant.shared.batch_uploader import unpack_and_stage_uploads
-
-            staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
-            # A ZIP counts by the PDFs staged from it, so the mode is decided here.
-            mode = _audit_mode(len(staged), action)
+            staged, mode = _stage_for_action(uploaded_files, action)
             if staged and mode != "error":
                 for item in staged:
                     try:
