@@ -17,6 +17,7 @@ import unicodedata
 from pathlib import Path
 
 from research_assistant.config import (
+    DEFAULT_GEMINI_MODEL,
     GEMINI_API_KEY,
     LLM_BACKEND,
     LLM_MODEL,
@@ -402,7 +403,7 @@ def judge(
     """
     effective_backend = backend or (LLM_BACKEND if GEMINI_API_KEY else None)
     gemini = (effective_backend or LLM_BACKEND) == "openai" and GEMINI_API_KEY
-    effective_model = model or JUDGEMENT_MODEL or ("gemini-3.5-flash-lite" if gemini else None)
+    effective_model = model or JUDGEMENT_MODEL or (DEFAULT_GEMINI_MODEL if gemini else None)
     messages = [{"role": "user", "content": build_prompt(claim, citation_evidence, context=context)}]
     votes = [
         _judge_vote(messages, effective_model, effective_backend, citation_evidence, claim)

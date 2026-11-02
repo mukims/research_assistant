@@ -204,8 +204,8 @@ def upsert_summaries(per_doc_text: dict, per_doc_citation: dict) -> int:
                 raise ValueError("the model returned an empty summary")
             return doc, summary, None
         except Exception as e:
-            # Fallback to Ollama gemma4:e2b-mlx if primary summary model fails
-            fb_model = getattr(config, "SUMMARY_FALLBACK_MODEL", "gemma4:e2b-mlx")
+            # Fall back to the local Ollama model if the primary summary model fails
+            fb_model = getattr(config, "SUMMARY_FALLBACK_MODEL", config.DEFAULT_OLLAMA_MODEL)
             fb_backend = getattr(config, "SUMMARY_FALLBACK_BACKEND", "ollama")
             is_same = (SUMMARY_MODEL or LLM_MODEL) == fb_model and (config.LLM_BACKEND == fb_backend)
             if not is_same and not pipeline_status.is_cancel_requested():

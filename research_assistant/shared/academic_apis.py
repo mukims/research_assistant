@@ -24,15 +24,14 @@ from research_assistant.config import (
     ARXIV_RATE_LIMIT,
     UNPAYWALL_EMAIL,
     UNPAYWALL_SLEEP,
+    USER_AGENT,
 )
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("academic_apis")
 
 DEFAULT_TIMEOUT = 15
-DEFAULT_HEADERS = {
-    "User-Agent": f"research_assistant/0.2 (mailto:{UNPAYWALL_EMAIL}; https://github.com/google-deepmind/marvin)"
-}
+DEFAULT_HEADERS = {"User-Agent": USER_AGENT}
 
 _LAST_CALL_TIMESTAMPS: Dict[str, float] = {}
 
@@ -176,19 +175,22 @@ def verify_candidate_match(
 def call_crossref_api(
     query: str,
     rows: int = 3,
-    mailto: str = UNPAYWALL_EMAIL,
+    mailto: Optional[str] = UNPAYWALL_EMAIL,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Optional[Dict[str, Any]]:
-    """Queries CrossRef REST API for works matching a query string."""
+    """Queries CrossRef REST API for works matching a query string.
+
+    With no contact address the request carries no mailto and uses the shared pool.
+    """
     _rate_limit("crossref", 0.1)
-    params = {
+    params: Dict[str, Any] = {
         "query.bibliographic": query,
         "rows": rows,
-        "mailto": mailto,
     }
+    if mailto:
+        params["mailto"] = mailto
     url = "https://api.crossref.org/works"
     headers = dict(DEFAULT_HEADERS)
-    headers["User-Agent"] = f"research_assistant/0.2 (mailto:{mailto})"
 
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=timeout)
@@ -202,22 +204,31 @@ def call_crossref_api(
 
 def call_openalex_api(
     query_or_doi: str,
-    mailto: str = UNPAYWALL_EMAIL,
+    mailto: Optional[str] = UNPAYWALL_EMAIL,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Optional[Dict[str, Any]]:
-    """Queries OpenAlex API by DOI or search string."""
+    """Queries OpenAlex API by DOI or search string.
+
+    With no contact address the request carries no mailto and uses the shared pool.
+    """
     _rate_limit("openalex", 0.1)
     clean_target = query_or_doi.strip()
     headers = dict(DEFAULT_HEADERS)
-    headers["User-Agent"] = f"research_assistant/0.2 (mailto:{mailto})"
+    contact = f"mailto={urllib.parse.quote(mailto)}" if mailto else ""
 
     if clean_target.startswith("10."):
-        url = f"https://api.openalex.org/works/https://doi.org/{clean_target}?mailto={mailto}"
+        url = f"https://api.openalex.org/works/https://doi.org/{clean_target}"
+        if contact:
+            url += f"?{contact}"
     elif "doi.org" in clean_target:
-        url = f"https://api.openalex.org/works/{clean_target}?mailto={mailto}"
+        url = f"https://api.openalex.org/works/{clean_target}"
+        if contact:
+            url += f"?{contact}"
     else:
         encoded = urllib.parse.quote(clean_target)
-        url = f"https://api.openalex.org/works?search={encoded}&mailto={mailto}"
+        url = f"https://api.openalex.org/works?search={encoded}"
+        if contact:
+            url += f"&{contact}"
 
     try:
         resp = requests.get(url, headers=headers, timeout=timeout)
@@ -257,8 +268,13 @@ def call_semantic_scholar_api(
     return None
 
 
-def fetch_open_access_pdf_url(doi: str, mailto: str = UNPAYWALL_EMAIL, timeout: int = DEFAULT_TIMEOUT) -> Optional[str]:
-    """Queries Unpaywall for direct open-access PDF download URL for a DOI."""
+def fetch_open_access_pdf_url(doi: str, mailto: Optional[str] = UNPAYWALL_EMAIL, timeout: int = DEFAULT_TIMEOUT) -> Optional[str]:
+    """Queries Unpaywall for direct open-access PDF download URL for a DOI.
+
+    Unpaywall refuses requests without a contact email, so none is sent without one.
+    """
+    if not mailto:
+        return None
     _rate_limit("unpaywall", UNPAYWALL_SLEEP)
     clean_doi = doi.strip()
     if clean_doi.startswith("https://doi.org/"):

@@ -52,7 +52,7 @@ class ChatResult:
     prompt_tokens: object = "N/A"
     completion_tokens: object = "N/A"
     # The model id the provider says served the reply — often a dated or
-    # versioned form of the one requested ("gemini-3.5-flash-lite-001"). None
+    # versioned form of the one requested (a "-001" suffix, say). None
     # when the response carries none.
     model: str | None = None
 

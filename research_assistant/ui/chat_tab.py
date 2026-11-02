@@ -19,7 +19,7 @@ def render_chat_tab(chunks):
     st.caption("Multi-turn research collaboration grounded in your ingested literature. Condenses follow-up queries, retains evidence cards per turn, folds historical context into rolling memory, and suggests next exploration directions.")
 
     if chunks == 0:
-        st.info("No corpus yet — build one in **Research a topic** first.", icon="📭")
+        st.info("No corpus yet. Build one in **Research idea**, **Citation auditor** or **Corpus library** first.", icon="📭")
     else:
         if "chat_agent" not in st.session_state or st.session_state["chat_agent"] is None:
             from research_assistant.agents.agent7_research_chat import ResearchChat
@@ -128,11 +128,11 @@ def render_chat_tab(chunks):
                 if chosen["model"] == "__custom__":
                     custom_name = st.text_input(
                         "Ollama Model Name",
-                        value=st.session_state.get("custom_ollama_model", "gemma4:e2b"),
+                        value=st.session_state.get("custom_ollama_model", config.DEFAULT_OLLAMA_MODEL),
                         key="custom_ollama_input",
                         placeholder="e.g. phi3:mini, llama3.2",
                     )
-                    final_model = custom_name.strip() or "gemma4:e2b"
+                    final_model = custom_name.strip() or config.DEFAULT_OLLAMA_MODEL
                     final_backend = "ollama"
                     st.session_state["custom_ollama_model"] = final_model
                 else:

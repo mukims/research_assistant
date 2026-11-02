@@ -99,6 +99,19 @@ if LLM_BACKEND is None:
     LLM_BACKEND = "openai" if GEMINI_API_KEY else "ollama"
 LLM_BACKEND     = LLM_BACKEND.lower()
 
+# ─── Default models ──────────────────────────────────────────────────────────
+# The one place a model name is written down. The docs tell users to
+# `ollama pull` exactly DEFAULT_OLLAMA_MODEL and DEFAULT_EMBED_MODEL, and
+# tests/test_defaults.py fails if either a doc or another module disagrees.
+DEFAULT_OLLAMA_MODEL = "gemma4:e2b"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_EMBED_MODEL  = "embeddinggemma-2"
+# Hosted Gemini models offered in the UI model pickers, cheapest first.
+GEMINI_CHAT_MODELS = (DEFAULT_GEMINI_MODEL, "gemini-3.5-pro")
+# Spelling used by installs from before 2026-11-02, when the default was the
+# MLX build; an env var still holding either spelling means "use the default".
+_LEGACY_DEFAULT_OLLAMA_MODELS = (DEFAULT_OLLAMA_MODEL, f"{DEFAULT_OLLAMA_MODEL}-mlx")
+
 # When Gemini is used, default to the official Google OpenAI-compatible endpoint
 # and gemini-3.5-flash-lite, but keep EMBED_BACKEND="ollama" by default so existing
 # 25k chunks in ChromaDB work without re-indexing.
@@ -112,15 +125,15 @@ OLLAMA_REQUEST_TIMEOUT = _env_int("CITATION_OLLAMA_TIMEOUT", 600)
 
 if (LLM_BACKEND == "openai" or GEMINI_API_KEY) and GEMINI_API_KEY:
     _default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    _default_llm_model = "gemini-3.5-flash-lite"
+    _default_llm_model = DEFAULT_GEMINI_MODEL
     _default_embed_backend = "ollama"
-    if os.environ.get("CITATION_LLM_MODEL") in (None, "", "gemma4:e2b", "gemma4:e2b-mlx"):
+    if os.environ.get("CITATION_LLM_MODEL") in (None, "", *_LEGACY_DEFAULT_OLLAMA_MODELS):
         os.environ["CITATION_LLM_MODEL"] = _default_llm_model
-    if os.environ.get("CITATION_CHAT_MODEL") in (None, "", "gemma4:e2b", "gemma4:e2b-mlx"):
+    if os.environ.get("CITATION_CHAT_MODEL") in (None, "", *_LEGACY_DEFAULT_OLLAMA_MODELS):
         os.environ["CITATION_CHAT_MODEL"] = _default_llm_model
 else:
     _default_base_url = "https://router.huggingface.co/v1"
-    _default_llm_model = "gemma4:e2b-mlx"
+    _default_llm_model = DEFAULT_OLLAMA_MODEL
     _default_embed_backend = LLM_BACKEND
 
 EMBED_BACKEND   = os.environ.get("CITATION_EMBED_BACKEND", _default_embed_backend).lower()
@@ -136,7 +149,7 @@ HF_TOKEN        = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
 LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", _default_llm_model)
 CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", _default_llm_model)
 OLLAMA_CHAT_MODELS = (
-    "gemma4:e2b-mlx",
+    DEFAULT_OLLAMA_MODEL,
     "llama3.2:latest",
     "mistral:latest",
     "qwen2.5:latest",
@@ -146,7 +159,7 @@ OLLAMA_CHAT_MODELS = (
 # embeddinggemma-2 embeds text and images into one space, which is what lets a
 # text query find a figure. Any other embedder indexes text only (no figure
 # images) and must be set together with a fresh CITATION_INDEX_VERSION.
-EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", "embeddinggemma-2")
+EMBED_MODEL     = os.environ.get("CITATION_EMBED_MODEL", DEFAULT_EMBED_MODEL)
 EMBED_IMAGES    = EMBED_BACKEND == "ollama" and EMBED_MODEL.startswith("embeddinggemma-2")
 
 
@@ -254,7 +267,7 @@ EXCLUDED_FROM_EVIDENCE   = frozenset({"figure_image", "figure_description"})
 # Per-document summary written to SUMMARY_COLLECTION_NAME at ingest time — the
 # stage-1 "is this paper even relevant" index. One model call per paper.
 SUMMARY_MODEL            = os.environ.get("CITATION_SUMMARY_MODEL", "") or None  # None → LLM_MODEL
-SUMMARY_FALLBACK_MODEL   = os.environ.get("CITATION_SUMMARY_FALLBACK_MODEL", "gemma4:e2b-mlx")
+SUMMARY_FALLBACK_MODEL   = os.environ.get("CITATION_SUMMARY_FALLBACK_MODEL", DEFAULT_OLLAMA_MODEL)
 SUMMARY_FALLBACK_BACKEND = os.environ.get("CITATION_SUMMARY_FALLBACK_BACKEND", "ollama")
 SUMMARY_MAX_CHARS        = _env_int("CITATION_SUMMARY_MAX_CHARS", 8000)
 
@@ -266,7 +279,7 @@ CITATION_CHECK_BATCH_SIZE = 20
 
 # ─── Agent 8 — Verifier (judgement) ──────────────────────────────────────────
 # Default citation check model: gemini-3.5-flash-lite when GEMINI_API_KEY is present
-_default_judgement_model = "gemini-3.5-flash-lite" if GEMINI_API_KEY else None
+_default_judgement_model = DEFAULT_GEMINI_MODEL if GEMINI_API_KEY else None
 JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL") or _default_judgement_model or None
 # The judgement prompt is a rubric, not a generation task, and its regression
 # cases assert exact verdicts — sampling makes both meaningless.
@@ -393,12 +406,19 @@ DRAFT_COOLDOWN_SECONDS   = 2
 MANUAL_COOLDOWN_SECONDS  = 5
 DEFAULT_WORKERS          = 1
 
-# ─── Contact Address ─────────────────────────────────────────────────────────
+# ─── Contact Address and User-Agent ──────────────────────────────────────────
 # Unpaywall requires a contact email on every request; OpenAlex and Crossref
 # use it to route you to their faster "polite" pools. Set UNPAYWALL_EMAIL in
-# your environment; the placeholder below is only a fallback so the pipeline
-# does not silently send someone else's address.
-UNPAYWALL_EMAIL   = os.environ.get("UNPAYWALL_EMAIL", "abcdef_12345@gmail.com")
+# your environment. Unset it is None, never a placeholder: a made-up address
+# would be sent to third parties on your behalf (and was, until 2026-11-02), so
+# Unpaywall lookups are skipped and the other APIs fall back to their shared
+# pool until you supply a real one.
+PROJECT_URL       = "https://github.com/mukims/research_assistant"
+UNPAYWALL_EMAIL   = os.environ.get("UNPAYWALL_EMAIL") or None
+# What every outbound scholarly-API request identifies itself as.
+USER_AGENT        = f"research_assistant/0.2 (+{PROJECT_URL})" + (
+    f"; mailto:{UNPAYWALL_EMAIL}" if UNPAYWALL_EMAIL else ""
+)
 
 # ─── Agent 0 — Discoverer ────────────────────────────────────────────────────
 # Agent 0 searches a scholarly index whose results come back ranked by
@@ -419,16 +439,16 @@ USE_CROSS_ENCODER = os.environ.get("CITATION_USE_CROSS_ENCODER", "0") == "1"
 
 OPENALEX_URL      = "https://api.openalex.org/works"
 # OpenAlex gives requests that supply a contact address the faster "polite"
-# pool. Reuses the same address Unpaywall needs.
-OPENALEX_MAILTO   = os.environ.get("OPENALEX_MAILTO", UNPAYWALL_EMAIL)
+# pool. Reuses the same address Unpaywall needs; None means send no mailto.
+OPENALEX_MAILTO   = os.environ.get("OPENALEX_MAILTO") or UNPAYWALL_EMAIL
 
 S2_API_KEY        = os.environ.get("S2_API_KEY")
 S2_SEARCH_URL     = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 # ─── Agent 1 — Extractor (GROBID) ───────────────────────────────────────────
-# Default is the public GROBID instance running as a Hugging Face Space, so the
-# pipeline works with no local Java service. Point this at http://localhost:8070
-# when running your own GROBID (faster, private, no shared rate limit).
+# Default is a GROBID service on localhost:8070 (Docker, see GROBID_DOCKER_IMAGE).
+# Point GROBID_SERVER elsewhere to use a remote instance; a shared public one is
+# rate-limited and sees your PDFs.
 GROBID_SERVER            = os.environ.get("GROBID_SERVER","http://localhost:8070")
 GROBID_BATCH_CONCURRENCY = _env_int("GROBID_BATCH_CONCURRENCY", 2)
 GROBID_DOCKER_IMAGE      = os.environ.get("GROBID_DOCKER_IMAGE", "grobid/grobid:0.8.1")

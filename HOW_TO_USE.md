@@ -49,7 +49,7 @@ The left sidebar provides persistent visibility and control over background oper
 ### 3. Corpus & System Metrics
 - **Corpus Counters**: Total indexed documents, total chunks, median chunk size (typically ~1,000–1,200 characters), and total figure/table captions.
 - **Storage Engine**: LanceDB zero-copy vector store (`physics_papers_v3`, `physics_summaries_v3`) with cosine metric and Tantivy FTS, or legacy ChromaDB server.
-- **Active Backend Telemetry**: Displays the current inference backend (e.g. Google Gemini `gemini-2.5-flash` / `gemini-3.5-flash-lite` or local Ollama `gemma4:e2b-mlx`), active embeddings (`embeddinggemma-2`), and GROBID service status.
+- **Active Backend Telemetry**: Displays the current inference backend (e.g. Google Gemini `gemini-3.5-flash-lite` or local Ollama `gemma4:e2b`), active embeddings (`embeddinggemma-2`), and GROBID service status.
 - **GROBID Service Controls**: Includes buttons to inspect GROBID health (cached with 10s TTL), view diagnostics, or restart the container if running in Docker.
 
 ---
@@ -390,7 +390,7 @@ Historically, photocopied reprints, older journal scans, handwritten lab notes, 
 * **Automatic Detection**: Detects documents lacking digital text layers (< 50 characters/page) and routes them to OCR.
 * **Engine Selection**:
   - **Local EasyOCR** (default): Runs offline on Apple Silicon MPS or NVIDIA CUDA GPU using bundled weights. Extracts text in natural reading order and de-hyphenates split words.
-  - **Vision LLM Mode** (`vlm`): Routes page renderings to multimodal vision models (`gemini-2.5-flash` or Ollama vision) for complex formulas, handwritten annotations, or low-contrast scans.
+  - **Vision LLM Mode** (`vlm`): Routes page renderings to multimodal vision models (`gemini-3.5-flash-lite` or Ollama vision) for complex formulas, handwritten annotations, or low-contrast scans.
 
 #### 3. Interactive Corpus Explorer
 * Displays an interactive table of all indexed papers, with document keys, chunk counts, publication years, timestamps, and direct DOI/arXiv links.
@@ -479,9 +479,9 @@ streamlit run app.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | *(None)* | Setting this automatically activates high-speed Gemini inference (`gemini-2.5-flash` / `gemini-3.5-flash-lite`). |
+| `GEMINI_API_KEY` | *(None)* | Setting this automatically activates high-speed Gemini inference (`gemini-3.5-flash-lite`). |
 | `LLM_BACKEND` | `ollama` (or `openai` if Gemini key set) | Backend engine: `ollama` for local CPU or `openai` for OpenAI/Gemini-compatible endpoints. |
-| `CITATION_CHAT_MODEL` | `gemma4:e2b-mlx` (or `gemini-2.5-flash`) | Model used for research chat and literature synthesis. |
+| `CITATION_CHAT_MODEL` | `gemma4:e2b` (or `gemini-3.5-flash-lite`) | Model used for research chat and literature synthesis. |
 | `CITATION_USE_LANCEDB` | `true` | Default storage backend: LanceDB zero-copy vector store (`true`) or ChromaDB (`false`). |
 | `CITATION_LANCEDB_PATH`| `data/lancedb` | Path to persistent LanceDB tables (`physics_papers_v3`, `physics_summaries_v3`). |
 | `LLM_REQUEST_TIMEOUT` | `60` | Request timeout in seconds for LLM client calls. |

@@ -151,23 +151,19 @@ def _get_model_choices():
         choices.append({"label": f"🦙 Ollama: {m} (installed)", "model": m, "backend": "ollama"})
 
     # 2. Recommended / popular Ollama models
-    standard_ollama = getattr(
-        config,
-        "OLLAMA_CHAT_MODELS",
-        ("gemma4:e2b-mlx", "llama3.2:latest", "mistral:latest", "qwen2.5:latest", "deepseek-r1:8b"),
-    )
-    for m in standard_ollama:
+    for m in config.OLLAMA_CHAT_MODELS:
         if not any(c["model"] == m for c in choices):
             choices.append({"label": f"🦙 Ollama: {m}", "model": m, "backend": "ollama"})
 
     # 3. Hosted / Gemini / OpenAI options
     if config.GEMINI_API_KEY:
-        choices.append({"label": "✨ Gemini: gemini-3.5-flash-lite (fast)", "model": "gemini-3.5-flash-lite", "backend": "openai"})
-        choices.append({"label": "✨ Gemini: gemini-3.5-pro (deep reasoning)", "model": "gemini-3.5-pro", "backend": "openai"})
+        fast, deep = config.GEMINI_CHAT_MODELS
+        choices.append({"label": f"✨ Gemini: {fast} (fast)", "model": fast, "backend": "openai"})
+        choices.append({"label": f"✨ Gemini: {deep} (deep reasoning)", "model": deep, "backend": "openai"})
     elif config.OPENAI_API_KEY:
         choices.append({"label": "🌐 OpenAI: gpt-4o-mini", "model": "gpt-4o-mini", "backend": "openai"})
     else:
-        choices.append({"label": "✨ Gemini: gemini-3.5-flash-lite", "model": "gemini-3.5-flash-lite", "backend": "openai"})
+        choices.append({"label": f"✨ Gemini: {config.DEFAULT_GEMINI_MODEL}", "model": config.DEFAULT_GEMINI_MODEL, "backend": "openai"})
 
     # 4. Custom Ollama model entry
     choices.append({"label": "⚙️ Custom Ollama model…", "model": "__custom__", "backend": "ollama"})
@@ -197,11 +193,11 @@ def _render_sidebar_backend_controls():
     if chosen["model"] == "__custom__":
         custom_name = st.text_input(
             "Custom Ollama Name",
-            value=st.session_state.get("custom_ollama_model", "gemma4:e2b"),
+            value=st.session_state.get("custom_ollama_model", config.DEFAULT_OLLAMA_MODEL),
             key="sidebar_custom_ollama_input",
             placeholder="e.g. phi3:mini",
         )
-        final_model = custom_name.strip() or "gemma4:e2b"
+        final_model = custom_name.strip() or config.DEFAULT_OLLAMA_MODEL
         final_backend = "ollama"
         st.session_state["custom_ollama_model"] = final_model
     else:

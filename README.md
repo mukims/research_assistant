@@ -276,9 +276,9 @@ the code:
 - **He reads through a keyhole.** The default model is `gemma4:e2b` — two
   billion parameters on a CPU, with a 4,096-token window for chat and task
   planning (the judge gets 12,288). Every summary is one paragraph. Every
-  verdict Agent 8 hands down starts from a single retrieved passage and its
-  neighbours (`CITATION_JUDGEMENT_TOP_K=1`), and is re-judged on the top three
-  only when the first read admits it saw too little. He is fast and cheap, and
+  verdict Agent 8 hands down starts from the top three retrieved passages and
+  their neighbours (`CITATION_JUDGEMENT_TOP_K=3`), and is re-judged on the top
+  six only when the first read admits it saw too little. He is fast and cheap, and
   he knows exactly what that costs. Set `GEMINI_API_KEY` and chat, synthesis
   and judging move to a hosted model; the keyhole widens, the bill does too.
 - **He used to answer short by design.** The synthesis now reads every paper
@@ -337,8 +337,9 @@ streamlit run app.py
   noticeably fewer downloads. Setup and troubleshooting:
   [Research_Assistant_GROBID_Guide.md](Research_Assistant_GROBID_Guide.md).
 - **Unpaywall** requires a contact address on every request, and Crossref uses
-  the same one to put you in its faster "polite" pool. There is a placeholder
-  default; set your own: `export UNPAYWALL_EMAIL=you@example.com`.
+  the same one to put you in its faster "polite" pool. There is no default:
+  until you set your own (`export UNPAYWALL_EMAIL=you@example.com`) Unpaywall
+  lookups are skipped and Crossref and OpenAlex get no contact address.
 - **OpenAlex** now gives requests without an API key a small daily budget, shared
   by everyone on your network's address (about a hundred searches). Once it runs
   out:

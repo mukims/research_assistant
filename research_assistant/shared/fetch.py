@@ -13,7 +13,7 @@ import re
 
 import requests
 
-from research_assistant.config import UNPAYWALL_EMAIL
+from research_assistant.config import USER_AGENT
 from research_assistant.shared.log import get_logger
 
 logger = get_logger("fetch")
@@ -21,7 +21,7 @@ logger = get_logger("fetch")
 # Crossref, arXiv, Unpaywall and Semantic Scholar all ask for identifying
 # contact details. Being polite gets you the faster rate-limit pool rather
 # than the shared one.
-HEADERS = {"User-Agent": f"research_assistant/0.1 (mailto:{UNPAYWALL_EMAIL})"}
+HEADERS = {"User-Agent": USER_AGENT}
 
 
 def filename_for(key: str) -> str:

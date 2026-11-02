@@ -96,9 +96,12 @@ DISCOVERY_TRACES_PATH = os.path.join(DATA_DIR, "discovery_traces.json")
 
 
 def _search_openalex(query, limit):
+    params = {"search": query, "per_page": limit}
+    if OPENALEX_MAILTO:
+        params["mailto"] = OPENALEX_MAILTO
     res = requests.get(
         OPENALEX_URL,
-        params={"search": query, "per_page": limit, "mailto": OPENALEX_MAILTO},
+        params=params,
         headers=HEADERS,
         timeout=20,
     )

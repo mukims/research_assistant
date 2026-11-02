@@ -179,7 +179,12 @@ def try_unpaywall(doi, dest_path):
     Unpaywall's best_oa_location is usually the publisher's own site, which
     is also the one most likely to block an automated request. Every known
     location is tried, repositories first.
+
+    Unpaywall refuses requests without a contact email, so with UNPAYWALL_EMAIL
+    unset this makes no request at all.
     """
+    if not UNPAYWALL_EMAIL:
+        return False, "Unpaywall skipped: set UNPAYWALL_EMAIL"
     try:
         res = requests.get(
             f"https://api.unpaywall.org/v2/{urllib.parse.quote(doi)}",
