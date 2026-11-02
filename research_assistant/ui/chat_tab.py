@@ -151,11 +151,9 @@ def render_chat_tab(chunks):
                     st.rerun()
 
             with col_exp_md:
-                export_path = agent.export_conversation(scratchpad_notes=st.session_state.get("chat_scratchpad"))
-                try:
-                    with open(export_path, encoding="utf-8") as _f:
-                        export_md_text = _f.read()
-                except Exception:
+                if hasattr(agent, "format_conversation_markdown"):
+                    export_md_text = agent.format_conversation_markdown(scratchpad_notes=st.session_state.get("chat_scratchpad"))
+                else:
                     export_md_text = "# Research Chat Transcript\n"
                 st.download_button(
                     "📥 Export (.md)",

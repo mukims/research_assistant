@@ -154,6 +154,14 @@ def _render_seed_citation_audit(final, origin="audit"):
                 f"{audit['aborted'].get('reason')} — citations after that point were not attempted. "
                 "Re-run once the backend is reachable."
             )
+            from research_assistant.ui.jobs import _render_interrupted_run_prompt
+            _render_interrupted_run_prompt(
+                origin=origin,
+                state="aborted",
+                error=audit["aborted"].get("reason"),
+                job_id=st.session_state.get("active_job") or st.query_params.get("job"),
+                final=final,
+            )
         if coverage:
             st.caption(
                 f"Assessed by the model: **{coverage.get('judged', 0)}** of {coverage.get('downloaded', 0)} citations "
@@ -257,7 +265,7 @@ def _render_seed_citation_audit(final, origin="audit"):
 
                 if outcome == "deferred_paywalled":
                     st.warning(
-                        "⏳ **Evaluation Deferred (Pending Evidence)**: More than 50% of the cited references "
+                        "⏳ **Evaluation Deferred (Pending Evidence)**: More than 90% of the cited references "
                         "in this body paragraph are missing from the local corpus (paywalled publishers, books, or 404s). "
                         "Evaluation of this statement is deferred until the missing papers are uploaded.",
                         icon="⏳",
@@ -402,13 +410,13 @@ def _render_seed_citation_audit(final, origin="audit"):
         with tab_deferred:
             if deferred_count == 0:
                 st.info(
-                    "No citations currently deferred. All paragraphs had sufficient reference coverage (≤50% paywalled).",
+                    "No citations currently deferred. All paragraphs had sufficient reference coverage (≤90% paywalled).",
                     icon="✅",
                 )
             else:
                 st.warning(
                     "⏳ **Evaluation Deferred (Pending Evidence)**: One or more paragraphs in this uploaded paper cite "
-                    "references where more than 50% are missing from the corpus (paywalled publishers, books, or 404s). "
+                    "references where more than 90% are missing from the corpus (paywalled publishers, books, or 404s). "
                     "Evaluation of these statements is deferred until the missing PDFs are uploaded. "
                     "Upload the missing papers below and re-run the audit.",
                     icon="⏳",
@@ -559,8 +567,16 @@ def _start_audit_job(
         finally:
             pipeline_status.set_status(active=False, stage="idle", stage_label="Idle", detail="Audit complete")
 
+    metadata = {
+        "seed_file_path": seed_file_path,
+        "label": label,
+        "audit_only": True,
+        "origin": origin,
+        "force": force,
+    }
+    pipeline_status.clear_cancel_request(job_id=job_id)
     try:
-        run_jobs.start_job(job_id, label, runner, origin=origin)
+        run_jobs.start_job(job_id, label, runner, origin=origin, metadata=metadata)
     except run_jobs.JobBusy as busy:
         st.warning(
             f"A run is already active on the server ({busy.job.label}). "

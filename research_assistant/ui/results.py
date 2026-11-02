@@ -1,5 +1,6 @@
 """Rendering one finished run: discovery trace, seed and downloads, shortlist, notes, synthesis, audit."""
 
+import html
 import os
 import re
 import time
@@ -110,15 +111,30 @@ def _render_seed_and_downloads(query, final):
 
         _render_discovery_trace(query, final)
 
-    if final.get("seed_path") and (final.get("extraction") or final.get("references_ok") or final.get("answer")):
+    has_seed = bool(final.get("seed_path"))
+    has_fetch_failures = bool(final.get("fetch_failures"))
+    if (has_seed and (final.get("extraction") or final.get("references_ok") or final.get("answer"))) or has_fetch_failures:
         from research_assistant.agents.agent2_fetcher import source_key
 
         extracted_data = _manifest(config.EXTRACTED_CITATIONS_PATH)
         extracted_refs = extracted_data.get("references", []) if isinstance(extracted_data, dict) else []
+
+        # Scope references to the active seed paper if known, avoiding global library bleeding
+        seed_filename = os.path.basename(final.get("seed_path", "")) if final.get("seed_path") else None
+        if seed_filename:
+            scoped_refs = [
+                r for r in extracted_refs
+                if isinstance(r, dict) and (r.get("source_file") == seed_filename or r.get("cited_by") == seed_filename)
+            ]
+            if scoped_refs:
+                extracted_refs = scoped_refs
+
         target_keys = {source_key(r) for r in extracted_refs if isinstance(r, dict) and source_key(r)} if extracted_refs else set()
 
         all_downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
         all_failed = _manifest(config.FAILED_DOWNLOADS_PATH)
+        if not all_failed and has_fetch_failures:
+            all_failed = {f"fail_{i}": f for i, f in enumerate(final["fetch_failures"])}
 
         if target_keys:
             downloaded = [rec for k, rec in all_downloaded.items() if k in target_keys]
@@ -141,8 +157,10 @@ def _render_seed_and_downloads(query, final):
                     st.markdown(f"- ✅ {t}")
                 for rec in failed:
                     t = rec.get("title") or rec.get("raw_reference") or rec.get("key")
+                    t_esc = html.escape(str(t or ""))
+                    reason_esc = html.escape(str(rec.get("reason", "") or ""))
                     st.markdown(
-                        f"- ⚠️ {t}  \n  <sub>{rec.get('reason', '')}</sub>",
+                        f"- ⚠️ {t_esc}  \n  <sub>{reason_esc}</sub>",
                         unsafe_allow_html=True,
                     )
 
@@ -355,8 +373,10 @@ def _render_build(final, query, origin="audit"):
                     bits.append(f"doi:{p['doi']}")
                 if p.get("arxiv_id"):
                     bits.append(f"arXiv:{p['arxiv_id']}")
+                title_esc = html.escape(str(title or ""))
+                bits_esc = [html.escape(str(b)) for b in bits]
                 st.markdown(
-                    f"- **{title}**  \n  <small style='color:gray;'>{' · '.join(bits)}</small>",
+                    f"- **{title_esc}**  \n  <small style='color:gray;'>{' · '.join(bits_esc)}</small>",
                     unsafe_allow_html=True,
                 )
 
@@ -393,6 +413,15 @@ def _render_build(final, query, origin="audit"):
             with st.container(border=True):
                 st.markdown("###### Answer (not grounded in retrieved papers)")
                 st.markdown(final["answer"]["suggestion"])
+        if origin == "audit":
+            from research_assistant.ui.jobs import _render_interrupted_run_prompt
+            _render_interrupted_run_prompt(
+                origin=origin,
+                state="stopped",
+                error=final["stopped"],
+                job_id=st.session_state.get("active_job") or st.query_params.get("job"),
+                final=final,
+            )
         return
 
     answer = final.get("answer")

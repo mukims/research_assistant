@@ -2,6 +2,7 @@
 
 import os
 import time
+from typing import Optional
 
 import streamlit as st
 
@@ -122,12 +123,24 @@ def _start_pipeline_job(
         "enable_ocr": enable_ocr,
     }
     display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
+    metadata = {
+        "inputs": inputs,
+        "seed_file_path": seed_file_path,
+        "seed_url_val": seed_url_val,
+        "query": query,
+        "ask": ask,
+        "audit_citations": audit_citations,
+        "synthesis_mode": synthesis_mode,
+        "enable_ocr": enable_ocr,
+        "label": display_q,
+    }
 
     def runner(on_snapshot):
         return _execute_pipeline(inputs, cfg, display_q, on_snapshot=on_snapshot)
 
+    pipeline_status.clear_cancel_request(job_id=job_id)
     try:
-        run_jobs.start_job(job_id, display_q, runner, origin=origin)
+        run_jobs.start_job(job_id, display_q, runner, origin=origin, metadata=metadata)
     except run_jobs.JobBusy as busy:
         st.warning(
             f"A run is already active on the server ({busy.job.label}). "
@@ -156,7 +169,8 @@ def _resolve_job(job_id: str):
         return job.state, None, job.error, job.origin
     record = run_jobs.load_run(job_id)
     if record:
-        return "done", record.get("final") or {}, None, record.get("origin", "audit")
+        rec_state = record.get("state", "done")
+        return rec_state, record.get("final") or {}, record.get("error"), record.get("origin", "audit")
     return None, None, None, None
 
 
@@ -216,6 +230,112 @@ def _render_job_progress(job_id: str):
             _render_seed_and_downloads(job.snapshot.get("query") or job.label, job.snapshot)
 
 
+def _render_interrupted_run_prompt(
+    origin: str,
+    error: Optional[str] = None,
+    state: str = "failed",
+    job_id: Optional[str] = None,
+    final: Optional[dict] = None,
+) -> None:
+    """Prompt the user when an audit run is stopped or interrupted:
+    ask if they want to restart from the beginning or move onto a new paper.
+    """
+    from research_assistant.shared import run_jobs, pipeline_status
+
+    job = run_jobs.get_job(job_id) if job_id else None
+    record = run_jobs.load_run(job_id) if job_id else None
+
+    # Determine metadata / inputs
+    metadata = {}
+    if job and getattr(job, "metadata", None):
+        metadata.update(job.metadata)
+    if record and record.get("metadata"):
+        metadata.update(record["metadata"])
+
+    inputs = metadata.get("inputs") or {}
+    seed_file_path = (
+        metadata.get("seed_file_path")
+        or inputs.get("seed_file")
+        or (final.get("seed_path") if isinstance(final, dict) else None)
+        or (job.snapshot.get("seed_file") if job and job.snapshot else None)
+        or (job.snapshot.get("seed_path") if job and job.snapshot else None)
+    )
+    label = (
+        metadata.get("label")
+        or (job.label if job else None)
+        or (record.get("label") if record else None)
+        or (os.path.basename(seed_file_path) if seed_file_path else "paper")
+    )
+
+    reason = error or (final.get("stopped") if isinstance(final, dict) else None)
+    if not reason:
+        reason = "The citation audit was interrupted or stopped before completion."
+
+    with st.container(border=True):
+        if state == "failed":
+            st.error(f"❌ **Citation Audit Error**: {reason}", icon="❌")
+        else:
+            st.warning(f"⏹️ **Citation Audit Interrupted**: {reason}", icon="⏹️")
+
+        if seed_file_path:
+            st.caption(f"📄 Paper: `{os.path.basename(seed_file_path)}`")
+
+        st.markdown("##### What would you like to do?")
+        st.write("Would you like to restart the pipeline from the beginning for this paper, or move onto a new paper?")
+
+        c_restart, c_new = st.columns(2)
+        with c_restart:
+            if st.button("🔄 Restart Pipeline from Beginning", type="primary", use_container_width=True, key=f"btn_restart_{job_id or 'interrupted'}"):
+                if job_id:
+                    pipeline_status.clear_cancel_request(job_id=job_id)
+                else:
+                    pipeline_status.clear_cancel_request()
+                pipeline_status.set_status(active=False, stage="idle", stage_label="Idle", detail="Restarting pipeline...", allow_clear_cancel=True)
+                st.query_params.pop("job", None)
+                st.session_state.pop("active_job", None)
+                st.session_state.pop("audit_result", None)
+                st.session_state.pop("audit_query", None)
+                st.session_state.pop("build_result", None)
+                st.session_state.pop("build_query", None)
+                if job_id:
+                    run_jobs.remove_job(job_id)
+
+                if metadata.get("audit_only") and seed_file_path:
+                    from research_assistant.ui.audit import _start_audit_job
+                    _start_audit_job(seed_file_path, label=label, origin=origin, force=True)
+                elif seed_file_path:
+                    _start_pipeline_job(
+                        query=inputs.get("query", ""),
+                        seed_url_val=inputs.get("seed_url"),
+                        seed_file_path=seed_file_path,
+                        ask=inputs.get("ask", True),
+                        force=True,
+                        audit_citations=inputs.get("audit_citations", True),
+                        synthesis_mode=inputs.get("synthesis_mode"),
+                        origin=origin,
+                        enable_ocr=inputs.get("enable_ocr"),
+                    )
+                st.rerun(scope="app")
+
+        with c_new:
+            if st.button("📄 Move onto a New Paper", use_container_width=True, key=f"btn_new_{job_id or 'interrupted'}"):
+                if job_id:
+                    pipeline_status.clear_cancel_request(job_id=job_id)
+                else:
+                    pipeline_status.clear_cancel_request()
+                pipeline_status.set_status(active=False, stage="idle", stage_label="Idle", detail="Ready for new paper", allow_clear_cancel=True)
+                st.query_params.pop("job", None)
+                st.session_state.pop("active_job", None)
+                st.session_state.pop("active_job_origin", None)
+                st.session_state.pop("audit_result", None)
+                st.session_state.pop("audit_query", None)
+                st.session_state.pop("build_result", None)
+                st.session_state.pop("build_query", None)
+                if job_id:
+                    run_jobs.remove_job(job_id)
+                st.rerun(scope="app")
+
+
 def _handle_job_state(origin: str) -> bool:
     """Show a running job, adopt a finished one, explain a failed one.
 
@@ -236,8 +356,14 @@ def _handle_job_state(origin: str) -> bool:
         already = st.session_state.get("idea_result" if origin == "idea" else "audit_result")
         if not already or st.session_state.get("active_job") == job_id:
             _adopt_job_result(final or {}, job_origin or origin)
+        if origin == "audit" and final and final.get("stopped"):
+            _render_interrupted_run_prompt(origin=origin, state="stopped", error=final.get("stopped"), job_id=job_id, final=final)
+            return True
         return False
     if state in ("failed", "cancelled"):
+        if origin == "audit":
+            _render_interrupted_run_prompt(origin=origin, state=state, error=error, job_id=job_id, final=final)
+            return True
         st.session_state.pop("active_job", None)
         if state == "failed":
             st.error(f"The run failed: {error}", icon="❌")

@@ -121,8 +121,14 @@ def render_corpus_tab(chunks: int, papers: int):
             with st.spinner("Unpacking and validating uploaded papers…"):
                 staged = unpack_and_stage_uploads(uploaded_files, destination_dir=config.RAW_DIR)
         elif folder_path.strip():
-            with st.spinner(f"Scanning directory {folder_path} for PDFs…"):
-                staged = scan_and_stage_directory(folder_path.strip(), destination_dir=config.RAW_DIR, recursive=recursive)
+            raw_path = folder_path.strip()
+            real_path = os.path.realpath(os.path.expanduser(raw_path))
+            from research_assistant.shared.batch_uploader import is_safe_path
+            if not is_safe_path(real_path):
+                st.error(f"Access denied: Path '{raw_path}' is outside permitted workspace boundaries.", icon="🚫")
+            else:
+                with st.spinner(f"Scanning directory {real_path} for PDFs…"):
+                    staged = scan_and_stage_directory(real_path, destination_dir=config.RAW_DIR, recursive=recursive)
         elif urls_text.strip():
             items = [line.strip() for line in urls_text.splitlines() if line.strip()]
             with st.spinner(f"Fetching {len(items)} online papers…"):
@@ -137,10 +143,49 @@ def render_corpus_tab(chunks: int, papers: int):
             with st.status(f"Ingesting {len(candidates)} paper(s) into database…", expanded=True) as status_box:
                 batch_progress = st.progress(0.0, text=f"Preparing to ingest {len(candidates)} papers…")
 
-                def _on_batch_progress(item_c, item_t, name):
-                    if item_t > 0:
-                        pct = min(1.0, max(0.0, item_c / item_t))
-                        batch_progress.progress(pct, text=f"Parsing paper [{item_c}/{item_t}]: {name[:40]}")
+                def _on_batch_progress(status_or_item_c=None, item_t=None, name=None, **kwargs):
+                    try:
+                        if isinstance(status_or_item_c, dict):
+                            st_dict = status_or_item_c
+                            item_c = st_dict.get("item_current", 0)
+                            item_t = st_dict.get("item_total", 0)
+                            name = st_dict.get("current_item_name") or st_dict.get("name") or ""
+                            progress = st_dict.get("progress")
+                            message = st_dict.get("detail") or st_dict.get("message") or ""
+                            stage = st_dict.get("stage") or ""
+                        else:
+                            item_c = status_or_item_c if status_or_item_c is not None else 0
+                            item_t = item_t if item_t is not None else 0
+                            name = name or ""
+                            progress = None
+                            message = ""
+                            stage = ""
+
+                        if progress is not None:
+                            try:
+                                pct = min(1.0, max(0.0, float(progress)))
+                            except (ValueError, TypeError):
+                                pct = 0.0
+                        else:
+                            try:
+                                c_flt = float(item_c) if item_c is not None else 0.0
+                                t_flt = float(item_t) if item_t is not None else 0.0
+                                pct = min(1.0, max(0.0, c_flt / t_flt)) if t_flt > 0.0 else 0.0
+                            except (ValueError, TypeError, ZeroDivisionError):
+                                pct = 0.0
+
+                        name_str = str(name)[:40] if name is not None else ""
+                        try:
+                            has_t = float(item_t) > 0 if item_t is not None else False
+                        except (ValueError, TypeError):
+                            has_t = False
+
+                        display_txt = str(message) if message else (
+                            f"Parsing paper [{item_c}/{item_t}]: {name_str}" if has_t else f"Parsing paper: {name_str}"
+                        )
+                        batch_progress.progress(pct, text=display_txt)
+                    except Exception:
+                        pass
 
                 pipeline_status.register_progress_callback(_on_batch_progress)
                 try:

@@ -15,7 +15,7 @@ def _render_sidebar_pipeline_status():
         if status.get("active", False):
             st.info("⚡ **Pipeline Active**")
             if st.button("⏹️ Stop Pipeline", key="sidebar_stop_pipeline_btn", type="secondary", use_container_width=True, help="Immediately halt the active pipeline safely"):
-                pipeline_status.request_cancel("User stopped pipeline via sidebar")
+                pipeline_status.request_cancel("User stopped pipeline via sidebar", job_id=status.get("current_job_id"))
                 st.rerun()
             stage_lbl = status.get("stage_label") or status.get("stage") or "Processing"
             try:
@@ -102,7 +102,7 @@ def _render_live_pipeline_status(key_suffix="tab1"):
                     st.markdown("#### ⚡ Pipeline Active on Server")
                 with col_stop:
                     if st.button("⏹️ Stop Pipeline", key=f"stop_pipeline_btn_{key_suffix}", type="secondary", use_container_width=True, help="Immediately halt the active pipeline safely"):
-                        pipeline_status.request_cancel(f"User stopped pipeline via {key_suffix}")
+                        pipeline_status.request_cancel(f"User stopped pipeline via {key_suffix}", job_id=active_status.get("current_job_id"))
                         st.rerun()
                 st_stage = active_status.get("stage_label") or "Indexing papers"
                 try:

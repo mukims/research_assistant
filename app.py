@@ -20,9 +20,10 @@ from research_assistant.ui.chat_tab import render_chat_tab
 from research_assistant.ui.common import _check_auth, _corpus_stats, _render_sidebar_backend_controls
 from research_assistant.ui.corpus_tab import render_corpus_tab
 from research_assistant.ui.draft_tab import render_draft_tab
-from research_assistant.ui.grobid import _render_grobid_controls
+from research_assistant.ui.grobid import _render_docker_fallback_notice, _render_grobid_controls
 from research_assistant.ui.help_tab import render_help_tab
 from research_assistant.ui.idea_tab import render_idea_tab
+from research_assistant.ui.transfer_tab import render_transfer_tab
 from research_assistant.ui.status import _render_live_pipeline_status, _render_sidebar_pipeline_status
 
 st.set_page_config(page_title="Marvin the Citebot", page_icon="🤖", layout="wide")
@@ -110,8 +111,10 @@ st.caption(
     "Or hand it a paper to audit its citations against the evidence."
 )
 
-tab_planner, tab_audit, tab_idea, tab_draft, tab_chat, tab_corpus, tab_help = st.tabs(
-    ["Agent task planner", "Citation auditor", "Research idea", "Cite a draft", "Research chat",
+_render_docker_fallback_notice()
+
+tab_planner, tab_audit, tab_idea, tab_transfer, tab_draft, tab_chat, tab_corpus, tab_help = st.tabs(
+    ["Agent task planner", "Citation auditor", "Research idea", "Technique transfer", "Cite a draft", "Research chat",
      "Corpus library", "How to use"]
 )
 
@@ -125,6 +128,9 @@ with tab_audit:
 
 with tab_idea:
     render_idea_tab()
+
+with tab_transfer:
+    render_transfer_tab()
 
 with tab_draft:
     render_draft_tab(chunks)

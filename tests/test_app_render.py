@@ -89,6 +89,53 @@ class TestAuditItemBadge(unittest.TestCase):
         self.assertNotIn("Unclear", ui_audit._audit_item_badge({"outcome": "retrieval_failed", "judgement": None}))
 
 
+class TestSeedAndDownloadsScoping(unittest.TestCase):
+    """Ensures reference counts and lists in the UI are scoped to the active seed paper."""
+
+    def test_render_seed_and_downloads_scopes_references_to_seed_paper(self):
+        from unittest.mock import patch
+        final = {
+            "seed_path": "data/raw/processed/paper_a.pdf",
+            "extraction": {"references_ok": True},
+        }
+        fake_extracted = {
+            "references": [
+                {"source_file": "paper_a.pdf", "title": "Ref A1", "raw_reference": "Ref A1", "doi": "10.1/a1"},
+                {"source_file": "paper_a.pdf", "title": "Ref A2", "raw_reference": "Ref A2", "doi": "10.1/a2"},
+                {"source_file": "paper_b.pdf", "title": "Ref B1", "raw_reference": "Ref B1", "doi": "10.1/b1"},
+            ]
+        }
+        fake_downloaded = {
+            "doi:10.1/a1": {"title": "Ref A1", "key": "doi:10.1/a1"},
+            "doi:10.1/b1": {"title": "Ref B1", "key": "doi:10.1/b1"},
+        }
+        fake_failed = {
+            "doi:10.1/a2": {"title": "Ref A2", "key": "doi:10.1/a2", "reason": "paywalled"},
+        }
+
+        def fake_manifest(path):
+            if "extracted_citations" in str(path):
+                return fake_extracted
+            if "downloaded" in str(path):
+                return fake_downloaded
+            if "failed" in str(path):
+                return fake_failed
+            return {}
+
+        with patch.object(ui_results, "_manifest", side_effect=fake_manifest), \
+             patch.object(ui_results.st, "expander") as mock_exp, \
+             patch.object(ui_results.st, "caption"), \
+             patch.object(ui_results.st, "markdown"), \
+             patch.object(ui_results.st, "subheader"):
+            ui_results._render_seed_and_downloads("test query", final)
+            self.assertTrue(mock_exp.called)
+            label = mock_exp.call_args[0][0]
+            self.assertIn("1 fetched", label)
+            self.assertIn("1 unavailable", label)
+            self.assertIn("2 references found", label)
+            self.assertNotIn("3 references found", label)
+
+
 class TestJobResolution(unittest.TestCase):
     """How a tab finds a run after a refresh: registry first, disk second."""
 
@@ -165,3 +212,88 @@ class TestPipelineExecutionIsStreamlitFree(unittest.TestCase):
         import inspect, re
         src = inspect.getsource(ui_jobs._execute_pipeline)
         self.assertIsNone(re.search(r"\bst\.", src), src)
+
+
+class TestInterruptedJobPrompt(unittest.TestCase):
+    """Verifies that an interrupted or failed audit job prompts to restart or move to new paper."""
+
+    def test_handle_job_state_renders_prompt_on_failed_audit(self):
+        from unittest.mock import patch
+        import streamlit as st
+        st.session_state["active_job"] = "test_job_failed"
+        with patch("research_assistant.ui.jobs._resolve_job", return_value=("failed", None, "GROBID connection refused", "audit")), \
+             patch("research_assistant.ui.jobs._render_interrupted_run_prompt") as mock_prompt:
+            res = ui_jobs._handle_job_state("audit")
+            self.assertTrue(res)
+            mock_prompt.assert_called_once()
+            args = mock_prompt.call_args[1]
+            self.assertEqual(args["state"], "failed")
+            self.assertEqual(args["error"], "GROBID connection refused")
+
+    def test_handle_job_state_renders_prompt_on_cancelled_audit(self):
+        from unittest.mock import patch
+        import streamlit as st
+        st.session_state["active_job"] = "test_job_cancelled"
+        with patch("research_assistant.ui.jobs._resolve_job", return_value=("cancelled", None, "User cancelled", "audit")), \
+             patch("research_assistant.ui.jobs._render_interrupted_run_prompt") as mock_prompt:
+            res = ui_jobs._handle_job_state("audit")
+            self.assertTrue(res)
+            mock_prompt.assert_called_once()
+            args = mock_prompt.call_args[1]
+            self.assertEqual(args["state"], "cancelled")
+
+    def test_render_interrupted_run_prompt_structure(self):
+        from unittest.mock import patch, MagicMock
+        with patch.object(ui_jobs.st, "container"), \
+             patch.object(ui_jobs.st, "error") as mock_err, \
+             patch.object(ui_jobs.st, "caption"), \
+             patch.object(ui_jobs.st, "markdown") as mock_md, \
+             patch.object(ui_jobs.st, "write") as mock_write, \
+             patch.object(ui_jobs.st, "columns", return_value=(MagicMock(), MagicMock())), \
+             patch.object(ui_jobs.st, "button", return_value=False) as mock_btn:
+            ui_jobs._render_interrupted_run_prompt(
+                origin="audit",
+                error="Network timeout",
+                state="failed",
+                job_id="job123",
+                final={"seed_path": "paper.pdf"},
+            )
+            mock_err.assert_called_once()
+            self.assertIn("Network timeout", mock_err.call_args[0][0])
+            btn_labels = [call[0][0] for call in mock_btn.call_args_list]
+            self.assertTrue(any("Restart" in lbl for lbl in btn_labels))
+            self.assertTrue(any("New Paper" in lbl for lbl in btn_labels))
+
+    def test_job_restart_clears_stale_cancel_request_and_runs_cleanly(self):
+        """Regression test: restarting a previously cancelled job via _start_pipeline_job
+        must clear stale cancel flags and execute to completion rather than aborting with
+        'cancelled before execution'."""
+        from research_assistant.shared import run_jobs, pipeline_status
+        from unittest.mock import patch
+        import time
+
+        job_id = run_jobs.job_id_for("restart_test_doc.pdf")
+        pipeline_status.request_cancel("User stopped previous run", job_id=job_id)
+        self.assertTrue(pipeline_status.is_cancel_requested(job_id))
+
+        # Clean in-memory registry if test ran before
+        run_jobs.remove_job(job_id)
+
+        with patch("research_assistant.ui.jobs._execute_pipeline", return_value={"status": "success", "result": 42}):
+            started_id = ui_jobs._start_pipeline_job(
+                query="",
+                seed_file_path="/tmp/restart_test_doc.pdf",
+                origin="audit",
+                force=True,
+            )
+            self.assertEqual(started_id, job_id)
+            job = run_jobs.get_job(job_id)
+            self.assertIsNotNone(job)
+            job.thread.join(timeout=5.0)
+
+            self.assertEqual(job.state, "done")
+            self.assertIsNone(job.error)
+            self.assertEqual(job.result.get("status"), "success")
+            self.assertFalse(pipeline_status.is_cancel_requested(job_id))
+            run_jobs.remove_job(job_id)
+

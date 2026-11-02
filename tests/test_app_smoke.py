@@ -20,10 +20,22 @@ class TestAppRenders(unittest.TestCase):
     def test_the_page_renders_without_an_exception(self):
         self.assertEqual(self.page["exceptions"], [])
 
-    def test_the_six_tabs_are_there_in_order(self):
+    def test_the_tabs_are_there_in_order(self):
         self.assertEqual(
             self.page["tabs"],
-            ["Agent task planner", "Citation auditor", "Research idea", "Cite a draft", "Research chat", "How to use"],
+            [
+                "Agent task planner",
+                "Citation auditor",
+                "Research idea",
+                "Technique transfer",
+                "Cite a draft",
+                "Research chat",
+                "Corpus library",
+                "📁 Multi-File / ZIP Upload",
+                "📂 Scan Local Directory",
+                "🌐 Paste DOIs / arXiv IDs / URLs",
+                "How to use",
+            ],
         )
 
     def test_the_sidebar_has_its_four_sections(self):

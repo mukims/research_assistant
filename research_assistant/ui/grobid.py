@@ -12,15 +12,47 @@ def _grobid_ok():
         return False
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _check_docker_and_grobid():
+    try:
+        from research_assistant.agents.grobid_controller import GrobidAgent
+
+        agent = GrobidAgent()
+        docker_ok, _ = agent.check_docker()
+        grobid_alive = agent.is_alive(timeout=2.0)
+        return docker_ok, grobid_alive
+    except Exception:
+        return False, False
+
+
+def _render_docker_fallback_notice():
+    """Display a notification on the main window if Docker/GROBID is down and the agent is using fallback."""
+    docker_ok, grobid_alive = _check_docker_and_grobid()
+    if not grobid_alive or not docker_ok:
+        st.warning(
+            "⚠️ **Docker is down**: GROBID is unavailable and the agent is using the fallback option for reference extraction.",
+            icon="⚠️",
+        )
+
+
 def _clear_grobid_cache():
     if hasattr(_grobid_ok, "clear"):
         _grobid_ok.clear()
+    if hasattr(_check_docker_and_grobid, "clear"):
+        _check_docker_and_grobid.clear()
+    if hasattr(_cached_grobid_agent_status, "clear"):
+        _cached_grobid_agent_status.clear()
+
+
+@st.cache_data(ttl=10)
+def _cached_grobid_agent_status():
+    from research_assistant.agents.grobid_controller import GrobidAgent
+    return GrobidAgent().check_status()
 
 
 def _render_grobid_controls():
     try:
         from research_assistant.agents.grobid_controller import GrobidAgent
-
         agent = GrobidAgent()
 
         if "grobid_feedback" in st.session_state:
@@ -34,7 +66,7 @@ def _render_grobid_controls():
             else:
                 st.info(fb_msg, icon="ℹ️")
 
-        status = agent.check_status()
+        status = _cached_grobid_agent_status()
         st.session_state["grobid_server_state"] = status.state
 
         if status.state == "RUNNING":

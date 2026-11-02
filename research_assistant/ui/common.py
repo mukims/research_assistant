@@ -154,7 +154,7 @@ def _get_model_choices():
     standard_ollama = getattr(
         config,
         "OLLAMA_CHAT_MODELS",
-        ("gemma4:e2b", "llama3.2:latest", "mistral:latest", "qwen2.5:latest", "deepseek-r1:8b"),
+        ("gemma4:e2b-mlx", "llama3.2:latest", "mistral:latest", "qwen2.5:latest", "deepseek-r1:8b"),
     )
     for m in standard_ollama:
         if not any(c["model"] == m for c in choices):
@@ -163,7 +163,7 @@ def _get_model_choices():
     # 3. Hosted / Gemini / OpenAI options
     if config.GEMINI_API_KEY:
         choices.append({"label": "✨ Gemini: gemini-3.5-flash-lite (fast)", "model": "gemini-3.5-flash-lite", "backend": "openai"})
-        choices.append({"label": "✨ Gemini: gemini-2.5-pro (deep reasoning)", "model": "gemini-2.5-pro", "backend": "openai"})
+        choices.append({"label": "✨ Gemini: gemini-3.5-pro (deep reasoning)", "model": "gemini-3.5-pro", "backend": "openai"})
     elif config.OPENAI_API_KEY:
         choices.append({"label": "🌐 OpenAI: gpt-4o-mini", "model": "gpt-4o-mini", "backend": "openai"})
     else:
@@ -210,6 +210,14 @@ def _render_sidebar_backend_controls():
 
     st.session_state["chat_model"] = final_model
     st.session_state["chat_backend"] = final_backend
+    st.session_state["llm_model"] = final_model
+    st.session_state["llm_backend"] = final_backend
+    st.session_state["selected_model"] = final_model
+    st.session_state["selected_backend"] = final_backend
+
+    # Propagate to global config runtime settings across all tabs
+    config.LLM_MODEL = final_model
+    config.LLM_BACKEND = final_backend
 
     if "chat_agent" in st.session_state and st.session_state["chat_agent"] is not None:
         agent = st.session_state["chat_agent"]

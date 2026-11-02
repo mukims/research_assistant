@@ -161,10 +161,51 @@ def render_audit_tab():
 
                     from research_assistant.shared.ingestion import ingest_pdfs
 
-                    def _on_batch_progress(item_c, item_t, name):
-                        if item_t > 0:
-                            pct = min(1.0, max(0.0, item_c / item_t))
-                            batch_progress.progress(pct, text=f"Parsing paper [{item_c}/{item_t}]: {name[:40]}")
+                    def _on_batch_progress(status_or_item_c=None, item_t=None, name=None, **kwargs):
+                        try:
+                            if isinstance(status_or_item_c, dict):
+                                st_dict = status_or_item_c
+                                item_c = st_dict.get("item_current", 0)
+                                item_t = st_dict.get("item_total", 0)
+                                name = st_dict.get("current_item_name") or st_dict.get("name") or ""
+                                progress = st_dict.get("progress")
+                                message = st_dict.get("detail") or st_dict.get("message") or ""
+                                stage = st_dict.get("stage") or ""
+                            else:
+                                item_c = status_or_item_c if status_or_item_c is not None else 0
+                                item_t = item_t if item_t is not None else 0
+                                name = name or ""
+                                progress = None
+                                message = ""
+                                stage = ""
+
+                            if progress is not None:
+                                try:
+                                    pct = min(1.0, max(0.0, float(progress)))
+                                except (ValueError, TypeError):
+                                    pct = 0.0
+                            else:
+                                try:
+                                    c_flt = float(item_c) if item_c is not None else 0.0
+                                    t_flt = float(item_t) if item_t is not None else 0.0
+                                    pct = min(1.0, max(0.0, c_flt / t_flt)) if t_flt > 0.0 else 0.0
+                                except (ValueError, TypeError, ZeroDivisionError):
+                                    pct = 0.0
+
+                            name_str = str(name)[:40] if name is not None else ""
+                            try:
+                                has_t = float(item_t) > 0 if item_t is not None else False
+                            except (ValueError, TypeError):
+                                has_t = False
+
+                            display_txt = str(message) if message else (
+                                f"Parsing paper [{item_c}/{item_t}]: {name_str}" if has_t else f"Parsing paper: {name_str}"
+                            )
+                            batch_progress.progress(pct, text=display_txt)
+                        except Exception:
+                            pass
+
+                    pipeline_status.register_progress_callback(_on_batch_progress)
 
                     with pipeline_status.track_stage(
                         "ingest_refs",
