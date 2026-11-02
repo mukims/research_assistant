@@ -30,19 +30,6 @@ def load_env_files(paths: list[str], protected: frozenset[str],
             if value is not None and key not in protected:
                 environ[key] = value
 
-# ─── Hardware CPU Guardrails ─────────────────────────────────────────────────
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("TORCH_NUM_THREADS", "1")
-
-try:
-    import torch
-    torch.set_num_threads(1)
-except Exception:
-    pass
 
 # ─── Roots ───────────────────────────────────────────────────────────────────
 # config.py now lives inside the package, so the project root is two levels up.
@@ -64,6 +51,21 @@ DATA_DIR = os.environ.get("CITATION_DATA_DIR", os.path.join(PROJECT_ROOT, "data"
 
 if _DOTENV_ENABLED:
     load_env_files([os.path.join(DATA_DIR, ".env")], _REAL_ENV)
+
+
+# ─── Hardware CPU Guardrails ─────────────────────────────────────────────────
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("TORCH_NUM_THREADS", "1")
+
+try:
+    import torch
+    torch.set_num_threads(1)
+except Exception:
+    pass
 
 
 # ─── Env helpers ─────────────────────────────────────────────────────────────

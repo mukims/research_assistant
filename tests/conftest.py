@@ -69,15 +69,19 @@ def _wipe_contents(path):
         raise RuntimeError(f"refusing to wipe {path!r}: not a directory conftest created")
     if not os.path.isdir(path):
         return
+    leftovers = []
     for name in os.listdir(path):
         child = os.path.join(path, name)
-        if os.path.isdir(child) and not os.path.islink(child):
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            try:
+        try:
+            if os.path.isdir(child) and not os.path.islink(child):
+                shutil.rmtree(child)
+            else:
                 os.unlink(child)
-            except OSError:
-                pass
+        except OSError as exc:
+            leftovers.append(f"{child} ({exc})")
+    if leftovers:
+        # A reset that silently leaves files behind shows up later as an unrelated failure.
+        raise RuntimeError("could not wipe: " + "; ".join(leftovers))
 
 
 @pytest.fixture(autouse=True)
@@ -115,8 +119,8 @@ def _release_chroma_clients():
     try:
         from chromadb.api.shared_system_client import SharedSystemClient
         SharedSystemClient.clear_system_cache()
-    except Exception:
-        pass
+    except (ImportError, AttributeError):
+        pass  # a chromadb without the shared-client cache has nothing to release
 
 
 def _clear_in_process_caches():
