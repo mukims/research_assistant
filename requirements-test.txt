@@ -10,10 +10,13 @@
 # lazily inside the functions the tests never call, so none of it is needed
 # here. That is deliberate: it keeps the tests runnable anywhere.
 #
-# No provider SDK (ollama, openai) is needed here: every agent now calls
+# Most tests need no provider SDK: every agent calls
 # research_assistant.shared.llm.chat()/chat_stream(), and test_llm.py exercises
-# the ollama/openai backends by injecting fakes into sys.modules rather than
-# importing the real packages.
+# the ollama/openai backends by injecting fakes into sys.modules. A few
+# (test_challenger_m2_p1_stress.py, test_p1_remediation.py) patch the real
+# ollama.chat / openai client / grobid_client.GrobidClient, so those three small
+# pure-Python SDKs are pinned below, as in requirements.txt. chromadb is still not
+# needed: tests that reach the store use LanceDB or a fake.
 #
 # pytest replaces unittest discover — it collects the existing
 # unittest.TestCase classes unchanged, so no test file needed to change.
@@ -45,6 +48,15 @@ streamlit==1.65.0
 # PDF-structure tests in test_task_extractor.py and test_discoverer.py. It is a
 # binary wheel but not part of the heavy stack above; same pin as requirements.txt.
 PyMuPDF==1.28.2
+#
+# lancedb and pyarrow: LanceDB is the app's default store (config.USE_LANCEDB), so the
+# suite must run against it -- tests/test_lancedb_store.py, test_lance_ingestion.py and
+# the challenger suites skip or fail without them. Binary wheels; same pins as requirements.txt.
+lancedb==0.41.0
+pyarrow==25.0.1
+ollama==0.6.3
+openai==3.31.0
+grobid-client-python==0.2.0
 pytest~=9.1
 numpy~=2.2.6
 requests~=2.32

@@ -165,7 +165,7 @@ class TestFTSEscapingAndLanceStore(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="test-lance-fts-")
         self.client = lance_store.LanceStoreClient(self.tmp_dir)
-        self.table = self.client.get_or_create_collection("physics_papers_test")
+        self.table = self.client.get_or_create_collection("physics_papers_test", {"embedding_dim": 768})
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -767,7 +767,7 @@ class TestCrossFeatureIntegration(unittest.TestCase):
     def test_01_fetch_ingest_lancedb_search_pipeline(self):
         """Fetcher -> Ingestor -> LanceDB -> Search flow."""
         client = lance_store.LanceStoreClient(self.tmp_dir)
-        table = client.get_or_create_collection("integration_corpus")
+        table = client.get_or_create_collection("integration_corpus", {"embedding_dim": 768})
 
         cid = lance_store.compute_chunk_id("paper1.pdf", "text_chunk", 0, "Topological insulator surface states.")
         table.add(

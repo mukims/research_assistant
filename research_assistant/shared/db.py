@@ -204,8 +204,10 @@ def open_store():
 
 
 def embedder_record(embeddings) -> dict:
-    """Collection metadata naming the embedder, and its build where it can say."""
-    record = {"embedder": EMBED_MODEL}
+    """Collection metadata naming the embedder, its vector width, and its build where it can say."""
+    from research_assistant.shared.llm import embedding_dim
+
+    record = {"embedder": EMBED_MODEL, "embedding_dim": embedding_dim(embeddings)}
     build = getattr(embeddings, "build_id", lambda: None)()
     if build:
         record["embedder_build"] = build

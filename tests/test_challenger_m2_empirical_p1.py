@@ -244,7 +244,7 @@ class TestAdversarialLanceDBRowCaps(unittest.TestCase):
         """LanceTableAdapter.get(limit=None) on a table with 25 rows returns ALL 25 rows."""
         with tempfile.TemporaryDirectory() as tmpdir:
             client = lance_store.LanceStoreClient(path=tmpdir)
-            col = client.get_or_create_collection("adversarial_chunks")
+            col = client.get_or_create_collection("adversarial_chunks", {"embedding_dim": 768})
 
             n_rows = 25
             ids = [f"chunk_{i:02d}" for i in range(n_rows)]

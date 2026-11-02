@@ -676,6 +676,10 @@ class LanceTableAdapter:
         return " AND ".join(parts) if parts else None
 
 
+class EmbeddingDimensionMismatch(ValueError):
+    """An existing table's vector width differs from the configured embedder's."""
+
+
 class LanceStoreClient:
     """Chroma-like client interface for LanceDB."""
 
@@ -692,20 +696,43 @@ class LanceStoreClient:
         return self.list_tables()
 
     def get_or_create_collection(self, name: str, metadata: Optional[dict] = None) -> LanceTableAdapter:
-        dim = 768
+        """Open the table, or create it sized for the embedder.
+
+        ``metadata["embedding_dim"]`` (from db.embedder_record) is the vector width of a
+        new papers or summaries table. These tables were hard-coded to 768 dimensions, so
+        any other embedder failed on its first add() with "Cannot cast to FixedSizeList(768)".
+        An existing table of another width is refused here, with the fix, rather than later
+        at add() or search time.
+        """
         name_lower = name.lower()
         is_summary = "summar" in name_lower
+        is_quarantine = "quarantine" in name_lower
+        dim = (metadata or {}).get("embedding_dim")
+        if dim is not None:
+            dim = int(dim)
         tables = self.list_tables()
         if name in tables:
-            return LanceTableAdapter(self.db.open_table(name), is_summary=is_summary)
+            table = self.db.open_table(name)
+            if dim is not None and not is_quarantine:
+                have = table.schema.field("vector").type.list_size
+                if have != dim:
+                    raise EmbeddingDimensionMismatch(
+                        f"Table {name} holds {have}-d vectors but the embedder makes {dim}-d. "
+                        "Build a new index: set CITATION_INDEX_VERSION to a new number."
+                    )
+            return LanceTableAdapter(table, is_summary=is_summary)
 
-        if is_summary:
-            table = self.db.create_table(name, schema=get_summaries_schema(dim))
-        elif "quarantine" in name_lower:
-            table = self.db.create_table(name, schema=get_quarantine_schema())
-        else:
-            table = self.db.create_table(name, schema=get_papers_schema(dim))
-        return LanceTableAdapter(table, is_summary=is_summary)
+        if is_quarantine:
+            return LanceTableAdapter(
+                self.db.create_table(name, schema=get_quarantine_schema()), is_summary=is_summary
+            )
+        if dim is None:
+            raise ValueError(
+                f"Cannot create table {name}: metadata must carry 'embedding_dim' "
+                "(see shared.db.embedder_record)."
+            )
+        schema = get_summaries_schema(dim) if is_summary else get_papers_schema(dim)
+        return LanceTableAdapter(self.db.create_table(name, schema=schema), is_summary=is_summary)
 
     def get_collection(self, name: str) -> LanceTableAdapter:
         tables = self.list_tables()

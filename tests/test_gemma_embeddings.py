@@ -105,12 +105,15 @@ class BuildIdTests(unittest.TestCase):
 
 class EmbedderRecordTests(unittest.TestCase):
     def test_the_record_carries_the_model_and_the_build_when_known(self):
+        probe = lambda text: [0.0, 0.0, 0.0]           # noqa: E731 -- the record also names the vector width
         with patch.object(db, "EMBED_MODEL", "embeddinggemma-2"):
-            emb = types.SimpleNamespace(build_id=lambda: "eaff2253e2ba")
-            self.assertEqual(db.embedder_record(emb), {"embedder": "embeddinggemma-2", "embedder_build": "eaff2253e2ba"})
-            self.assertEqual(db.embedder_record(types.SimpleNamespace(build_id=lambda: None)),
-                             {"embedder": "embeddinggemma-2"})
-            self.assertEqual(db.embedder_record(object()), {"embedder": "embeddinggemma-2"})
+            emb = types.SimpleNamespace(build_id=lambda: "eaff2253e2ba", embed_query=probe)
+            self.assertEqual(db.embedder_record(emb), {
+                "embedder": "embeddinggemma-2", "embedding_dim": 3, "embedder_build": "eaff2253e2ba"})
+            self.assertEqual(db.embedder_record(types.SimpleNamespace(build_id=lambda: None, embed_query=probe)),
+                             {"embedder": "embeddinggemma-2", "embedding_dim": 3})
+            self.assertEqual(db.embedder_record(types.SimpleNamespace(embed_query=probe)),
+                             {"embedder": "embeddinggemma-2", "embedding_dim": 3})
 
     def test_a_different_build_warns_but_does_not_refuse(self):
         coll = types.SimpleNamespace(name="c", metadata={"embedder": "embeddinggemma-2", "embedder_build": "aaaaaaaaaaaa"})

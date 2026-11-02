@@ -25,6 +25,18 @@ class _OfflineEmbeddings:
         return [0.0, 0.0, 0.0]
 
 
+def _temp_lance_store(tmpdir):
+    """A LanceDB store in tmpdir for ingestion's open_store().
+
+    conftest turns LanceDB off, which would send open_store() to chromadb -- not installed
+    on CI's light install. These tests only need somewhere for chunks to land.
+    """
+    from research_assistant.shared.lance_store import LanceStoreClient
+
+    client = LanceStoreClient(os.path.join(tmpdir, "lance"))
+    return patch("research_assistant.shared.ingestion.open_store", return_value=client)
+
+
 class TestP0Area1ProgressCallbacks(unittest.TestCase):
     """Area 1: UI Progress Callbacks & Cleanup."""
 
@@ -554,7 +566,9 @@ class TestP0Area7IngestionManifestAndAbstractOnly(unittest.TestCase):
                 self.assertIn("text_chunk", types)
 
                 # Ingest abstract_corpus and register in manifest
-                with patch("research_assistant.shared.ingestion.upsert_summaries") as mock_summaries:
+                with patch("research_assistant.shared.ingestion.upsert_summaries") as mock_summaries, \
+                     _temp_lance_store(tmpdir), \
+                     patch("research_assistant.shared.llm.get_embeddings", return_value=_OfflineEmbeddings()):
                     upsert_corpus(abstract_corpus)
                     mock_summaries.assert_called_once()
                     manifest.add_many(abstract_keys)
@@ -770,6 +784,7 @@ class TestP0Iteration2DefectRegressions(unittest.TestCase):
                 with patch("research_assistant.shared.ingestion.process_pdf", return_value=[{"document": key, "type": "summary_source", "citation": "P", "content": "Hello"}]), \
                      patch("research_assistant.shared.ingestion.upsert_summaries", side_effect=RuntimeError("Store collection error")), \
                      patch("research_assistant.shared.llm.get_embeddings", return_value=_OfflineEmbeddings()), \
+                     _temp_lance_store(tmpdir), \
                      patch("research_assistant.shared.ingestion.rebuild_bm25"):
                     pipeline_status.clear_status()
                     ingest_pdfs({pdf_path: "Paper Title"}, workers=1, skip_ingested=False)

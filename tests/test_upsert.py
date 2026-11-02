@@ -306,7 +306,7 @@ class SummaryFailureTests(unittest.TestCase):
         chroma.PersistentClient = lambda path: types.SimpleNamespace(
             get_or_create_collection=lambda name, metadata=None: col,
         )
-        emb = types.SimpleNamespace(embed_documents=lambda texts: [[0.0] for _ in texts])
+        emb = types.SimpleNamespace(embed_documents=lambda texts: [[0.0] for _ in texts], embed_query=lambda t: [0.0])
         events = []
         import research_assistant.shared.llm as llm_mod
         with patch.dict(sys.modules, {"chromadb": chroma}), \

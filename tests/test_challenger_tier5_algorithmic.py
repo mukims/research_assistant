@@ -353,7 +353,7 @@ class TestLanceDBStorageAndDeduplication(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="challenger_lancedb_")
         self.client = LanceStoreClient(self.tmp_dir)
-        self.col = self.client.get_or_create_collection("adversarial_papers")
+        self.col = self.client.get_or_create_collection("adversarial_papers", {"embedding_dim": 768})
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -523,7 +523,7 @@ class TestTantivyQueryEscaping(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="challenger_tantivy_")
         self.client = LanceStoreClient(self.tmp_dir)
-        self.col = self.client.get_or_create_collection("tantivy_scientific")
+        self.col = self.client.get_or_create_collection("tantivy_scientific", {"embedding_dim": 768})
 
         # Ingest realistic scientific corpus with formulas, math, and DOIs
         self.col.add(

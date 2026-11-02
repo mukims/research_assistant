@@ -499,6 +499,20 @@ class _GemmaEmbeddings:
 
 
 _embeddings_singleton = None
+# (embeddings object, width) keyed by id(); the object is kept so its id is never reused.
+_dim_cache: dict = {}
+
+
+def embedding_dim(embeddings) -> int:
+    """The vector width of an embeddings object, probed once per object.
+
+    LanceDB tables are created at a fixed width, so the width must come from the
+    embedder that will fill them rather than a constant.
+    """
+    key = id(embeddings)
+    if key not in _dim_cache:
+        _dim_cache[key] = (embeddings, len(embeddings.embed_query("dimension probe")))
+    return _dim_cache[key][1]
 
 
 def get_embeddings(model=None):

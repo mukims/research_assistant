@@ -21,7 +21,7 @@ class TestLanceDBStore(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test-lance-")
         self.client = LanceStoreClient(self.tmp)
-        self.table_adapter = self.client.get_or_create_collection("test_papers")
+        self.table_adapter = self.client.get_or_create_collection("test_papers", {"embedding_dim": 768})
 
         # Insert 6 structured chunks across two papers
         # Paper A: chunks with seq 0, 1, 2
@@ -202,7 +202,7 @@ class TestLanceDBStore(unittest.TestCase):
         self.assertEqual(hit["context_after"], "Conclusion: Landau levels observed at room temperature.")
 
     def test_adapter_add_upsert_delete(self):
-        new_table = self.client.get_or_create_collection("test_dynamic_ops")
+        new_table = self.client.get_or_create_collection("test_dynamic_ops", {"embedding_dim": 768})
         new_table.add(
             ids=["chk_dyn_1", "chk_dyn_2"],
             documents=["First dynamic test document.", "Second dynamic test document."],
