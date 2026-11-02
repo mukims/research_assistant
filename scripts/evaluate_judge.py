@@ -59,6 +59,22 @@ def _judge_one(case, mode, context_mode="window"):
     return entry["judgement"], entry
 
 
+def verdict_agreement(results):
+    """Fraction of cases whose verdict is identical in every run.
+
+    A model that ignores temperature 0.0 can still be accurate on average and
+    yet answer the same case differently from one run to the next; accuracy
+    alone hides that. A run that errored (got is None) disagrees with one that
+    returned a verdict. None when there are no results to compare.
+    """
+    got_by_case: dict[str, set] = {}
+    for rec in results:
+        got_by_case.setdefault(rec["case"]["id"], set()).add(rec["got"])
+    if not got_by_case:
+        return None
+    return sum(len(got) == 1 for got in got_by_case.values()) / len(got_by_case)
+
+
 def run(cases, mode="judge", runs=1, limit=None, context_mode="window"):
     held, refused = split_held_out(cases, PROMPT_TEMPLATE)
     in_prompt = [c for c in refused if c["source"] == "prompt_example"]
@@ -101,6 +117,7 @@ def run(cases, mode="judge", runs=1, limit=None, context_mode="window"):
         "runs": runs,
         "generated": datetime.now().isoformat(timespec="seconds"),
         "summary": summary,
+        "verdict_agreement": verdict_agreement(results),
         "in_prompt": in_prompt_summary,
         "refused": refused,
         "skipped_no_paper": skipped_no_paper,

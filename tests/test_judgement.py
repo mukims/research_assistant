@@ -563,3 +563,97 @@ class TestComposeContext(unittest.TestCase):
         self.assertIn("captions of figures", prompt)
         self.assertIn("never as evidence", prompt)
 
+
+
+class TestModelAndVoting(unittest.TestCase):
+    """A verdict says which model produced it, and JUDGEMENT_VOTES > 1 takes
+    the majority of several calls: gemini-3.5-flash-lite ignores the 0.0
+    temperature, so one call is not a repeatable verdict."""
+
+    EVIDENCE = "the sentence"
+    UNCLEAR = "Unclear / insufficient evidence"
+
+    def _replies(self, *judgements):
+        by_name = {
+            "Supports": _reply(),
+            "Contradicts": _reply(finding="Contradicts", judgement="Contradicts"),
+            "Does not support": _reply(finding="Does not support", judgement="Does not support",
+                                       sufficiency="partial"),
+            self.UNCLEAR: _reply(finding="Partially supports", judgement=self.UNCLEAR),
+        }
+        return [types.SimpleNamespace(content=json.dumps(by_name[j]),
+                                      model="gemini-3.5-flash-lite-001") for j in judgements]
+
+    def _judge(self, replies, votes):
+        patches = [
+            patch.object(judge_mod, "GEMINI_API_KEY", "k"),
+            patch.object(judge_mod, "LLM_BACKEND", "openai"),
+            patch.object(judge_mod, "JUDGEMENT_MODEL", "gemini-3.5-flash-lite"),
+            patch.object(judge_mod, "JUDGEMENT_VOTES", votes),
+        ]
+        for p_ in patches:
+            p_.start(); self.addCleanup(p_.stop)
+        with patch.object(judge_mod, "chat", side_effect=replies) as fake:
+            out = judge_mod.judge("claim", self.EVIDENCE)
+        return out, fake
+
+    def test_verdict_records_the_model(self):
+        from research_assistant.shared.llm import ChatResult
+        reply = ChatResult(content=json.dumps(_reply()), model="gemini-3.5-flash-lite-001")
+        out, fake = self._judge([reply], votes=1)
+        self.assertEqual(out["judge_model"], "gemini-3.5-flash-lite")
+        self.assertEqual(out["judge_model_version"], "gemini-3.5-flash-lite-001")
+        self.assertNotIn("votes", out)
+        self.assertNotIn("vote_split", out)
+        self.assertEqual(fake.call_count, 1)
+
+    def test_version_is_none_when_the_provider_names_none(self):
+        reply = types.SimpleNamespace(content=json.dumps(_reply()))
+        out, _ = self._judge([reply], votes=1)
+        self.assertIsNone(out["judge_model_version"])
+
+    def test_three_votes_majority_wins(self):
+        out, fake = self._judge(self._replies("Supports", "Supports", self.UNCLEAR), votes=3)
+        self.assertEqual(fake.call_count, 3)
+        self.assertEqual(out["judgement"], "Supports")
+        self.assertEqual(out["votes"], {"Supports": 2, self.UNCLEAR: 1})
+        self.assertNotIn("vote_split", out)
+        self.assertEqual(out["confidence"], "High")
+
+    def test_the_first_vote_carrying_the_majority_verdict_is_returned(self):
+        replies = self._replies(self.UNCLEAR, "Supports", "Supports")
+        replies[1].content = json.dumps(_reply(confidence="Medium"))
+        replies[2].content = json.dumps(_reply(confidence="Low"))
+        out, _ = self._judge(replies, votes=3)
+        self.assertEqual(out["judgement"], "Supports")
+        self.assertEqual(out["confidence"], "Medium")
+
+    def test_three_way_split_is_unclear_low(self):
+        out, _ = self._judge(self._replies("Supports", "Contradicts", "Does not support"), votes=3)
+        self.assertEqual(out["judgement"], self.UNCLEAR)
+        self.assertEqual(out["confidence"], "Low")
+        self.assertIs(out["vote_split"], True)
+        self.assertEqual(out["votes"], {"Supports": 1, "Contradicts": 1, "Does not support": 1})
+
+    def test_the_rubric_is_enforced_on_every_vote_before_counting(self):
+        """A vote whose span is invented is Unclear after enforce_rubric, so it
+        counts as Unclear, not as the Supports the model claimed."""
+        replies = self._replies("Supports", "Supports", "Supports")
+        for r in replies[:2]:
+            r.content = json.dumps(_reply(span="a sentence that is nowhere in the evidence"))
+        out, _ = self._judge(replies, votes=3)
+        self.assertEqual(out["votes"], {self.UNCLEAR: 2, "Supports": 1})
+        self.assertEqual(out["judgement"], self.UNCLEAR)
+
+    def test_even_vote_count_rounds_up(self):
+        import subprocess
+        import sys
+        env = {"PATH": os.environ.get("PATH", ""), "CITATION_DISABLE_DOTENV": "1",
+               "CITATION_JUDGEMENT_VOTES": "2"}
+        done = subprocess.run(
+            [sys.executable, "-c", "from research_assistant import config; print(config.JUDGEMENT_VOTES)"],
+            env=env, capture_output=True, text=True, timeout=120,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "3")

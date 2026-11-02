@@ -114,6 +114,47 @@ def _ollama_reply(text):
     )
 
 
+class TestChatResultModel(unittest.TestCase):
+    """The provider names the model that answered; the judge records it."""
+
+    def _openai(self, reply):
+        client = MagicMock()
+        client.chat.completions.create.return_value = reply
+        module = types.SimpleNamespace(OpenAI=MagicMock(return_value=client))
+        with patch.dict("sys.modules", {"openai": module}), \
+             patch.object(llm, "LLM_BACKEND", "openai"):
+            return llm.chat([{"role": "user", "content": "hi"}])
+
+    def test_openai_result_carries_the_model(self):
+        reply = _openai_reply("ok")
+        reply.model = "m-001"
+        self.assertEqual(self._openai(reply).model, "m-001")
+
+    def test_no_model_in_the_response_is_none(self):
+        self.assertIsNone(self._openai(_openai_reply("ok")).model)
+
+    def test_a_non_string_model_is_never_recorded(self):
+        """MagicMock responses answer any attribute; that is not a model id."""
+        reply = MagicMock()
+        reply.choices[0].message.content = "ok"
+        self.assertIsNone(self._openai(reply).model)
+
+    def test_ollama_result_carries_the_model(self):
+        reply = _ollama_reply("ok")
+        reply.model = "gemma4:e2b"
+        fake = MagicMock()
+        fake.chat.return_value = reply
+        with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
+            self.assertEqual(llm.chat([{"role": "user", "content": "hi"}]).model, "gemma4:e2b")
+
+    def test_ollama_dict_response_carries_the_model(self):
+        fake = MagicMock()
+        fake.chat.return_value = {"model": "gemma4:e2b", "message": {"content": "ok"}}
+        with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
+            result = llm.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual((result.content, result.model), ("ok", "gemma4:e2b"))
+
+
 class TestChatTemperatureOpenAI(unittest.TestCase):
     def _run(self, **kwargs):
         client = MagicMock()

@@ -23,6 +23,7 @@ from research_assistant.config import (
     JUDGEMENT_MODEL,
     JUDGEMENT_OLLAMA_OPTIONS,
     JUDGEMENT_TEMPERATURE,
+    JUDGEMENT_VOTES,
 )
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
@@ -397,8 +398,20 @@ def judge(
     effective_backend = backend or (LLM_BACKEND if GEMINI_API_KEY else None)
     gemini = (effective_backend or LLM_BACKEND) == "openai" and GEMINI_API_KEY
     effective_model = model or JUDGEMENT_MODEL or ("gemini-3.5-flash-lite" if gemini else None)
+    messages = [{"role": "user", "content": build_prompt(claim, citation_evidence, context=context)}]
+    votes = [
+        _judge_vote(messages, effective_model, effective_backend, citation_evidence, claim)
+        for _ in range(JUDGEMENT_VOTES)
+    ]
+    if len(votes) == 1:
+        return votes[0]
+    return _tally(votes)
+
+
+def _judge_vote(messages, effective_model, effective_backend, citation_evidence, claim) -> dict:
+    """One model call, parsed and rubric-enforced, stamped with the model."""
     result = chat(
-        [{"role": "user", "content": build_prompt(claim, citation_evidence, context=context)}],
+        messages,
         model=effective_model,
         temperature=JUDGEMENT_TEMPERATURE,
         options=JUDGEMENT_OLLAMA_OPTIONS,
@@ -406,7 +419,36 @@ def judge(
     )
     if not result.content:
         raise JudgementParseError("LLM returned an empty response.", raw="")
-    return enforce_rubric(parse_judgement(result.content), citation_evidence, claim=claim)
+    verdict = enforce_rubric(parse_judgement(result.content), citation_evidence, claim=claim)
+    # The model that actually produced the verdict, so a result can be traced
+    # (and a silent provider-side model change noticed). judge_model is what
+    # was asked for; judge_model_version is what the provider says answered.
+    verdict["judge_model"] = effective_model or LLM_MODEL
+    verdict["judge_model_version"] = getattr(result, "model", None)
+    return verdict
+
+
+def _tally(votes: list[dict]) -> dict:
+    """Combine several rubric-enforced votes into one verdict.
+
+    A strict majority on `judgement` returns the first vote carrying it. With
+    none, the votes disagree about the claim, and a coin-flip verdict would be
+    reported as a finding: the record says Unclear / Low, with vote_split set.
+    """
+    counts: dict[str, int] = {}
+    for vote in votes:
+        counts[vote["judgement"]] = counts.get(vote["judgement"], 0) + 1
+    winner, top = max(counts.items(), key=lambda item: item[1])
+    if top * 2 > len(votes):
+        out = next(v for v in votes if v["judgement"] == winner)
+        out["votes"] = counts
+        return out
+    out = dict(votes[0])
+    out["judgement"] = "Unclear / insufficient evidence"
+    out["confidence"] = "Low"
+    out["votes"] = counts
+    out["vote_split"] = True
+    return out
 
 
 _JUDGE_ATTEMPTS = 2

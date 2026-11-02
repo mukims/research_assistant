@@ -90,6 +90,40 @@ class TestJudgeMode(unittest.TestCase):
         self.assertEqual(seen, ["Before. «claim h_1» After."])
 
 
+class TestVerdictAgreement(unittest.TestCase):
+    """The share of cases whose verdict never changed between runs: the
+    measure of whether a model that ignores temperature 0.0 is repeatable."""
+
+    @staticmethod
+    def _rec(case_id, got, run):
+        return {"case": {"id": case_id}, "got": got, "run": run}
+
+    def test_identical_in_every_run_is_one(self):
+        recs = [self._rec("a", "Supports", 1), self._rec("a", "Supports", 2),
+                self._rec("b", "Contradicts", 1), self._rec("b", "Contradicts", 2)]
+        self.assertEqual(ej.verdict_agreement(recs), 1.0)
+
+    def test_a_case_that_flips_counts_against(self):
+        recs = [self._rec("a", "Supports", 1), self._rec("a", "Supports", 2), self._rec("a", "Supports", 3),
+                self._rec("b", "Supports", 1), self._rec("b", "Unclear", 2), self._rec("b", "Supports", 3),
+                self._rec("c", "Contradicts", 1), self._rec("c", "Contradicts", 2), self._rec("c", "Contradicts", 3),
+                self._rec("d", "Supports", 1), self._rec("d", "Supports", 2), self._rec("d", "Supports", 3)]
+        self.assertEqual(ej.verdict_agreement(recs), 0.75)
+
+    def test_an_errored_run_disagrees_with_a_verdict(self):
+        recs = [self._rec("a", "Supports", 1), self._rec("a", None, 2)]
+        self.assertEqual(ej.verdict_agreement(recs), 0.0)
+
+    def test_no_results_is_none(self):
+        self.assertIsNone(ej.verdict_agreement([]))
+
+    def test_run_reports_it(self):
+        replies = iter(["Supports", "Supports", "Supports", "Contradicts"])
+        with patch.object(ej, "judge", side_effect=lambda c, e, context=None: {"judgement": next(replies)}):
+            out = ej.run([_case("h_1"), _case("h_2")], mode="judge", runs=2)
+        self.assertEqual(out["verdict_agreement"], 0.5)
+
+
 class TestVerifierMode(unittest.TestCase):
     def test_writes_a_one_sentence_draft_and_uses_the_entry(self):
         seen = {}

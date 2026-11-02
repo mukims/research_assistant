@@ -50,6 +50,17 @@ class ChatResult:
     content: str
     prompt_tokens: object = "N/A"
     completion_tokens: object = "N/A"
+    # The model id the provider says served the reply — often a dated or
+    # versioned form of the one requested ("gemini-3.5-flash-lite-001"). None
+    # when the response carries none.
+    model: str | None = None
+
+
+def _served_model(resp) -> str | None:
+    """The response's own ``model`` field, or None. Only a non-empty str counts:
+    test doubles and odd gateways hand back other objects there."""
+    value = resp.get("model") if isinstance(resp, dict) else getattr(resp, "model", None)
+    return value if isinstance(value, str) and value else None
 
 
 _CLIENT_CACHE: dict[tuple, Any] = {}
@@ -191,6 +202,7 @@ def _ollama_chat(
         content=content,
         prompt_tokens=getattr(resp, "prompt_eval_count", "N/A"),
         completion_tokens=getattr(resp, "eval_count", "N/A"),
+        model=_served_model(resp),
     )
 
 
@@ -259,6 +271,7 @@ def _openai_chat(
         content=resp.choices[0].message.content,
         prompt_tokens=getattr(usage, "prompt_tokens", "N/A"),
         completion_tokens=getattr(usage, "completion_tokens", "N/A"),
+        model=_served_model(resp),
     )
 
 

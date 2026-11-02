@@ -265,6 +265,14 @@ JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL") or _default_j
 # The judgement prompt is a rubric, not a generation task, and its regression
 # cases assert exact verdicts — sampling makes both meaningless.
 JUDGEMENT_TEMPERATURE = 0.0
+# Some hosted models (the default gemini-3.5-flash-lite among them) ignore a
+# custom temperature, so temperature 0.0 does not make a verdict repeatable.
+# Set CITATION_JUDGEMENT_VOTES above 1 to judge each claim that many times and
+# take the majority verdict. Always odd, so a two-way vote cannot tie: an even
+# value is raised to the next odd number.
+JUDGEMENT_VOTES       = max(1, _env_int("CITATION_JUDGEMENT_VOTES", 1))
+if JUDGEMENT_VOTES % 2 == 0:
+    JUDGEMENT_VOTES += 1
 # Chunks judged per cited source. 3 = judge top 3 matching chunks.
 JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 3)
 # Evidence escalation. The top JUDGEMENT_TOP_K hit(s), each with
