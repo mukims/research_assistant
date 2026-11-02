@@ -41,6 +41,14 @@ from research_assistant.shared.log import get_logger
 logger = get_logger("lance_store")
 
 
+class RetrievalError(RuntimeError):
+    """The vector index could not be searched.
+
+    Distinct from an empty result: callers (the citation audit) must be able to
+    tell "the index is broken" from "the paper has no matching passage".
+    """
+
+
 def compute_chunk_id(document: str, stored_form: str, seq: int, text: str) -> str:
     """Generate a deterministic content-addressed chunk identifier."""
     raw = f"{document}\x00{stored_form}\x00{seq}\x00{text}".encode("utf-8")
@@ -295,8 +303,9 @@ class LanceTableAdapter:
                         pass
             vec_hits = vec_q.limit(k_cand).to_list()
         except Exception as e:
-            logger.warning("LanceDB vector search failed: %s", e)
-            vec_hits = []
+            # Returning [] here made a broken index indistinguishable from "no
+            # evidence", so the citation judge reported "Unclear". Raise instead.
+            raise RetrievalError(f"vector search failed: {e}") from e
 
         # 2. Tantivy Full-Text Search
         try:
@@ -306,7 +315,8 @@ class LanceTableAdapter:
                 fts_q = fts_q.where(where_sql)
             fts_hits = fts_q.limit(k_cand).to_list()
         except Exception as e:
-            logger.warning("LanceDB FTS search failed: %s", e)
+            # FTS is the lexical complement; the vector hits are still usable.
+            logger.warning("LanceDB FTS search failed (continuing with vector hits): %s", e)
             fts_hits = []
 
         # 3. Reciprocal Rank Fusion

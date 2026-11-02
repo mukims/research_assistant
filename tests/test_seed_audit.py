@@ -1492,6 +1492,33 @@ class TestHonestOutcomes(unittest.TestCase):
         self.assertEqual(item["outcome"], "no_evidence")
         self.assertIsNone(item["judgement"])
 
+    def test_broken_index_is_retrieval_failed_not_unclear(self):
+        import shutil
+
+        from research_assistant.shared.lance_store import LanceStoreClient
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        tmp = tempfile.mkdtemp(prefix="test-audit-lance-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        collection = LanceStoreClient(tmp).get_or_create_collection("papers", {"embedding_dim": 8})
+        fake_emb = MagicMock()
+        fake_emb.embed_query.return_value = [0.0] * 8
+        item = {"claim": "Graphene is a semimetal with linear dispersion.", "document": "x.pdf", "context": ""}
+
+        def search(query, *args, **kwargs):
+            if kwargs.get("query_type") == "vector":
+                raise RuntimeError("vector index is corrupt")
+            raise RuntimeError("fts index is corrupt")
+
+        with patch.object(collection.table, "search", side_effect=search), \
+             patch("research_assistant.shared.search._get_embeddings", return_value=fake_emb), \
+             patch("research_assistant.shared.seed_audit._judge_once") as mock_judge:
+            _judge_claim_entry(item, collection, None, [], [])
+        self.assertEqual(item["outcome"], "retrieval_failed")
+        self.assertIsNone(item["judgement"])
+        self.assertIn("vector search failed", item["reason"])
+        mock_judge.assert_not_called()
+
     def test_compute_totals_counts_verdicts_over_judged_only(self):
         results = [
             {"outcome": "judged", "judgement": "Supports", "downloaded": True, "reliability": "HIGH"},

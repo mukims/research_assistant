@@ -6,10 +6,12 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from research_assistant.shared.lance_store import (
     LanceStoreClient,
     LanceTableAdapter,
+    RetrievalError,
     compute_chunk_id,
     compute_summary_id,
     get_lance_connection,
@@ -153,6 +155,35 @@ class TestLanceDBStore(unittest.TestCase):
         top = results[0]
         self.assertEqual(top["metadata"]["document"], "paper_a.pdf")
         self.assertIn("quantum Hall", top["text"])
+
+    def _failing_search(self, failing_query_type):
+        """Wrap table.search so one query type raises, as a broken index would."""
+        real_search = self.table_adapter.table.search
+
+        def search(query, *args, **kwargs):
+            if kwargs.get("query_type") == failing_query_type:
+                raise RuntimeError(f"{failing_query_type} index is corrupt")
+            return real_search(query, *args, **kwargs)
+
+        return patch.object(self.table_adapter.table, "search", side_effect=search)
+
+    def test_vector_failure_raises_retrieval_error(self):
+        # A broken vector index must not look like "no evidence".
+        with self._failing_search("vector"):
+            with self.assertRaises(RetrievalError) as ctx:
+                self.table_adapter.search_hybrid("quantum Hall graphene", [1.0] + [0.0] * 767, top_k=3)
+        self.assertIn("vector search failed", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, RuntimeError)
+
+    def test_fts_failure_falls_back_to_vector_hits(self):
+        with self._failing_search("fts"):
+            with self.assertLogs("lance_store", level="WARNING") as logs:
+                results = self.table_adapter.search_hybrid(
+                    "quantum Hall graphene", [1.0] + [0.0] * 767, top_k=3
+                )
+        self.assertTrue(results)
+        self.assertEqual(results[0]["metadata"]["document"], "paper_a.pdf")
+        self.assertTrue(any("FTS search failed" in m for m in logs.output))
 
     def test_hybrid_search_with_doc_filter(self):
         fake_emb = type("Emb", (), {"embed_query": lambda self, q: [0.0, 1.0] + [0.0] * 766})()
