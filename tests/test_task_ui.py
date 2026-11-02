@@ -159,6 +159,61 @@ class TestTaskUI(unittest.TestCase):
             render_planner_tab()
             self.assertTrue(mock_err.called)
 
+    def test_autonomous_run_needs_the_acknowledgement(self):
+        import streamlit as st
+        from research_assistant.tasks.models import AgentRole, Task, TaskCategory, TaskGraph
+        from research_assistant.tasks.ui import render_planner_tab
+
+        graph = TaskGraph(paper_id="2608_11188v1", paper_title="Sample Physics Paper")
+        graph.add_task(Task(task_id="t1", title="Setup", category=TaskCategory.ENVIRONMENT_SETUP, assigned_role=AgentRole.DEVOPS_AGENT))
+
+        ack_state = {"ticked": False}
+        exec_disabled = []
+
+        def mock_button(label, *args, **kwargs):
+            if kwargs.get("key") == "planner_btn_exec":
+                exec_disabled.append(bool(kwargs.get("disabled")))
+                return not kwargs.get("disabled")
+            return False
+
+        def mock_checkbox(label, *args, **kwargs):
+            if kwargs.get("key") == "planner_autonomous_ack":
+                return ack_state["ticked"]
+            return False
+
+        real_selectbox = st.selectbox
+
+        def mock_selectbox(label, options, *args, **kwargs):
+            if kwargs.get("key") == "planner_exec_mode":
+                return "autonomous"
+            return real_selectbox(label, options, *args, **kwargs)
+
+        def render():
+            st.session_state.clear()
+            st.session_state["planner_active_graph"] = graph
+            with patch("streamlit.button", side_effect=mock_button), \
+                 patch("streamlit.checkbox", side_effect=mock_checkbox), \
+                 patch("streamlit.selectbox", side_effect=mock_selectbox), \
+                 patch("streamlit.rerun"), \
+                 patch("research_assistant.tasks.ui.TaskRunner") as mock_runner_cls:
+                mock_report = MagicMock()
+                mock_report.scorecard = {
+                    "rating": "CERTIFIED_REPLICABLE", "replication_rate": 1.0, "total_tasks": 1,
+                    "completed_tasks": 1, "failed_tasks": 0, "blocked_tasks": 0,
+                }
+                mock_runner_cls.return_value.execute.return_value = mock_report
+                render_planner_tab()
+            return mock_runner_cls
+
+        runner_cls = render()
+        self.assertEqual(exec_disabled, [True])
+        runner_cls.assert_not_called()
+
+        ack_state["ticked"] = True
+        runner_cls = render()
+        self.assertEqual(exec_disabled, [True, False])
+        runner_cls.assert_called_once()
+
     def test_render_planner_tab_execute_button_workspace_safety(self):
         import streamlit as st
         from research_assistant import config

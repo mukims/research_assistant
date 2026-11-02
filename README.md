@@ -368,9 +368,12 @@ deliverables. `--mode autonomous` has the model write each task's deliverables
 into the workspace, runs a generated acceptance test over them in a subprocess,
 and gives a failing task one reflection retry. Give it a scratch `--workspace`;
 the runner refuses to point at the persistent data directory. The generated code
-runs with only `PATH`/locale variables (no API keys or `APP_PASSWORD`) but is
-**not sandboxed** (it can still read your files), so autonomous mode needs
-`--allow-untrusted-code` on the command line or the acknowledgement checkbox in the UI.
+runs with a stripped environment (only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`,
+`TMPDIR`, `TZ` and `SYSTEMROOT` are kept, `HOME` points at the workspace, and
+math-library threads are capped at one). It cannot read API keys from the
+environment, but it is **not sandboxed** and can read your files, including
+`.env`, so autonomous mode needs `--allow-untrusted-code` on the command line
+or the acknowledgement checkbox in the UI.
 
 ## Where things are
 

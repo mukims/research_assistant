@@ -83,7 +83,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.mode == "autonomous" and not args.allow_untrusted_code:
         print(
             "Error: --mode autonomous runs code the model writes on this computer. "
-            "It cannot see your API keys, but it is not sandboxed. "
+            "It cannot read API keys from the environment, but it is not sandboxed and can read your files, including .env. "
             "Re-run with --allow-untrusted-code to accept that.",
             file=sys.stderr,
         )

@@ -291,7 +291,7 @@ def render_planner_tab():
         if exec_mode_choice == "autonomous":
             autonomous_ack = st.checkbox(
                 "I understand: autonomous mode runs code the model writes on this computer. "
-                "It cannot see your API keys, but it is not sandboxed.",
+                "It cannot read API keys from the environment, but it is not sandboxed and can read your files, including .env.",
                 key="planner_autonomous_ack",
             )
 
