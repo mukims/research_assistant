@@ -72,11 +72,13 @@ def paragraph_sentences(p) -> list[str]:
 
 
 _NUMERIC_CITE_RE = re.compile(r"^[\[\(]?\s*\d+[\d,;\s\-–—\]\)]*$")
+_ROMAN_CITE_RE = re.compile(r"^[\[\(]\s*[ivxlcdmIVXLCDM]+[\s,;\-–—ivxlcdmIVXLCDM]*[\]\)]$")
 
 
 def is_numeric_cite(txt: str) -> bool:
-    """"[12]", "[9,", "10]", "3-5": a marker that carries no words."""
-    return bool(_NUMERIC_CITE_RE.match((txt or "").strip()))
+    """"[12]", "[9,", "10]", "3-5", "[IV]": a marker that carries no words."""
+    cleaned = (txt or "").strip()
+    return bool(_NUMERIC_CITE_RE.match(cleaned) or _ROMAN_CITE_RE.match(cleaned))
 
 
 def is_parenthetical(sentence: str, token: str) -> bool:

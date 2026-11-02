@@ -99,15 +99,14 @@ def derive_judgement(slots: dict) -> str:
     return "Partially supports"
 
 
-_QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-"})
+_QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-", "\u2212": "-"})
 _ELLIPSIS_RE = re.compile(r"(\.\.\.|…|\[\s*\.\.\.\s*\]|\[…\])")
 # PDF text keeps the hyphen of a word split at a line break, either left open
 # ("energy- dependent") or closed up ("informa-tion"), and a model quoting that
-# sentence writes the word whole. Dropping every hyphen on both sides makes the
-# two agree without loosening the check: the span still has to be the evidence's
-# own words, in the evidence's own order, for its whole length — an invented
-# sentence opening does not survive it because a hyphen was never the difference.
-_LINE_HYPHEN_RE = re.compile(r"-\s*")
+# sentence writes the word whole. Matching hyphens between letters unifies line
+# breaks and hyphenated words while strictly preserving minus signs preceding
+# numbers (e.g. -0.5 eV, 10^-5) so negative quantities are not sign-inverted.
+_LINE_HYPHEN_RE = re.compile(r"(?<=[a-zA-Z])-\s*(?=[a-zA-Z])")
 
 
 def _normalise(text: str) -> str:

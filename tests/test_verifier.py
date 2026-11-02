@@ -736,7 +736,10 @@ class TestEscalation(VerifyDraftTestCase):
         draft_path = self._write("Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"})
         texts, metas = self._resources()
         import research_assistant.agents.agent8_verifier as a8
-        with patch.object(a8, "hybrid_search", return_value=[dict(h) for h in self.HITS]) as hs, \
+        esc_val = 0 if a8.JUDGEMENT_ESCALATE_TOP_K == 0 else 3
+        with patch.object(a8, "JUDGEMENT_TOP_K", 1), \
+             patch.object(a8, "JUDGEMENT_ESCALATE_TOP_K", esc_val), \
+             patch.object(a8, "hybrid_search", return_value=[dict(h) for h in self.HITS]) as hs, \
              patch.object(a8, "judge", side_effect=fake_judge):
             report = verify_draft(draft_path, search_resources=(FakeCollection([("Smith 2020", "a.pdf")]), None, texts, metas))
         return report, calls, hs

@@ -1,7 +1,9 @@
 import argparse
+import concurrent.futures
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -13,6 +15,7 @@ from research_assistant.prompts import (
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.db import load_search_resources
 from research_assistant.config import (
+    CITATION_CHECK_BATCH_SIZE,
     CITATION_CITER_CONTEXTUALIZE,
     CITATION_CITER_JUDGE,
     JUDGEMENT_EVIDENCE_MAX_CHARS,
@@ -176,7 +179,8 @@ class CiteResult:
 
 
 def cite_sentence(sentence, resources, key_registry, *, context=None, query=None,
-                  exclude_docs=None, paragraph_id=None, judge_gate=None) -> CiteResult:
+                  exclude_docs=None, paragraph_id=None, judge_gate=None,
+                  registry_lock=None) -> CiteResult:
     """Retrieve context for one sentence and ask the model to cite it.
 
     ``key_registry`` maps citation_source → cite key and is shared across a
@@ -205,9 +209,15 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
         # stable label to reference, but registration is NOT the same as
         # use — the caller filters the final mapping down to keys that
         # actually made it into the draft.
-        if cit_source not in key_registry:
-            key_registry[cit_source] = f"cite_{len(key_registry) + 1}"
-        cite_key = key_registry[cit_source]
+        if registry_lock:
+            with registry_lock:
+                if cit_source not in key_registry:
+                    key_registry[cit_source] = f"cite_{len(key_registry) + 1}"
+                cite_key = key_registry[cit_source]
+        else:
+            if cit_source not in key_registry:
+                key_registry[cit_source] = f"cite_{len(key_registry) + 1}"
+            cite_key = key_registry[cit_source]
         context_str += f"--- Context (Cite Key: {cite_key}) ---\n{r['text']}\n\n"
         candidates.append({
             "key": cite_key, "citation": cit_source, "document": meta.get("document"),
@@ -482,8 +492,13 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     needs_cite = [False] * len(sentences)
     if eligible_sentences:
         logger.info("Checking %d eligible sentences for citation need (batched)…", len(eligible_sentences))
+        batch_size = max(1, int(CITATION_CHECK_BATCH_SIZE)) if CITATION_CHECK_BATCH_SIZE else 20
+        batch_results = []
         try:
-            batch_results = _batch_needs_citation(eligible_sentences)
+            for b_start in range(0, len(eligible_sentences), batch_size):
+                sub_batch = eligible_sentences[b_start:b_start + batch_size]
+                sub_res = _batch_needs_citation(sub_batch)
+                batch_results.extend(sub_res)
         except Exception as e:
             # Abort rather than guess. A misaligned verdict list attributes one
             # sentence's decision to another, and nothing has been written yet,
@@ -505,35 +520,33 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         _warn_if_context_is_tight()
 
     # ── Process sentences ────────────────────────────────────────────────
-    cited_sentences = []
+    cited_sentences = [None] * len(sentences)
     key_registry = {}      # every source offered to the model: citation → cite_N
-    citation_entries = []  # For the report
+    citation_entries = [None] * len(sentences)  # For the report
     citation_evidence = {} # key -> {key, citation_source, document, chunk_index, evidence}
+    evidence_lock = threading.Lock()
+    registry_lock = threading.Lock()
 
-    for i, sentence in enumerate(sentences):
+    def _process_sentence(i, sentence):
         logger.info("[%d/%d] %s", i + 1, len(sentences), sentence[:80])
         entry = {"original": sentence, "cited": False}
 
         if not needs_cite[i]:
             reason = "too short" if len(sentence.split()) < 4 else "no citation needed"
             logger.info(" -> %s, skipping.", reason)
-            cited_sentences.append(sentence)
             entry["skip_reason"] = reason
-            citation_entries.append(entry)
-            continue
+            return sentence, entry
 
         logger.info(" -> Needs citation. Searching context…")
         try:
             res = cite_sentence(sentence, (collection, bm25, texts, metadatas), key_registry,
-                                context=contexts[i], query=queries.get(i), paragraph_id=paragraph_ids[i])
+                                context=contexts[i], query=queries.get(i), paragraph_id=paragraph_ids[i],
+                                registry_lock=registry_lock)
         except Exception as e:
             logger.error(" -> Error during citing: %s", e)
-            cited_sentences.append(sentence)
             entry["skip_reason"] = f"LLM error: {e}"
-            citation_entries.append(entry)
-            continue
+            return sentence, entry
 
-        cited_sentences.append(res.cited_text)
         if res.verdicts:
             entry["verdicts"] = res.verdicts
             entry["partial"] = res.partial
@@ -543,29 +556,37 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             entry["cited_text"] = res.cited_text
             entry["reasoning"] = res.reasoning
             entry["sources"] = res.candidates
-            if res.verdicts:
-                for v in res.verdicts:
-                    if v.get("accepted"):
-                        k = v.get("key")
-                        if k:
-                            citation_evidence[k] = {
+            with evidence_lock:
+                if res.verdicts:
+                    for v in res.verdicts:
+                        if v.get("accepted"):
+                            k = v.get("key")
+                            if k:
+                                ev_data = {
+                                    "key": k,
+                                    "citation_source": v.get("citation_source") or next((src for src, key in key_registry.items() if key == k), ""),
+                                    "document": v.get("document"),
+                                    "chunk_index": v.get("chunk_index"),
+                                    "evidence": v.get("evidence"),
+                                }
+                                citation_evidence[(i, k)] = ev_data
+                                citation_evidence[f"{i}:{k}"] = ev_data
+                                citation_evidence[k] = ev_data
+                elif res.candidates:
+                    for cand in res.candidates:
+                        k = cand.get("key")
+                        if k in res.keys:
+                            ev_data = {
                                 "key": k,
-                                "citation_source": v.get("citation_source") or next((src for src, key in key_registry.items() if key == k), ""),
-                                "document": v.get("document"),
-                                "chunk_index": v.get("chunk_index"),
-                                "evidence": v.get("evidence"),
+                                "citation_source": cand.get("citation") or next((src for src, key in key_registry.items() if key == k), ""),
+                                "document": cand.get("document"),
+                                "chunk_index": cand.get("chunk_index"),
+                                "evidence": None,
                             }
-            elif res.candidates:
-                for cand in res.candidates:
-                    k = cand.get("key")
-                    if k in res.keys and k not in citation_evidence:
-                        citation_evidence[k] = {
-                            "key": k,
-                            "citation_source": cand.get("citation") or next((src for src, key in key_registry.items() if key == k), ""),
-                            "document": cand.get("document"),
-                            "chunk_index": cand.get("chunk_index"),
-                            "evidence": None,
-                        }
+                            citation_evidence[(i, k)] = ev_data
+                            citation_evidence[f"{i}:{k}"] = ev_data
+                            if k not in citation_evidence:
+                                citation_evidence[k] = ev_data
         else:
             if res.candidates:
                 logger.info(" -> Declined: %s", res.skip_reason)
@@ -575,7 +596,23 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
             entry["skip_reason"] = res.skip_reason
             if res.reasoning:
                 entry["reasoning"] = res.reasoning
-        citation_entries.append(entry)
+        return res.cited_text, entry
+
+    citer_concurrency = int(os.environ.get("CITATION_CITER_CONCURRENCY", "4"))
+    workers = min(citer_concurrency, len(sentences)) if sentences else 1
+    if workers <= 1:
+        for i, sentence in enumerate(sentences):
+            cited_text, entry = _process_sentence(i, sentence)
+            cited_sentences[i] = cited_text
+            citation_entries[i] = entry
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            fut_to_idx = {executor.submit(_process_sentence, i, s): i for i, s in enumerate(sentences)}
+            for fut in concurrent.futures.as_completed(fut_to_idx):
+                idx = fut_to_idx[fut]
+                cited_text, entry = fut.result()
+                cited_sentences[idx] = cited_text
+                citation_entries[idx] = entry
 
     # ── Write outputs ────────────────────────────────────────────────────
     # Rebuilt paragraph by paragraph: a multi-paragraph draft keeps its
@@ -617,7 +654,17 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         json.dump(citation_mapping, f, indent=4)
     logger.info("Saved citation mapping to %s", mapping_file)
 
-    used_evidence = {k: v for k, v in citation_evidence.items() if k in used_keys}
+    used_evidence = {}
+    for k_item, v_item in citation_evidence.items():
+        if isinstance(k_item, tuple):
+            continue
+        if isinstance(k_item, str) and ":" in k_item:
+            s_idx_str, c_key = k_item.split(":", 1)
+            if c_key in used_keys:
+                used_evidence[k_item] = v_item
+        elif k_item in used_keys:
+            used_evidence[k_item] = v_item
+
     evidence_file = out_path.replace(".txt", "_citation_evidence.json")
     with open(evidence_file, "w") as f:
         json.dump(used_evidence, f, indent=4)

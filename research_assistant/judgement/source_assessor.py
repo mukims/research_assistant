@@ -112,8 +112,13 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
 
     # 2. Preprint Check
     is_preprint = bool(meta.get("is_preprint"))
+    has_published_doi = bool(doi and not any(doi.startswith(pfx) for pfx in _PREPRINT_DOI_PREFIXES))
+    has_published_venue = bool(venue and not _PREPRINT_VENUES.search(venue))
+
     if not is_preprint:
-        if arxiv_id:
+        if has_published_doi or has_published_venue:
+            is_preprint = False
+        elif arxiv_id:
             is_preprint = True
         elif any(doi.startswith(prefix) for prefix in _PREPRINT_DOI_PREFIXES):
             is_preprint = True
@@ -226,7 +231,8 @@ def assess_source_online(
     if (meta.get("citation_count") is None or "is_retracted" not in meta) and (doi or title):
         try:
             from research_assistant.shared.academic_apis import fetch_bibliometrics_and_abstract
-            bib = fetch_bibliometrics_and_abstract(doi=doi, title=title)
+            target = doi or title
+            bib = fetch_bibliometrics_and_abstract(target)
             if bib:
                 if meta.get("citation_count") is None and bib.get("citation_count") is not None:
                     meta["citation_count"] = bib["citation_count"]

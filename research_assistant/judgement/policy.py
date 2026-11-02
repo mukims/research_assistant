@@ -39,7 +39,7 @@ NOT_ASSESSED_EXPLANATIONS = {
     "orphaned": "Not assessed — the citation key in the draft is not in the citation mapping.",
     "unresolved": "Not assessed — the cited source has no chunks in the corpus.",
     "not_downloaded": "Not assessed — the cited paper is not in the corpus.",
-    "deferred_paywalled": "Not assessed — deferred because most references in this paragraph are missing.",
+    "deferred_paywalled": "Not assessed — deferred because more than 90% of references in this paragraph are missing.",
 }
 
 

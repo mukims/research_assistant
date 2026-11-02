@@ -208,7 +208,7 @@ def explain_rubric_verdict(item: dict) -> str:
         if reason:
             return f"{reason} Upload the missing reference PDF(s) to verify this claim."
         return (
-            "Evaluation deferred: More than 50% of the references cited in this paragraph are missing from the corpus. "
+            "Evaluation deferred: More than 90% of the references cited in this paragraph are missing from the corpus. "
             "Upload the missing reference PDF(s) to enable empirical verification."
         )
     if outcome == "not_downloaded":
@@ -381,7 +381,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| 🔴 **Contradicts** | **{totals.get('Contradicts', 0)}** | {pct(totals.get('Contradicts', 0))} | Evidence directly opposes claim |",
         f"| 🟠 **Does Not Support** | **{totals.get('Does not support', 0)}** | {pct(totals.get('Does not support', 0))} | Scope or finding mismatch |",
         f"| ⚪ **Unclear / Insufficient** | **{totals.get('Unclear / insufficient evidence', 0)}** | {pct(totals.get('Unclear / insufficient evidence', 0))} | Fragile or inconclusive evidence |",
-        f"| ⏳ **Deferred (Pending Evidence)** | **{totals.get('deferred_paywalled', 0)}** | {pct(totals.get('deferred_paywalled', 0))} | Paragraph >50% paywalled; evaluation deferred |",
+        f"| ⏳ **Deferred (Pending Evidence)** | **{totals.get('deferred_paywalled', 0)}** | {pct(totals.get('deferred_paywalled', 0))} | Paragraph >90% paywalled; evaluation deferred |",
         f"| 🔒 **Paywalled / Unchecked** | **{totals.get('not_downloaded', 0)}** | {pct(totals.get('not_downloaded', 0))} | Non-OA reference; unavailable |",
         "",
         "### Scientific Evidence Reliability Rating",

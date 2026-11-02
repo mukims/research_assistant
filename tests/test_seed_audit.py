@@ -317,8 +317,8 @@ class TestSeedAudit(unittest.TestCase):
         self.assertEqual(report["totals"]["downloaded"], 1)
         self.assertEqual(report["totals"]["judged"], 1)
         self.assertEqual(report["totals"]["Supports"], 1)
-        self.assertEqual(report["totals"]["deferred_paywalled"], 0)
-        self.assertEqual(report["totals"]["not_downloaded"], 1)
+        self.assertEqual(report["totals"]["deferred_paywalled"], 1)
+        self.assertEqual(report["totals"]["not_downloaded"], 0)
         self.assertIn("reliability", report["totals"])
         self.assertEqual(report["totals"]["reliability"]["high"], 1)
         self.assertEqual(report["totals"]["reliability"]["unresolved"], 1)
@@ -471,7 +471,7 @@ class TestSeedAudit(unittest.TestCase):
     def test_audit_seed_citations_deferral_ratio_greater_than_half(
         self, mock_manifest, mock_find_tei, mock_search, mock_judge
     ):
-        """Paragraph with paywall ratio > 0.50 (2/2 = 1.0) marks missing claims as not_downloaded, bypassing search & judge."""
+        """Paragraph with paywall ratio > 0.90 (2/2 = 1.0) marks missing claims as deferred_paywalled, bypassing search & judge."""
         tei_content = """<?xml version="1.0" encoding="UTF-8"?>
 <TEI xmlns="http://www.tei-c.org/ns/1.0">
     <teiHeader><fileDesc><titleStmt><title>Paywall Test</title></titleStmt><sourceDesc><p></p></sourceDesc></fileDesc></teiHeader>
@@ -501,7 +501,7 @@ class TestSeedAudit(unittest.TestCase):
 
         try:
             mock_find_tei.return_value = tei_file
-            mock_manifest.return_value = {}  # Neither reference is downloaded (2/2 = 1.0 > 0.50)
+            mock_manifest.return_value = {}  # Neither reference is downloaded (2/2 = 1.0 > 0.90)
 
             fake_resources = (MagicMock(), MagicMock(), [], [])
             report = audit_seed_citations("seed.pdf", search_resources=fake_resources)
@@ -512,12 +512,15 @@ class TestSeedAudit(unittest.TestCase):
             self.assertEqual(t["downloaded"], 0)
             self.assertEqual(t["judged"], 0)
             self.assertEqual(t["Supports"], 0)
-            self.assertEqual(t["not_downloaded"], 2)
-            self.assertEqual(t["deferred_paywalled"], 0)
+            self.assertEqual(t["not_downloaded"], 0)
+            self.assertEqual(t["deferred_paywalled"], 2)
 
             for res in report["results"]:
-                self.assertEqual(res["outcome"], "not_downloaded")
-                self.assertEqual(res["judgement"], "Not downloaded")
+                self.assertEqual(res["outcome"], "deferred_paywalled")
+                self.assertEqual(res["judgement"], "Deferred (pending paywalled evidence)")
+                self.assertIn("Evaluation deferred:", res["reason"])
+                self.assertIn("2/2", res["reason"])
+                self.assertIn(">90% paywalled", res["reason"])
                 self.assertEqual(res["paywall_ratio"], 1.0)
                 self.assertEqual(len(res["paragraph_missing_refs"]), 2)
                 missing_xml_ids = {r["xml_id"] for r in res["paragraph_missing_refs"]}
@@ -796,8 +799,8 @@ class TestSeedAudit(unittest.TestCase):
                 {"text": "Relevant passage text.", "metadata": {"document": os.path.basename(dummy_pdf_path)}}
             ]
 
-            # Return 6 judged verdicts covering all 5 rubric judgement types
-            mock_judge.side_effect = [
+            # Return 6 judged verdicts covering all 5 rubric judgement types, handling second judge adjudications
+            verdicts = [
                 {
                     "judgement": "Supports",
                     "confidence": "High",
@@ -841,6 +844,17 @@ class TestSeedAudit(unittest.TestCase):
                     "slots": {},
                 },
             ]
+            judge_idx = 0
+
+            def fake_judge(claim, evidence, context=None, **kwargs):
+                nonlocal judge_idx
+                if context and "Second Judge" in str(context):
+                    return verdicts[judge_idx - 1]
+                v = verdicts[judge_idx]
+                judge_idx += 1
+                return v
+
+            mock_judge.side_effect = fake_judge
 
             fake_resources = (MagicMock(), MagicMock(), [], [])
             report = audit_seed_citations("seed.pdf", search_resources=fake_resources, max_claims=10)
@@ -874,7 +888,7 @@ class TestSeedAudit(unittest.TestCase):
             self.assertGreater(t["Does not support"], 0)
             self.assertGreater(t["Unclear / insufficient evidence"], 0)
             self.assertGreater(t["not_downloaded"], 0)
-            self.assertEqual(t["deferred_paywalled"], 0)
+            self.assertEqual(t["deferred_paywalled"], 2)
         finally:
             os.unlink(tei_file)
             os.unlink(dummy_pdf_path)
@@ -1643,15 +1657,26 @@ class TestClaimBudget(unittest.TestCase):
     went looking for.
     """
 
-    def test_the_default_comes_from_config_and_is_50(self):
+    def test_the_default_comes_from_config_and_is_100(self):
         import inspect
         from research_assistant.config import CITATION_AUDIT_MAX_CLAIMS
         from research_assistant.shared.seed_audit import audit_seed_citations
-        self.assertEqual(CITATION_AUDIT_MAX_CLAIMS, 50)
+        self.assertEqual(CITATION_AUDIT_MAX_CLAIMS, 100)
         self.assertEqual(
             inspect.signature(audit_seed_citations).parameters["max_claims"].default,
             CITATION_AUDIT_MAX_CLAIMS,
         )
+
+    def test_budget_cap_zero_or_negative_means_unlimited(self):
+        from research_assistant.shared.seed_audit import prioritise_claims
+        claims = [{"claim": f"c_{i}", "section": "results", "downloaded": True, "ref": {"xml_id": f"b{i}"}} for i in range(120)]
+        ordered, _ = prioritise_claims(claims)
+        # Verify that max_claims <= 0 does not slice claims
+        for cap in (0, -1):
+            claims_to_judge = ordered if cap <= 0 else ordered[:cap]
+            overflow = [] if cap <= 0 else ordered[cap:]
+            self.assertEqual(len(claims_to_judge), 120)
+            self.assertEqual(len(overflow), 0)
 
     def test_the_budget_is_overridable_by_the_environment(self):
         import importlib
@@ -1675,7 +1700,17 @@ class TestBudgetAndBreaker(unittest.TestCase):
         intro_single = self._c("introduction", 1, 1, 0, "b20")
         methods_single = self._c("methods", 1, 5, 0, "b30")
         results_pair = [self._c("results", 2, 9, 2, "b40"), self._c("results", 2, 9, 2, "b41")]
-        ordered, skipped = prioritise_claims(intro_cluster + [intro_single, methods_single] + results_pair)
+
+        # Default behaviour audits all citations without per-sentence cap
+        ordered_all, skipped_none = prioritise_claims(intro_cluster + [intro_single, methods_single] + results_pair)
+        self.assertEqual(len(ordered_all), 12)
+        self.assertEqual(len(skipped_none), 0)
+
+        # When capped via max_pairs_per_sentence=3:
+        ordered, skipped = prioritise_claims(
+            intro_cluster + [intro_single, methods_single] + results_pair,
+            max_pairs_per_sentence=3,
+        )
         self.assertEqual([c["ref"]["xml_id"] for c in ordered[:4]], ["b40", "b41", "b30", "b20"])
         self.assertEqual(len(ordered), 4 + 3)          # at most 3 of the 8-cite sentence
         self.assertEqual(len(skipped), 5)
@@ -2450,3 +2485,219 @@ class TestCitedSummaries(unittest.TestCase):
             audit_seed_citations("seed.pdf", search_resources=(MagicMock(), MagicMock(), [], []), max_claims=5)
         self.assertEqual(order, [("attach", 1), ("queries", 1)])
         os.unlink(tei_file); os.unlink(pdf)
+
+
+class TestCitationAuditRecommendedLevers(unittest.TestCase):
+    """Verify the four engineering levers designed to eliminate unassessed citations
+    and improve audit accuracy."""
+
+    def test_query_relaxation_falls_back_to_raw_claim(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        item = {
+            "claim": "Direct bandgap emission occurs in monolayer TMDs.",
+            "search_query": "Contextualized paragraph query with extra words that misses.",
+            "document": "tmd.pdf",
+            "context": "Context text.",
+        }
+        hits_claim = [{"text": "Monolayer TMDs exhibit direct bandgap emission.", "metadata": {"document": "tmd.pdf", "page": 2, "section": "results"}}]
+
+        def search_router(query, *args, **kwargs):
+            if query == item["search_query"]:
+                return []
+            if query == item["claim"]:
+                return hits_claim
+            return []
+
+        verdict = {
+            "judgement": "Supports",
+            "confidence": "High",
+            "supporting_span": "Monolayer TMDs exhibit direct bandgap emission.",
+            "reason": "Direct evidence found.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"}, "strength": {"assertion": "t", "verdict": "Supports"}},
+            "evidence_sufficiency": "sufficient",
+        }
+
+        with patch("research_assistant.shared.seed_audit.hybrid_search", side_effect=search_router), \
+             patch("research_assistant.shared.seed_audit._judge_once", return_value=verdict):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judgement"], "Supports")
+        self.assertEqual(item["search_query_relaxed"], item["claim"])
+
+    def test_query_relaxation_falls_back_to_keywords(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        item = {
+            "claim": "Strong exciton binding energy was measured in tungsten diselenide.",
+            "search_query": "Strong exciton binding energy was measured in tungsten diselenide.",
+            "document": "wse2.pdf",
+            "ref": {"title": "Exciton Physics in WSe2 Crystals"},
+        }
+        hits_kw = [{"text": "Exciton binding energy exceeds 0.5 eV in WSe2.", "metadata": {"document": "wse2.pdf", "page": 3, "section": "results"}}]
+
+        def search_router(query, *args, **kwargs):
+            if query == item["claim"]:
+                return []
+            # Keyword query
+            return hits_kw
+
+        verdict = {
+            "judgement": "Supports",
+            "confidence": "High",
+            "supporting_span": "Exciton binding energy exceeds 0.5 eV in WSe2.",
+            "reason": "Keyword search hit.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"}, "strength": {"assertion": "t", "verdict": "Supports"}},
+            "evidence_sufficiency": "sufficient",
+        }
+
+        with patch("research_assistant.shared.seed_audit.hybrid_search", side_effect=search_router), \
+             patch("research_assistant.shared.seed_audit._judge_once", return_value=verdict):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judgement"], "Supports")
+        self.assertIn("exciton", item["search_query_relaxed"].lower())
+
+    def test_query_relaxation_falls_back_to_document_chunks(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        item = {
+            "claim": "Novel topological superconductivity observed.",
+            "document": "topo.pdf",
+            "ref": {"title": "Topological Superconductors"},
+        }
+        fake_collection = MagicMock()
+        fake_collection.get.return_value = {
+            "documents": ["Topological superconductors host Majorana zero modes."],
+            "metadatas": [{"document": "topo.pdf", "page": 1, "section": "abstract"}],
+        }
+
+        verdict = {
+            "judgement": "Supports",
+            "confidence": "Medium",
+            "supporting_span": "Topological superconductors host Majorana zero modes.",
+            "reason": "Document chunk hit.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"}, "strength": {"assertion": "t", "verdict": "Supports"}},
+            "evidence_sufficiency": "sufficient",
+        }
+
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=[]), \
+             patch("research_assistant.shared.seed_audit._judge_once", return_value=verdict):
+            _judge_claim_entry(item, fake_collection, MagicMock(), [], [])
+
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judgement"], "Supports")
+        self.assertEqual(item["search_query_relaxed"], "[document fallback chunks]")
+
+    def test_second_judge_resolves_unclear_verdict(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        item = {
+            "claim": "Phonon scattering limits thermal conductivity at high temperature.",
+            "document": "phonon.pdf",
+            "context": "Context sentence.",
+        }
+        hits = [{"text": "Phonon-phonon umklapp scattering is the dominant thermal resistivity mechanism above 300K.", "metadata": {"document": "phonon.pdf", "page": 4, "section": "discussion"}}]
+
+        first_verdict = {
+            "judgement": "Unclear / insufficient evidence",
+            "confidence": "Low",
+            "supporting_span": "",
+            "reason": "Not enough initial clarity.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Insufficient"}, "scope": {"assertion": "s", "verdict": "Insufficient"}, "strength": {"assertion": "t", "verdict": "Insufficient"}},
+            "evidence_sufficiency": "insufficient",
+        }
+        second_verdict = {
+            "judgement": "Supports",
+            "confidence": "High",
+            "supporting_span": "Phonon-phonon umklapp scattering is the dominant thermal resistivity mechanism above 300K.",
+            "reason": "Direct evidence in discussion section.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"}, "strength": {"assertion": "t", "verdict": "Supports"}},
+            "evidence_sufficiency": "sufficient",
+        }
+
+        def judge_side_effect(claim, evidence, context=None, **kwargs):
+            if context and "Second Judge" in str(context):
+                return second_verdict
+            return first_verdict
+
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=hits), \
+             patch("research_assistant.shared.seed_audit._judge_once", side_effect=judge_side_effect):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judgement"], "Supports")
+        self.assertEqual(item["confidence"], "High")
+        self.assertEqual(item["second_judge_verdict"], "Supports")
+
+    def test_second_judge_resolves_low_confidence(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        item = {
+            "claim": "Carrier density reaches 1e13 cm-2 under ionic liquid gating.",
+            "document": "gate.pdf",
+            "context": "Gating experiments.",
+        }
+        hits = [{"text": "Using DEME-TFSI ionic liquid gating, carrier densities up to 1.2e13 cm-2 were achieved.", "metadata": {"document": "gate.pdf", "page": 2, "section": "methods"}}]
+
+        first_verdict = {
+            "judgement": "Supports",
+            "confidence": "Low",
+            "supporting_span": "Using DEME-TFSI ionic liquid gating...",
+            "reason": "Hedged initial confidence.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"}, "strength": {"assertion": "t", "verdict": "Supports"}},
+            "evidence_sufficiency": "partial",
+        }
+        second_verdict = {
+            "judgement": "Supports",
+            "confidence": "High",
+            "supporting_span": "Using DEME-TFSI ionic liquid gating, carrier densities up to 1.2e13 cm-2 were achieved.",
+            "reason": "Confirmed measurement in methods.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"}, "strength": {"assertion": "t", "verdict": "Supports"}},
+            "evidence_sufficiency": "sufficient",
+        }
+
+        def judge_side_effect(claim, evidence, context=None, **kwargs):
+            if context and "Second Judge" in str(context):
+                return second_verdict
+            return first_verdict
+
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=hits), \
+             patch("research_assistant.shared.seed_audit._judge_once", side_effect=judge_side_effect):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judgement"], "Supports")
+        self.assertEqual(item["confidence"], "High")
+        self.assertEqual(item["second_judge_confidence"], "High")
+
+    def test_second_judge_disabled_when_flag_false(self):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+
+        item = {
+            "claim": "Some claim.",
+            "document": "doc.pdf",
+        }
+        hits = [{"text": "Passage text.", "metadata": {"document": "doc.pdf"}}]
+        first_verdict = {
+            "judgement": "Unclear / insufficient evidence",
+            "confidence": "Low",
+            "supporting_span": "",
+            "reason": "Unclear.",
+            "slots": {"finding": {"assertion": "a", "verdict": "Insufficient"}, "scope": {"assertion": "s", "verdict": "Insufficient"}, "strength": {"assertion": "t", "verdict": "Insufficient"}},
+            "evidence_sufficiency": "insufficient",
+        }
+
+        judge_mock = MagicMock(return_value=first_verdict)
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=hits), \
+             patch("research_assistant.shared.seed_audit.CITATION_JUDGEMENT_SECOND_PASS", False), \
+             patch("research_assistant.shared.seed_audit._judge_once", judge_mock):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [])
+
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judgement"], "Unclear / insufficient evidence")
+        self.assertNotIn("second_judge_verdict", item)
+        self.assertEqual(judge_mock.call_count, 1)
+

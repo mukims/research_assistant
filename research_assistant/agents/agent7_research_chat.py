@@ -121,8 +121,12 @@ class ResearchChat:
         if search_resources:
             self.collection, self.bm25, self.texts, self.metadatas = search_resources
         else:
-            logger.info("Loading search resources…")
-            self.collection, self.bm25, self.texts, self.metadatas = load_search_resources()
+            try:
+                logger.info("Loading search resources…")
+                self.collection, self.bm25, self.texts, self.metadatas = load_search_resources()
+            except Exception as e:
+                logger.warning("Search resources not available (%s) — initializing without index.", e)
+                self.collection, self.bm25, self.texts, self.metadatas = None, None, [], []
         logger.info("Ready. %d chunks in database.", len(self.texts))
 
     def set_model(self, model: str, backend: str | None = None) -> None:
@@ -351,12 +355,8 @@ class ResearchChat:
         self.last_suggestions = []
         self.turn_count = 0
 
-    def export_conversation(self, scratchpad_notes: list[str] | None = None) -> str:
-        """Save the conversation, sources, memory, and pinned notes to markdown."""
-        os.makedirs(DRAFTS_DIR, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = os.path.join(DRAFTS_DIR, f"research_chat_{timestamp}.md")
-
+    def format_conversation_markdown(self, scratchpad_notes: list[str] | None = None) -> str:
+        """Render conversation, sources, memory, and pinned notes as markdown string without writing to disk."""
         lines = [
             f"# 🔬 Research Chat & Brainstorming Session",
             f"*Date:* {datetime.now().strftime('%Y-%m-%d %H:%M')}",
@@ -408,8 +408,18 @@ class ResearchChat:
                 role = "🧑‍🔬 **Researcher**" if msg["role"] == "user" else "🤖 **Assistant**"
                 lines.append(f"\n{role}\n\n{msg['content']}\n")
 
+        return "\n".join(lines)
+
+    def export_conversation(self, scratchpad_notes: list[str] | None = None, filepath: str | None = None) -> str:
+        """Save the conversation, sources, memory, and pinned notes to markdown."""
+        os.makedirs(DRAFTS_DIR, exist_ok=True)
+        if not filepath:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(DRAFTS_DIR, f"research_chat_{timestamp}.md")
+
+        content = self.format_conversation_markdown(scratchpad_notes=scratchpad_notes)
         with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            f.write(content)
 
         return filepath
 
@@ -423,6 +433,10 @@ class ResearchChat:
             "turns": self.turns,
             "history": self.history,
         }
+
+
+# Backward compatibility alias
+ResearchChatAgent = ResearchChat
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ from research_assistant.shared.claim_text import (
     split_into_sentences,
 )
 from research_assistant.config import (
+    CITATION_JUDGEMENT_SECOND_PASS,
     EXCLUDED_FROM_EVIDENCE,
     JUDGEMENT_ESCALATE_TOP_K,
     JUDGEMENT_EVIDENCE_MAX_CHARS,
@@ -56,7 +57,11 @@ from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.claim_text import tidy_punctuation
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
-from research_assistant.shared.search import expand_neighbours, hybrid_search
+from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
+from research_assistant.shared.seed_audit import (
+    _extract_claim_keywords,
+    _get_document_fallback_chunks,
+)
 
 logger = get_logger("agent8")
 
@@ -94,9 +99,10 @@ def resolve_documents(collection, citation_source: str, cache: dict) -> set:
         return cache[citation_source]
 
     try:
-        batch = collection.get(
-            where={"citation_source": citation_source}, include=["metadatas"]
-        )
+        kwargs = {"where": {"citation_source": citation_source}, "include": ["metadatas"]}
+        if getattr(collection, "is_lancedb", False):
+            kwargs["limit"] = collection.count()
+        batch = collection.get(**kwargs)
         documents = {
             meta.get("document")
             for meta in (batch.get("metadatas") or [])
@@ -243,7 +249,9 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
     top_k = top_k or JUDGEMENT_TOP_K
     escalate_k = JUDGEMENT_ESCALATE_TOP_K if JUDGEMENT_ESCALATE_TOP_K > top_k else 0
     retrieve_k = max(top_k, escalate_k)
-    sentences = split_into_sentences(draft_text)
+    from research_assistant.agents.agent5_batch_citer import split_paragraphs
+    paras = split_paragraphs(draft_text)
+    sentences = [s for p in paras for s in p]
     pairs = citation_pairs(sentences, invert_citation_mapping(mapping))
 
     if pairs:
@@ -270,7 +278,13 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             return entry
 
         # 1. Replayed evidence path (ground truth from citation acceptance)
-        replayed = evidence_registry.get(entry["cite_key"])
+        s_idx = entry.get("sentence_index")
+        c_key = entry.get("cite_key")
+        replayed = (
+            evidence_registry.get(f"{s_idx}:{c_key}")
+            or evidence_registry.get((s_idx, c_key))
+            or evidence_registry.get(c_key)
+        )
         if replayed and replayed.get("evidence"):
             entry["evidence"] = replayed["evidence"]
             entry["evidence_source"] = "replayed"
@@ -305,16 +319,11 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             logger.info(" -> source resolves to no documents in the corpus.")
             return entry
 
-        # Retrieval is guarded like everything else in this loop: nothing is
-        # persisted until the report is written, so an exception at citation 50
-        # of 120 would throw away fifty paid model calls and leave no artefact.
-        # hybrid_search embeds the query, which is a network call under
-        # EMBED_BACKEND=openai|huggingface.
+        search_query = entry.get("search_query") or entry["claim"]
+        entry["search_query"] = search_query
         try:
-            # A verdict rests on what the paper says. A figure_description is
-            # a model's reading of a plot (v2, spec §4.6) and is never evidence.
             hits = hybrid_search(
-                entry["claim"], collection, bm25, texts, metadatas,
+                search_query, collection, bm25, texts, metadatas,
                 top_k=retrieve_k, doc_filter=documents,
                 exclude_types=EXCLUDED_FROM_EVIDENCE,
             )
@@ -325,19 +334,65 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             logger.warning(" -> retrieval failed: %s: %s", type(exc).__name__, exc)
             return entry
 
+        # Fallback 1: Raw claim text
+        if not hits and search_query != entry.get("claim") and entry.get("claim"):
+            try:
+                hits = hybrid_search(
+                    entry["claim"], collection, bm25, texts, metadatas,
+                    top_k=retrieve_k, doc_filter=documents,
+                    exclude_types=EXCLUDED_FROM_EVIDENCE,
+                )
+                if hits:
+                    entry["search_query_relaxed"] = entry["claim"]
+            except Exception as exc:
+                logger.debug("Fallback raw claim search failed for %s: %s", documents, exc)
+
+        # Fallback 2: Claim keywords + reference title
+        if not hits:
+            ref_info = entry.get("ref") or {}
+            kw = _extract_claim_keywords(entry.get("claim", ""), ref_info.get("title", ""))
+            if kw and kw != search_query and kw != entry.get("claim"):
+                try:
+                    hits = hybrid_search(
+                        kw, collection, bm25, texts, metadatas,
+                        top_k=retrieve_k, doc_filter=documents,
+                        exclude_types=EXCLUDED_FROM_EVIDENCE,
+                    )
+                    if hits:
+                        entry["search_query_relaxed"] = kw
+                except Exception as exc:
+                    logger.debug("Fallback keyword search failed for %s: %s", documents, exc)
+
+        # Fallback 3: Document fallback chunks
+        if not hits:
+            doc_hits = []
+            for d in documents:
+                dh = _get_document_fallback_chunks(d, collection, texts, metadatas, k=retrieve_k)
+                if dh:
+                    doc_hits.extend(dh)
+            if doc_hits:
+                hits = doc_hits[:retrieve_k]
+                entry["search_query_relaxed"] = "[document fallback chunks]"
+
         if not hits:
             entry["outcome"] = "no_evidence"
             logger.info(" -> nothing retrieved from that source for this claim.")
             return entry
 
+        hits = rerank_candidates(search_query, hits, top_k=retrieve_k)
+
         expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+        entry["evidence_tier"] = (
+            "abstract_only"
+            if all((h.get("metadata") or {}).get("tier") == "abstract_only" for h in hits[:top_k])
+            else "full_text"
+        )
         entry["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
         entry["evidence_hits"] = min(top_k, len(hits))
         entry["escalated"] = False
         try:
             verdict = _judge_once(entry["claim"], entry["evidence"], context=entry.get("context"))
-            # Second look, once, only when the first verdict says it saw too
-            # little and there is more of this paper to show it.
+            # Escalation
             if escalate_k and len(hits) > top_k and needs_escalation(verdict):
                 entry["first_judgement"] = verdict["judgement"]
                 entry["first_sufficiency"] = verdict["evidence_sufficiency"]
@@ -347,15 +402,38 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
                 logger.info(" -> %s on %d hit(s), sufficiency %s — judging again with %d hit(s).",
                             verdict["judgement"], top_k, verdict["evidence_sufficiency"], entry["evidence_hits"])
                 verdict = _judge_once(entry["claim"], entry["evidence"], context=entry.get("context"))
+
+            # Second Judge Pass: for Unclear verdicts or Low confidence
+            if CITATION_JUDGEMENT_SECOND_PASS and (
+                verdict.get("judgement") == "Unclear / insufficient evidence"
+                or verdict.get("confidence") == "Low"
+            ):
+                if len(hits) > top_k and not entry.get("escalated"):
+                    expanded_k = escalate_k if escalate_k else min(len(hits), top_k + 2)
+                    entry["evidence"] = assemble_evidence(hits[:expanded_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
+                    entry["evidence_hits"] = min(expanded_k, len(hits))
+                    entry["escalated"] = True
+
+                adjudication_context = entry.get("context") or ""
+                adjudication_note = (
+                    f"Adjudication context (initial verdict was {verdict.get('judgement')} "
+                    f"with {verdict.get('confidence')} confidence). Please re-read the evidence carefully "
+                    f"to see if the claim is supported or partially supported."
+                )
+                combined_ctx = f"{adjudication_context}\n\n[Note: {adjudication_note}]".strip()
+                logger.info(" -> Second-pass adjudication triggered for %s (%s confidence)",
+                            verdict.get("judgement"), verdict.get("confidence"))
+                verdict2 = _judge_once(entry["claim"], entry["evidence"], context=combined_ctx)
+                if verdict2.get("judgement"):
+                    entry["first_pass_verdict"] = verdict.get("judgement")
+                    entry["first_pass_confidence"] = verdict.get("confidence")
+                    verdict = verdict2
         except JudgementParseError as exc:
             entry["outcome"] = "parse_failed"
             entry["raw"] = exc.raw
             logger.warning(" -> unusable reply after %d attempts.", _JUDGE_ATTEMPTS)
             return entry
         except Exception as exc:
-            # Connection errors, timeouts and HTTP 4xx/5xx are not "unusable
-            # model reply" — filing them as parse_failed sends the reader to
-            # prompt.md when the endpoint was simply down.
             entry["outcome"] = "call_failed"
             entry["error_type"] = type(exc).__name__
             entry["raw"] = str(exc)
@@ -363,14 +441,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             return entry
 
         entry["outcome"] = "judged"
-        # Only the rubric's own fields are merged. _validate permits extra
-        # top-level keys in a model reply — harmless in themselves, but a
-        # blanket update() lets an echoed `sentence_index`, `claim`, `evidence`
-        # or `outcome` overwrite the pipeline's own record of what was judged,
-        # which is exactly the provenance §9.2 leans on to justify
-        # re-retrieval.
         entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
-        # Derived by enforce_rubric(); absent from older stubs and records.
         entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
         logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
         return entry
@@ -393,7 +464,20 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
                 results[idx] = future.result()
 
     for entry in results:
-        source_eval = assess_source({"venue": entry.get("citation_source")})
+        paper_meta = entry.get("metadata") or {}
+        actual_venue = (
+            paper_meta.get("venue")
+            or paper_meta.get("journal")
+            or (entry.get("ref") or {}).get("venue")
+            or (entry.get("ref") or {}).get("journal")
+            or ""
+        )
+        source_eval = assess_source({
+            "venue": actual_venue,
+            "title": paper_meta.get("title") or (entry.get("ref") or {}).get("title") or entry.get("citation_source") or "",
+            "doi": paper_meta.get("doi") or (entry.get("ref") or {}).get("doi"),
+            "arxiv_id": paper_meta.get("arxiv_id") or (entry.get("ref") or {}).get("arxiv_id"),
+        })
         entry["source_grade"] = source_eval["grade"]
         entry["source_assessment"] = source_eval
         # A rating is a statement about a verdict; an orphaned, unresolved or
@@ -408,6 +492,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             rubric_mismatch=entry.get("rubric_mismatch", False),
             outcome=entry.get("outcome") or "judged",
             span_cites_others=entry.get("span_cites_others"),
+            evidence_tier=entry.get("evidence_tier", "full_text"),
         )
         entry["reliability"] = rel_eval["rating"]
         entry["reliability_badge"] = rel_eval["badge"]
@@ -460,6 +545,7 @@ def _totals(results) -> dict:
         "moderate": sum(1 for r in results if r.get("reliability") == "MODERATE"),
         "low": sum(1 for r in results if r.get("reliability") == "LOW"),
         "contradicted": sum(1 for r in results if r.get("reliability") == "CONTRADICTED"),
+        "unsupported": sum(1 for r in results if r.get("reliability") == "UNSUPPORTED"),
         "unresolved": sum(1 for r in results if r.get("reliability") == "UNRESOLVED"),
     }
     return totals
@@ -495,6 +581,7 @@ def _write_markdown(path, report) -> None:
         f"| 🟡 **Moderate Reliability** | {rel.get('moderate', 0)} | Supported by preprints, secondary reviews, or qualified claims |",
         f"| 🟠 **Low / Flagged** | {rel.get('low', 0)} | Unverified spans, retracted/flawed sources, or rubric violations |",
         f"| 🔴 **Contradicted** | {rel.get('contradicted', 0)} | Directly refuted by cited literature under comparable conditions |",
+        f"| 🟠 **Unsupported** | {rel.get('unsupported', 0)} | Retrieved passages do not report the finding |",
         f"| ⏳ **Unresolved / Pending** | {rel.get('unresolved', 0)} | Missing, paywalled, or insufficient evidence |",
         "",
         "---\n",

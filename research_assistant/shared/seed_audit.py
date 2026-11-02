@@ -51,11 +51,15 @@ from research_assistant.config import (
     RAW_DIR,
     CITATION_AUDIT_CONTEXTUALIZE_QUERIES,
     CITATION_AUDIT_MAX_CLAIMS,
+    CITATION_AUDIT_MAX_PAIRS_PER_SENTENCE,
+    CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD,
+    CITATION_JUDGEMENT_SECOND_PASS,
 )
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
+import concurrent.futures
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.search import expand_neighbours, hybrid_search
+from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
 from research_assistant.shared.source_key import normalise_doi
 from research_assistant.shared.tei_structure import artifact_registry, paragraph_artifacts, section_breadcrumb
 
@@ -139,13 +143,6 @@ def _build_number_map(body, bib_by_id: dict) -> dict[int, dict]:
     return number_map
 
 
-from research_assistant.audit.resolver import (
-    _looks_like_reference,
-    _resolve_ref,
-    _unknown_ref,
-)
-
-
 def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
     """Extract in-text citation claims from TEI XML.
 
@@ -169,6 +166,8 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         - section_heading: breadcrumb of numbered headings ("2. Results > 2.1. THz analysis"), "" if unknown
         - artifacts: figures/tables the paragraph points at: [{id, kind, label, caption}]
     """
+    from research_assistant.audit.resolver import _resolve_ref, _unknown_ref
+
     if isinstance(tei_source, BeautifulSoup):
         soup = tei_source
     else:
@@ -222,9 +221,31 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             venue = _clean(journal) if journal else (_clean(book) if book else None)
             is_monograph = bool(book) and not (analytic and analytic.find("title"))
 
+            # Printed reference label/number extraction:
+            # 1. Check <biblStruct n="...">
+            # 2. Check <label> tag
+            # 3. Check leading printed label in raw_reference, e.g. "[1]" or "1." or "1 "
+            printed_num = None
+            if b.get("n") and b.get("n").strip().isdigit():
+                printed_num = int(b.get("n").strip())
+            if printed_num is None:
+                lbl_tag = b.find("label")
+                if lbl_tag:
+                    lbl_txt = _clean(lbl_tag)
+                    m_lbl = re.match(r"^\[?(\d+)\]?[\.\:\s]*$", lbl_txt)
+                    if m_lbl:
+                        printed_num = int(m_lbl.group(1))
+            if printed_num is None and raw_reference:
+                m_raw = re.match(r"^\s*\[?(\d+)\]?[\.\:\s]", raw_reference)
+                if m_raw:
+                    printed_num = int(m_raw.group(1))
+
+            effective_index = printed_num if printed_num is not None else (idx + 1)
             ref_info = {
                 "xml_id": xid,
-                "index": idx + 1,
+                "index": effective_index,
+                "position_index": idx + 1,
+                "printed_index": printed_num,
                 "title": title,
                 "authors": authors,
                 "year": year,
@@ -234,7 +255,9 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                 "raw_reference": raw_reference,
             }
             bib_by_id[xid] = ref_info
-            bib_by_index[idx + 1] = ref_info
+            if printed_num is not None:
+                bib_by_index[printed_num] = ref_info
+            bib_by_index.setdefault(idx + 1, ref_info)
 
     # 2. Parse body paragraphs
     body = soup.find("body")
@@ -350,6 +373,18 @@ def _load_downloaded_manifest() -> dict:
     return _audit_resolver._load_downloaded_manifest(DOWNLOADED_JSON_PATH, PULLED_PDFS_DIR)
 
 
+def _is_ref_available(dl_entry: Optional[dict]) -> bool:
+    """True if reference has a downloaded file or abstract fallback available."""
+    if not dl_entry:
+        return False
+    path = dl_entry.get("path")
+    if path and os.path.exists(path):
+        return True
+    if dl_entry.get("evidence_tier") == "abstract_only" and dl_entry.get("abstract"):
+        return True
+    return False
+
+
 def _relocate_manifest_paths(manifest: dict) -> dict:
     return _audit_resolver._relocate_manifest_paths(manifest, PULLED_PDFS_DIR)
 
@@ -358,6 +393,96 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None)
     return _audit_resolver.contextualize_citation_queries(
         claims, model=model, enabled=CITATION_AUDIT_CONTEXTUALIZE_QUERIES
     )
+
+
+def _extract_claim_keywords(claim: str, ref_title: str = "") -> str:
+    """Extract informative keywords from a claim and cited paper title for fallback retrieval."""
+    import re
+
+    stop_words = {
+        "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "with", "by", "of", "from",
+        "is", "are", "was", "were", "be", "been", "that", "this", "these", "those", "as", "it",
+        "et", "al", "which", "we", "our", "their", "paper", "study", "propose", "proposed",
+        "show", "shows", "shown", "demonstrate", "demonstrates", "using", "used", "into", "also",
+        "can", "could", "may", "might", "will", "would", "shall", "should", "not", "no", "such",
+    }
+    raw = f"{claim} {ref_title}"
+    words = re.findall(r"\b[A-Za-z0-9_-]{3,}\b", raw)
+    seen = set()
+    deduped = []
+    for w in words:
+        wl = w.lower()
+        if wl not in stop_words and wl not in seen:
+            seen.add(wl)
+            deduped.append(w)
+    return " ".join(deduped[:12])
+
+
+def _get_document_fallback_chunks(
+    doc_name: str,
+    collection,
+    texts,
+    metadatas,
+    k: int = 5,
+) -> list[dict]:
+    """Retrieve fallback chunks directly from a document when search queries return 0 hits."""
+    if not doc_name:
+        return []
+
+    # 1. Try collection.get() if it returns real dict with documents
+    try:
+        if hasattr(collection, "get"):
+            res = collection.get(where={"document": doc_name}, limit=k)
+            if isinstance(res, dict):
+                docs = res.get("documents")
+                metas = res.get("metadatas") or []
+                if isinstance(docs, list) and docs:
+                    hits = []
+                    for i, d in enumerate(docs):
+                        if not d or not str(d).strip():
+                            continue
+                        m = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {"document": doc_name}
+                        if m.get("type") in EXCLUDED_FROM_EVIDENCE:
+                            continue
+                        hits.append({
+                            "chunk_index": -1,
+                            "text": str(d),
+                            "metadata": m,
+                            "rrf_score": 0.001,
+                        })
+                        if len(hits) >= k:
+                            break
+                    if hits:
+                        return hits
+    except Exception as exc:
+        logger.debug("Collection fallback get failed: %s", exc)
+
+    # 2. Try scanning metadatas / texts
+    if metadatas and texts:
+        hits = []
+        try:
+            total = len(metadatas)
+            for i in range(total):
+                meta = metadatas[i]
+                if isinstance(meta, dict) and meta.get("document") == doc_name:
+                    if meta.get("type") in EXCLUDED_FROM_EVIDENCE:
+                        continue
+                    text = texts[i] if i < len(texts) else ""
+                    if text and str(text).strip():
+                        hits.append({
+                            "chunk_index": i,
+                            "text": str(text),
+                            "metadata": meta,
+                            "rrf_score": 0.001,
+                        })
+                        if len(hits) >= k:
+                            break
+            if hits:
+                return hits
+        except Exception as exc:
+            logger.debug("Metadata scan fallback failed: %s", exc)
+
+    return []
 
 
 def _judge_claim_entry(
@@ -398,11 +523,60 @@ def _judge_claim_entry(
         item["reason"] = f"Retrieval failed: {exc}"
         return item
 
+    # Query relaxation fallback 1: If search_query was contextualized, try raw claim text
+    if not hits and search_query != item.get("claim") and item.get("claim"):
+        try:
+            hits = hybrid_search(
+                item["claim"],
+                collection,
+                bm25,
+                texts,
+                metadatas,
+                top_k=retrieve_k,
+                doc_filter={item["document"]},
+                exclude_types=EXCLUDED_FROM_EVIDENCE,
+            )
+            if hits:
+                item["search_query_relaxed"] = item["claim"]
+        except Exception as exc:
+            logger.debug("Fallback raw claim search failed for %s: %s", item.get("document"), exc)
+
+    # Query relaxation fallback 2: Salient keywords from claim + cited reference title
+    if not hits:
+        kw = _extract_claim_keywords(item.get("claim", ""), (item.get("ref") or {}).get("title", ""))
+        if kw and kw != search_query and kw != item.get("claim"):
+            try:
+                hits = hybrid_search(
+                    kw,
+                    collection,
+                    bm25,
+                    texts,
+                    metadatas,
+                    top_k=retrieve_k,
+                    doc_filter={item["document"]},
+                    exclude_types=EXCLUDED_FROM_EVIDENCE,
+                )
+                if hits:
+                    item["search_query_relaxed"] = kw
+            except Exception as exc:
+                logger.debug("Fallback keyword search failed for %s: %s", item.get("document"), exc)
+
+    # Query relaxation fallback 3: Document-level fallback chunks
+    if not hits:
+        doc_hits = _get_document_fallback_chunks(
+            item.get("document"), collection, texts, metadatas, k=retrieve_k
+        )
+        if doc_hits:
+            hits = doc_hits
+            item["search_query_relaxed"] = "[document fallback chunks]"
+
     if not hits:
         item["outcome"] = "no_evidence"
         item["judgement"] = None
         item["reason"] = "No relevant passages found in the cited document."
         return item
+
+    hits = rerank_candidates(search_query, hits, top_k=retrieve_k)
 
     expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
     item["evidence_tier"] = (
@@ -436,6 +610,50 @@ def _judge_claim_entry(
             _provenance(escalate_k)
             item["escalated"] = True
             verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
+
+        # Second Judge Pass: for Unclear verdicts or Low confidence
+        if CITATION_JUDGEMENT_SECOND_PASS and (
+            verdict.get("judgement") == "Unclear / insufficient evidence"
+            or verdict.get("confidence") == "Low"
+        ):
+            if len(hits) > top_k and not item.get("escalated"):
+                expanded_k = escalate_k if escalate_k else min(len(hits), top_k + 2)
+                item["evidence"] = assemble_evidence(
+                    hits[:expanded_k], JUDGEMENT_EVIDENCE_MAX_CHARS
+                )
+                _provenance(expanded_k)
+                item["escalated"] = True
+
+            adjudication_context = claim_context or ""
+            adjudication_note = (
+                "\n[Second Judge Review: Primary evaluation was unclear or low-confidence. "
+                "Carefully inspect the passages for direct or implicit support, methodology, or contradictions.]"
+            )
+            second_ctx = f"{adjudication_context}{adjudication_note}".strip()
+            try:
+                second_verdict = _judge_once(item["claim"], item["evidence"], context=second_ctx)
+                if isinstance(second_verdict, dict) and second_verdict.get("judgement"):
+                    item["second_judge_verdict"] = second_verdict.get("judgement")
+                    item["second_judge_confidence"] = second_verdict.get("confidence")
+                    item["second_judge_reason"] = second_verdict.get("reason")
+
+                    first_conf = {"Low": 0, "Medium": 1, "High": 2}.get(verdict.get("confidence"), 0)
+                    second_conf = {"Low": 0, "Medium": 1, "High": 2}.get(second_verdict.get("confidence"), 0)
+
+                    if (
+                        verdict.get("judgement") == "Unclear / insufficient evidence"
+                        and second_verdict.get("judgement") != "Unclear / insufficient evidence"
+                    ) or (second_conf > first_conf):
+                        logger.info(
+                            "Second judge resolved '%s' (%s) -> '%s' (%s)",
+                            verdict.get("judgement"),
+                            verdict.get("confidence"),
+                            second_verdict.get("judgement"),
+                            second_verdict.get("confidence"),
+                        )
+                        verdict = second_verdict
+            except Exception as exc:
+                logger.debug("Second judge pass skipped: %s", exc)
 
         item["outcome"] = "judged"
         for k in REQUIRED_FIELDS:
@@ -587,12 +805,14 @@ def compute_totals(results: list[dict]) -> dict:
 
 
 SECTION_RANK = {"results": 0, "discussion": 0, "conclusion": 0, "methods": 1}
-MAX_PAIRS_PER_SENTENCE = 3
+MAX_PAIRS_PER_SENTENCE = CITATION_AUDIT_MAX_PAIRS_PER_SENTENCE
 MAX_CONSECUTIVE_BACKEND_FAILURES = 3
 BACKEND_FAILURE_OUTCOMES = ("retrieval_failed", "call_failed")
 
 
-def prioritise_claims(claims: list[dict]) -> tuple[list[dict], list[dict]]:
+def prioritise_claims(
+    claims: list[dict], max_pairs_per_sentence: Optional[int] = None
+) -> tuple[list[dict], list[dict]]:
     """The order the budget is spent in, and the pairs it never reaches.
 
     Results and discussion before methods before introduction; sentences
@@ -600,9 +820,11 @@ def prioritise_claims(claims: list[dict]) -> tuple[list[dict], list[dict]]:
     most physics headings are topical ("DFT-based tight-binding Hamiltonian")
     and map to no rank, later paragraphs before earlier ones — the opening of
     a paper is background, its later pages are where results are compared
-    with prior work. At most MAX_PAIRS_PER_SENTENCE pairs per sentence — the
-    rest are cluster_skipped, which a re-run with a larger budget does not
-    revisit.
+    with prior work.
+
+    If max_pairs_per_sentence > 0 (or CITATION_AUDIT_MAX_PAIRS_PER_SENTENCE > 0),
+    at most that many pairs per sentence are judged — the rest are cluster_skipped.
+    By default (0), all citations in a sentence are audited.
     """
     ordered = sorted(
         claims,
@@ -613,15 +835,20 @@ def prioritise_claims(claims: list[dict]) -> tuple[list[dict], list[dict]]:
             c.get("sentence_index", 0),
         ),
     )
+    max_pairs = (
+        max_pairs_per_sentence
+        if max_pairs_per_sentence is not None
+        else MAX_PAIRS_PER_SENTENCE
+    )
     per_sentence: dict[tuple, int] = {}
     to_judge, skipped = [], []
     for c in ordered:
         key = (c.get("paragraph_index", 0), c.get("sentence_index", 0))
         per_sentence[key] = per_sentence.get(key, 0) + 1
-        if per_sentence[key] > MAX_PAIRS_PER_SENTENCE:
+        if max_pairs > 0 and per_sentence[key] > max_pairs:
             c["outcome"] = "cluster_skipped"
             c["judgement"] = None
-            c["reason"] = f"Sentence cites {c.get('cite_count')} papers; only {MAX_PAIRS_PER_SENTENCE} judged."
+            c["reason"] = f"Sentence cites {c.get('cite_count')} papers; only {max_pairs} judged."
             skipped.append(c)
         else:
             to_judge.append(c)
@@ -775,6 +1002,7 @@ def audit_seed_citations(
     top_k: int = JUDGEMENT_TOP_K,
     force: bool = False,
     skip_if_cached: bool = True,
+    concurrency: int | None = None,
 ) -> dict:
     """Audit the in-text citation claims of an uploaded seed paper against the local corpus.
 
@@ -899,56 +1127,85 @@ def audit_seed_citations(
 
         for r in p_refs:
             dl_entry = _match_downloaded_paper(r, seed_pdf_name, downloaded_manifest)
-            if not (dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"])):
+            if not _is_ref_available(dl_entry):
                 missing_p_refs.append(r)
 
         missing_count = len(missing_p_refs)
         paywall_ratio = (missing_count / total_p_refs) if total_p_refs > 0 else 0.0
-        for c in p_claims:
-            ref = c.get("ref")
-            dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
-            is_dl = bool(dl_entry and dl_entry.get("path") and os.path.exists(dl_entry["path"]))
-            c["paragraph_missing_refs"] = missing_p_refs
-            c["paywall_ratio"] = paywall_ratio
 
-            # Identify if other references cited in this exact same sentence are missing from the corpus
-            curr_key = (ref.get("xml_id") or normalise_doi(ref.get("doi")) or ref.get("title")) if ref else None
-            compound_missing = []
-            for s_ref in c.get("sentence_refs", []):
-                s_key = s_ref.get("xml_id") or normalise_doi(s_ref.get("doi")) or s_ref.get("title")
-                if s_key and s_key != curr_key:
-                    s_dl = _match_downloaded_paper(s_ref, seed_pdf_name, downloaded_manifest)
-                    if not (s_dl and s_dl.get("path") and os.path.exists(s_dl["path"])):
-                        compound_missing.append(s_ref)
-            if compound_missing:
-                c["compound_missing_refs"] = compound_missing
-
-            if is_dl:
-                c["downloaded"] = True
-                c["document"] = os.path.basename(dl_entry["path"])
-                c["citation_source"] = (
-                    dl_entry.get("title")
-                    or dl_entry.get("raw_reference")
-                    or dl_entry.get("key")
-                )
-                downloaded_claims.append(c)
-            else:
+        pct_threshold = CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD
+        if total_p_refs > 0 and paywall_ratio > pct_threshold:
+            # Paragraph is >90% paywalled: defer evaluation of claims
+            for c in p_claims:
                 c["downloaded"] = False
-                c["outcome"] = "not_downloaded"
-                c["judgement"] = "Not downloaded"
-                c["reason"] = "Reference PDF was not available or could not be downloaded."
-                undownloaded_claims.append(c)
+                c["outcome"] = "deferred_paywalled"
+                c["judgement"] = "Deferred (pending paywalled evidence)"
+                pct_str = f"{int(pct_threshold * 100)}%"
+                c["reason"] = (
+                    f"Evaluation deferred: {missing_count}/{total_p_refs} references cited in this "
+                    f"paragraph are missing from the corpus (>{pct_str} paywalled)."
+                )
+                c["paragraph_missing_refs"] = missing_p_refs
+                c["paywall_ratio"] = paywall_ratio
+                deferred_claims.append(c)
+        else:
+            # Under threshold: evaluate available citations directly ("work it out")
+            for c in p_claims:
+                ref = c.get("ref")
+                dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
+                is_dl = _is_ref_available(dl_entry)
+                c["paragraph_missing_refs"] = missing_p_refs
+                c["paywall_ratio"] = paywall_ratio
+
+                # Identify if other references cited in this exact same sentence are missing from the corpus
+                curr_key = (ref.get("xml_id") or normalise_doi(ref.get("doi")) or ref.get("title")) if ref else None
+                compound_missing = []
+                for s_ref in c.get("sentence_refs", []):
+                    s_key = s_ref.get("xml_id") or normalise_doi(s_ref.get("doi")) or s_ref.get("title")
+                    if s_key and s_key != curr_key:
+                        s_dl = _match_downloaded_paper(s_ref, seed_pdf_name, downloaded_manifest)
+                        if not _is_ref_available(s_dl):
+                            compound_missing.append(s_ref)
+                if compound_missing:
+                    c["compound_missing_refs"] = compound_missing
+
+                if is_dl:
+                    c["downloaded"] = True
+                    c["document"] = (
+                        os.path.basename(dl_entry["path"])
+                        if dl_entry.get("path")
+                        else (dl_entry.get("key") or dl_entry.get("title") or "unknown.pdf")
+                    )
+                    c["citation_source"] = (
+                        dl_entry.get("title")
+                        or dl_entry.get("raw_reference")
+                        or dl_entry.get("key")
+                    )
+                    if dl_entry.get("evidence_tier"):
+                        c["evidence_tier"] = dl_entry["evidence_tier"]
+                    downloaded_claims.append(c)
+                else:
+                    c["downloaded"] = False
+                    c["outcome"] = "not_downloaded"
+                    c["judgement"] = "Not downloaded"
+                    c["reason"] = "Reference PDF was not available or could not be downloaded."
+                    undownloaded_claims.append(c)
 
     logger.info(
-        "Found %d in-text citation claims (%d cite downloaded references, %d not in corpus).",
+        "Found %d in-text citation claims (%d cite downloaded references, %d not in corpus, %d deferred paywalled).",
         len(claims),
         len(downloaded_claims),
         len(undownloaded_claims),
+        len(deferred_claims),
     )
 
     ordered, cluster_skipped = prioritise_claims(downloaded_claims)
-    claims_to_judge = ordered[:max_claims]
-    overflow = ordered[max_claims:]
+    if max_claims <= 0:
+        claims_to_judge = ordered
+        overflow = []
+    else:
+        claims_to_judge = ordered[:max_claims]
+        overflow = ordered[max_claims:]
     aborted = None
 
     if claims_to_judge:
@@ -969,34 +1226,73 @@ def audit_seed_citations(
         escalate_k = JUDGEMENT_ESCALATE_TOP_K if JUDGEMENT_ESCALATE_TOP_K > top_k else 0
         consecutive_failures = 0
 
-        for i, item in enumerate(claims_to_judge, 1):
-            if aborted:
-                item["outcome"] = "not_attempted"
-                item["judgement"] = None
-                item["reason"] = f"Audit stopped after {aborted['after_attempted']} attempts: {aborted['reason']}"
-                continue
-            ref_info = item.get("ref") or {}
-            ref_lbl = f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
-            pipeline_status.update_progress(
-                item_current=i,
-                item_total=len(claims_to_judge),
-                current_item_name=ref_lbl[:60],
-                detail=f"Judging citation ({i}/{len(claims_to_judge)}): {ref_lbl[:40]}",
-            )
-            logger.info("[%d/%d] Auditing citation %s: %s", i, len(claims_to_judge), ref_lbl[:40], item["claim"][:80])
-            _judge_claim_entry(item, collection, bm25, texts, metadatas, top_k=top_k, escalate_k=escalate_k)
+        default_concurrency = int(os.environ.get("CITATION_VERIFY_CONCURRENCY", "1"))
+        workers = concurrency if concurrency is not None else default_concurrency
+        workers = max(1, min(workers, len(claims_to_judge))) if claims_to_judge else 1
 
-            # A backend that is down fails every call the same way; three in a
-            # row is that, not three unlucky citations. Stop, say so, keep
-            # the budget for a run that can use it.
-            if item.get("outcome") in BACKEND_FAILURE_OUTCOMES:
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_BACKEND_FAILURES:
-                    aborted = {"reason": item.get("reason", item["outcome"]), "after_attempted": i}
-                    logger.warning("Audit stopped after %d consecutive backend failures: %s", i, aborted["reason"])
-                    pipeline_status.add_event(f"⚠️ Citation audit stopped: {aborted['reason'][:80]}")
-            else:
-                consecutive_failures = 0
+        if workers <= 1:
+            for i, item in enumerate(claims_to_judge, 1):
+                if pipeline_status.is_cancel_requested():
+                    logger.info("Citation audit halted by cancellation request at item %d/%d", i, len(claims_to_judge))
+                    aborted = {"reason": "User requested cancellation", "after_attempted": i - 1}
+                if aborted:
+                    item["outcome"] = "not_attempted"
+                    item["judgement"] = None
+                    item["reason"] = f"Audit stopped after {aborted['after_attempted']} attempts: {aborted['reason']}"
+                    continue
+                ref_info = item.get("ref") or {}
+                ref_lbl = f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
+                pipeline_status.update_progress(
+                    item_current=i,
+                    item_total=len(claims_to_judge),
+                    current_item_name=ref_lbl[:60],
+                    detail=f"Judging citation ({i}/{len(claims_to_judge)}): {ref_lbl[:40]}",
+                )
+                logger.info("[%d/%d] Auditing citation %s: %s", i, len(claims_to_judge), ref_lbl[:40], item["claim"][:80])
+                _judge_claim_entry(item, collection, bm25, texts, metadatas, top_k=top_k, escalate_k=escalate_k)
+
+                # A backend that is down fails every call the same way; three in a
+                # row is that, not three unlucky citations. Stop, say so, keep
+                # the budget for a run that can use it.
+                if item.get("outcome") in BACKEND_FAILURE_OUTCOMES:
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_BACKEND_FAILURES:
+                        aborted = {"reason": item.get("reason", item["outcome"]), "after_attempted": i}
+                        logger.warning("Audit stopped after %d consecutive backend failures: %s", i, aborted["reason"])
+                        pipeline_status.add_event(f"⚠️ Citation audit stopped: {aborted['reason'][:80]}")
+                else:
+                    consecutive_failures = 0
+        else:
+            def _judge_task(i_item):
+                i, item = i_item
+                if pipeline_status.is_cancel_requested():
+                    item["outcome"] = "not_attempted"
+                    item["judgement"] = None
+                    item["reason"] = "Audit stopped: User requested cancellation"
+                    return i, item
+                ref_info = item.get("ref") or {}
+                ref_lbl = f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
+                logger.info("[%d/%d] Auditing citation %s: %s", i, len(claims_to_judge), ref_lbl[:40], item["claim"][:80])
+                _judge_claim_entry(item, collection, bm25, texts, metadatas, top_k=top_k, escalate_k=escalate_k)
+                return i, item
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_idx = {
+                    executor.submit(_judge_task, (i, item)): i
+                    for i, item in enumerate(claims_to_judge, 1)
+                }
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    completed_count += 1
+                    idx, item = future.result()
+                    ref_info = item.get("ref") or {}
+                    ref_lbl = f"[{ref_info.get('index') or '?'}] {ref_info.get('title') or item.get('cite_text', '')}"
+                    pipeline_status.update_progress(
+                        item_current=completed_count,
+                        item_total=len(claims_to_judge),
+                        current_item_name=ref_lbl[:60],
+                        detail=f"Judged ({completed_count}/{len(claims_to_judge)}): {ref_lbl[:40]}",
+                    )
 
     for c in overflow:
         if not c.get("outcome"):
