@@ -21,7 +21,7 @@ from research_assistant.transfer.models import (
     Step,
     Transfer,
 )
-from research_assistant.transfer.premises import PremiseChecker
+from research_assistant.transfer.premises import PremiseChecker, resolve_chunk
 from research_assistant.transfer.prompts import (
     BOTTLENECKS_USER,
     CRITIQUE_USER,
@@ -301,23 +301,9 @@ def candidate_cards(
 def resolve_card_evidence(deps: Deps, card: Card) -> tuple[int, str, dict] | None:
     """Find the chunk a card's evidence points at, as (position in deps.texts, text, metadata).
 
-    Tries the positional entry first (when it belongs to the card's paper), then the paper's chunk
-    whose seq or chunk_index equals the evidence chunk_index. Returns None when neither exists;
-    there is deliberately no fallback to the paper's first chunk.
+    See resolve_chunk: None when the chunk cannot be found, never the paper's first chunk.
     """
-    ev_chunk = card.evidence.chunk_index
-    if ev_chunk is None or not card.document:
-        return None
-
-    if 0 <= ev_chunk < len(deps.texts):
-        meta = deps.metadatas[ev_chunk] if ev_chunk < len(deps.metadatas) else {}
-        if meta.get("document") == card.document:
-            return ev_chunk, deps.texts[ev_chunk], meta
-
-    for idx, (txt, m) in enumerate(zip(deps.texts, deps.metadatas)):
-        if m.get("document") == card.document and (m.get("seq") == ev_chunk or m.get("chunk_index") == ev_chunk):
-            return idx, txt, m
-    return None
+    return resolve_chunk(deps.texts, deps.metadatas, card.document, card.evidence.chunk_index)
 
 
 def develop(

@@ -236,6 +236,5 @@ class TestDevelop(unittest.TestCase):
             {"document": doc, "section": "methods", "seq": 7},
         ])
         seed.card.evidence.chunk_index = 7            # per-document seq, not a position in the corpus
-        from research_assistant.transfer.stages import resolve_card_evidence
-        idx, text, meta = resolve_card_evidence(deps, seed.card)
+        idx, text, meta = stages.resolve_card_evidence(deps, seed.card)
         self.assertEqual((idx, text, meta["document"]), (len(deps.texts) - 1, "right chunk", doc))
