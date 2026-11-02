@@ -78,6 +78,29 @@ class TestGround(unittest.TestCase):
         )
         self.assertEqual(log.searches[0], ({"n1", "n2", "n3"}, {"n0"}))
 
+    def test_near_passages_from_two_papers_with_the_same_seq_are_both_kept(self):
+        # On LanceDB chunk_index is the per-document sequence number, so two papers collide on it.
+        def search(query, top_k, doc_filter, exclude_docs):
+            return [
+                {"chunk_index": 3, "text": f"text of {doc}", "score": 1.0,
+                 "metadata": {"document": doc, "section": "methods", "citation_source": f"Citation {doc}", "seq": 3}}
+                for doc in ("a.pdf", "b.pdf")
+            ]
+
+        deps, _ = world(search=search)
+        g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
+        self.assertEqual(sorted(p.document for p in g.passages.values()), ["a.pdf", "b.pdf"])
+
+    def test_the_same_paper_and_chunk_returned_twice_is_kept_once(self):
+        def search(query, top_k, doc_filter, exclude_docs):
+            hit = {"chunk_index": 3, "text": "t", "score": 1.0,
+                   "metadata": {"document": "a.pdf", "section": "methods", "citation_source": "A", "seq": 3}}
+            return [hit, dict(hit)]
+
+        deps, _ = world(search=search)
+        g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
+        self.assertEqual([p.document for p in g.passages.values()], ["a.pdf"])
+
 
 class TestCandidates(unittest.TestCase):
     def setUp(self):
@@ -191,4 +214,28 @@ class TestDevelop(unittest.TestCase):
         with self.assertRaises(pipeline_status.PipelineCancelledError):
             stages.develop(seeds[0], 1, g, deps, s, ch)
 
+    def test_missing_card_evidence_is_reported_not_replaced(self):
+        deps, log, g, seeds, s, ch = self._go()
+        seed = seeds[0]
+        seed.card.evidence.chunk_index = 999          # no such chunk anywhere in the corpus
+        deps.search = lambda *a, **k: []              # nothing else to cite for this paper either
+        t = stages.develop(seed, 1, g, deps, s, ch)
+        doc = seed.card.document
+        # The paper's first chunk must not stand in for the evidence that could not be found.
+        self.assertEqual([p for p in g.passages.values() if p.document == doc and p.role in ("card", "source")], [])
+        self.assertTrue(any("card evidence not found" in w for w in g.warnings))
+        self.assertTrue(any(w.startswith("B1.T1:") and doc in w for w in g.warnings))
 
+    def test_card_evidence_is_found_by_seq_within_its_own_paper(self):
+        deps, log, g, seeds, s, ch = self._go()
+        seed = seeds[0]
+        doc = seed.card.document
+        deps.texts.extend(["other paper chunk", "right chunk"])
+        deps.metadatas.extend([
+            {"document": "elsewhere", "section": "methods", "seq": 7},
+            {"document": doc, "section": "methods", "seq": 7},
+        ])
+        seed.card.evidence.chunk_index = 7            # per-document seq, not a position in the corpus
+        from research_assistant.transfer.stages import resolve_card_evidence
+        idx, text, meta = resolve_card_evidence(deps, seed.card)
+        self.assertEqual((idx, text, meta["document"]), (len(deps.texts) - 1, "right chunk", doc))

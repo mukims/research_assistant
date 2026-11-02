@@ -48,6 +48,12 @@ class CorpusCoverageError(RuntimeError):
         )
 
 
+def _passage_key(document: str, chunk_index: int) -> tuple[str, int]:
+    """Identity of a passage. chunk_index alone is not unique: on the LanceDB backend it is the
+    per-document sequence number, so two papers share every small value."""
+    return (document, chunk_index)
+
+
 @dataclass
 class Grounding:
     query: str
@@ -87,17 +93,18 @@ def ground(
     hits = deps.search(query, settings.near_passages, kept_docs, exclude_docs)
 
     passages: dict[str, Passage] = {}
-    seen_chunks: set[int] = set()
+    seen_chunks: set[tuple[str, int]] = set()
     p_num = 1
     for h in hits:
         c_idx = h["chunk_index"]
-        if c_idx in seen_chunks:
-            continue
-        seen_chunks.add(c_idx)
-        key = f"C{p_num}"
         # hybrid_search keeps the paper and its citation in the chunk metadata.
         meta = h.get("metadata") or {}
         doc = meta.get("document", "")
+        passage_id = _passage_key(doc, c_idx)
+        if passage_id in seen_chunks:
+            continue
+        seen_chunks.add(passage_id)
+        key = f"C{p_num}"
         passages[key] = Passage(
             key=key,
             chunk_index=c_idx,
@@ -291,6 +298,28 @@ def candidate_cards(
     return seeds, warnings
 
 
+def resolve_card_evidence(deps: Deps, card: Card) -> tuple[int, str, dict] | None:
+    """Find the chunk a card's evidence points at, as (position in deps.texts, text, metadata).
+
+    Tries the positional entry first (when it belongs to the card's paper), then the paper's chunk
+    whose seq or chunk_index equals the evidence chunk_index. Returns None when neither exists;
+    there is deliberately no fallback to the paper's first chunk.
+    """
+    ev_chunk = card.evidence.chunk_index
+    if ev_chunk is None or not card.document:
+        return None
+
+    if 0 <= ev_chunk < len(deps.texts):
+        meta = deps.metadatas[ev_chunk] if ev_chunk < len(deps.metadatas) else {}
+        if meta.get("document") == card.document:
+            return ev_chunk, deps.texts[ev_chunk], meta
+
+    for idx, (txt, m) in enumerate(zip(deps.texts, deps.metadatas)):
+        if m.get("document") == card.document and (m.get("seq") == ev_chunk or m.get("chunk_index") == ev_chunk):
+            return idx, txt, m
+    return None
+
+
 def develop(
     seed: Seed,
     n: int,
@@ -314,42 +343,19 @@ def develop(
     card = seed.card
 
     # Source passages:
-    # 1. Card evidence chunk comes first.
+    # 1. Card evidence chunk comes first. If it cannot be found it is reported, never replaced:
+    #    citing some other chunk of the paper would misattribute the evidence.
     source_passages: list[Passage] = []
-    seen_chunks: set[int] = set()
+    seen_chunks: set[tuple[str, int]] = set()
 
-    ev_chunk = card.evidence.chunk_index
-    resolved_chunk_idx = None
-    resolved_text = None
-    resolved_meta = {}
-
-    if ev_chunk is not None and 0 <= ev_chunk < len(deps.texts):
-        meta = deps.metadatas[ev_chunk] if ev_chunk < len(deps.metadatas) else {}
-        if meta.get("document") == card.document:
-            resolved_chunk_idx = ev_chunk
-            resolved_text = deps.texts[ev_chunk]
-            resolved_meta = meta
-
-    # If positional lookup did not match card.document, search by document and chunk/seq
-    if resolved_text is None and card.document:
-        for idx, (txt, m) in enumerate(zip(deps.texts, deps.metadatas)):
-            if m.get("document") == card.document:
-                if m.get("seq") == ev_chunk or m.get("chunk_index") == ev_chunk:
-                    resolved_chunk_idx = idx
-                    resolved_text = txt
-                    resolved_meta = m
-                    break
-        if resolved_text is None:
-            # Fallback to first chunk matching card.document
-            for idx, (txt, m) in enumerate(zip(deps.texts, deps.metadatas)):
-                if m.get("document") == card.document:
-                    resolved_chunk_idx = idx
-                    resolved_text = txt
-                    resolved_meta = m
-                    break
-
-    if resolved_chunk_idx is not None and resolved_text is not None:
-        seen_chunks.add(resolved_chunk_idx)
+    resolved = resolve_card_evidence(deps, card)
+    if resolved is None:
+        grounding.warnings.append(
+            f"{transfer_id}: card evidence not found in {card.document}; premise unverified"
+        )
+    else:
+        resolved_chunk_idx, resolved_text, resolved_meta = resolved
+        seen_chunks.add(_passage_key(card.document, resolved_chunk_idx))
         existing = next(
             (p for p in grounding.passages.values() if p.chunk_index == resolved_chunk_idx and p.document == card.document),
             None,
@@ -379,9 +385,9 @@ def develop(
     )
     for hit in search_hits:
         c_idx = hit.get("chunk_index")
-        if c_idx is None or c_idx in seen_chunks:
+        if c_idx is None or _passage_key(card.document, c_idx) in seen_chunks:
             continue
-        seen_chunks.add(c_idx)
+        seen_chunks.add(_passage_key(card.document, c_idx))
         existing = next(
             (p for p in grounding.passages.values() if p.chunk_index == c_idx and p.document == card.document),
             None,

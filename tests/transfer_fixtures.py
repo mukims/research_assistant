@@ -386,6 +386,9 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             })
         return hits[:top_k]
 
+    # A test may swap in its own search, e.g. to return hits that share a chunk_index.
+    search_fn = overrides.get("search", search_fn)
+
     def chat_fn(messages: list[dict], temperature: float = 0.7) -> str:
         log.chat_calls += 1
         content = messages[-1].get("content", "")
