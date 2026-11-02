@@ -6,13 +6,29 @@ or a path only requires editing one file.
 """
 
 import os
+from collections.abc import MutableMapping
 
-try:
-    from dotenv import load_dotenv
 
-    load_dotenv(override=True)
-except Exception:
-    pass
+def load_env_files(paths: list[str], protected: frozenset[str],
+                   environ: MutableMapping[str, str] = os.environ) -> None:
+    """Merge .env files into `environ`, in order; later files win over earlier ones.
+
+    Keys in `protected` (the real environment at startup) are never overwritten, so a
+    variable the caller exported beats every file. Before 2026-11-02 this was
+    load_dotenv(override=True), which let a stale `.env` clobber the real environment, and a
+    live GEMINI_API_KEY in the maintainer's `.env` switched every test run to paid API calls.
+    A missing file, or no python-dotenv, is a no-op.
+    """
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        for key, value in dotenv_values(path).items():
+            if value is not None and key not in protected:
+                environ[key] = value
 
 # ─── Hardware CPU Guardrails ─────────────────────────────────────────────────
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -33,18 +49,21 @@ except Exception:
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(PACKAGE_ROOT)
 
+# What the process was started with. Real environment > DATA_DIR/.env > project .env.
+# CITATION_DISABLE_DOTENV=1 skips every .env file (the test suite sets it).
+_REAL_ENV = frozenset(os.environ)
+_DOTENV_ENABLED = os.environ.get("CITATION_DISABLE_DOTENV") != "1"
+
+if _DOTENV_ENABLED:
+    load_env_files([os.path.join(PROJECT_ROOT, ".env")], _REAL_ENV)
+
 # Everything the pipeline *writes* is anchored here, separate from the source
 # tree. Set CITATION_DATA_DIR to a writable path (e.g. /data) on a read-only or
-# ephemeral host.
+# ephemeral host. Resolved after the project .env so that file can set it.
 DATA_DIR = os.environ.get("CITATION_DATA_DIR", os.path.join(PROJECT_ROOT, "data"))
 
-# Also load from DATA_DIR/.env if present
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv(os.path.join(DATA_DIR, ".env"), override=True)
-except ImportError:
-    pass
+if _DOTENV_ENABLED:
+    load_env_files([os.path.join(DATA_DIR, ".env")], _REAL_ENV)
 
 
 # ─── Env helpers ─────────────────────────────────────────────────────────────

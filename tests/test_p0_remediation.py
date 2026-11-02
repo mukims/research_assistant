@@ -15,6 +15,16 @@ from research_assistant.shared import pipeline_status
 from research_assistant.shared import manifest
 
 
+class _OfflineEmbeddings:
+    """Stands in for the Ollama embedder, which the suite's network block makes unreachable."""
+
+    def embed_documents(self, texts):
+        return [[0.0, 0.0, 0.0] for _ in texts]
+
+    def embed_query(self, text):
+        return [0.0, 0.0, 0.0]
+
+
 class TestP0Area1ProgressCallbacks(unittest.TestCase):
     """Area 1: UI Progress Callbacks & Cleanup."""
 
@@ -569,7 +579,8 @@ class TestP0Area7IngestionManifestAndAbstractOnly(unittest.TestCase):
                 return len(corpus)
 
             with patch("research_assistant.shared.ingestion.process_pdf", return_value=[{"document": key, "type": "summary_source", "citation": "Test", "content": "Text"}]), \
-                 patch("research_assistant.shared.ingestion.upsert_corpus", side_effect=mock_upsert):
+                 patch("research_assistant.shared.ingestion.upsert_corpus", side_effect=mock_upsert), \
+                 patch("research_assistant.shared.ingestion.rebuild_bm25"):
                 # Simulate summary generation failure
                 manifest.clear()
                 result = ingest_pdfs(candidates, workers=1, skip_ingested=False)
@@ -757,7 +768,9 @@ class TestP0Iteration2DefectRegressions(unittest.TestCase):
                 key = pdf_key(pdf_path)
 
                 with patch("research_assistant.shared.ingestion.process_pdf", return_value=[{"document": key, "type": "summary_source", "citation": "P", "content": "Hello"}]), \
-                     patch("research_assistant.shared.ingestion.upsert_summaries", side_effect=RuntimeError("Store collection error")):
+                     patch("research_assistant.shared.ingestion.upsert_summaries", side_effect=RuntimeError("Store collection error")), \
+                     patch("research_assistant.shared.llm.get_embeddings", return_value=_OfflineEmbeddings()), \
+                     patch("research_assistant.shared.ingestion.rebuild_bm25"):
                     pipeline_status.clear_status()
                     ingest_pdfs({pdf_path: "Paper Title"}, workers=1, skip_ingested=False)
                     self.assertFalse(manifest.contains(key), f"Paper {key} was erroneously marked in manifest!")

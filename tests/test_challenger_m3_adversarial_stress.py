@@ -677,8 +677,10 @@ class TestSecurityAndCardIndexingGuardrails(unittest.TestCase):
         self.assertFalse(batch_uploader.is_safe_url("file:///etc/passwd"))
         self.assertFalse(batch_uploader.is_safe_url("gopher://127.0.0.1:6379/"))
 
-        # Valid public external endpoint (arXiv)
-        self.assertTrue(batch_uploader.is_safe_url("https://arxiv.org/abs/2101.00001"))
+        # Valid public external endpoint (arXiv); DNS is stubbed because tests have no network.
+        public = [(2, 1, 6, "", ("151.101.0.42", 0))]
+        with patch.object(batch_uploader.socket, "getaddrinfo", return_value=public):
+            self.assertTrue(batch_uploader.is_safe_url("https://arxiv.org/abs/2101.00001"))
 
     def test_transfer_card_evidence_document_matching(self):
         """Verifies Card evidence chunk resolution correctly matches document identity when indices shift."""

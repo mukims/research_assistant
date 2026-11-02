@@ -114,7 +114,7 @@ class TestHelpers(unittest.TestCase):
             f"""
             import os, sys
             from pathlib import Path
-            for key in [k for k in os.environ if k.startswith("CITATION_")]:
+            for key in [k for k in os.environ if k.startswith("CITATION_") and k != "CITATION_DISABLE_DOTENV"]:
                 del os.environ[key]
             REPO = Path({str(ROOT)!r})
             sys.path.insert(0, str(REPO))

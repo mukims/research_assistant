@@ -247,6 +247,13 @@ such as `/data` on a read-only or ephemeral host.
     setup. A `CITATION_EMBED_MODEL` set in `.env` or `data/.env` wins over the
     default, so remove a leftover `nomic-embed-text` there. Override with
     `CITATION_LLM_MODEL` / `CITATION_CHAT_MODEL` / `CITATION_EMBED_MODEL`.
+
+    **Where settings come from.** The precedence is: the real environment
+    (variables exported when the process starts) > `data/.env` (under
+    `CITATION_DATA_DIR`) > the project's `.env`. A `.env` file can add a
+    variable but never override one you exported. Set
+    `CITATION_DISABLE_DOTENV=1` to skip every `.env` file; the test suite does,
+    so a key in your `.env` cannot reach a test run.
   - `openai` — any OpenAI-compatible endpoint (`OPENAI_BASE_URL`,
     `OPENAI_API_KEY`); `huggingface` for embeddings via `huggingface_hub`.
 - **GROBID** for Agent 1 — `GROBID_SERVER` defaults to

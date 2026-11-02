@@ -420,7 +420,9 @@ class TestAbstractOnlySummaryRegistration(unittest.TestCase):
         mock_client.get_collection.return_value = mock_col
 
         with patch("research_assistant.shared.retrieve.open_store", return_value=mock_client):
-            with patch("research_assistant.shared.retrieve.check_embedder"):
+            with patch("research_assistant.shared.retrieve.check_embedder"), \
+                 patch("research_assistant.shared.llm.get_embeddings") as get_embeddings:
+                get_embeddings.return_value.embed_query.return_value = [0.0, 0.0, 0.0]
                 results = retrieve.rank_documents("quantum Hall effect", k=1)
                 self.assertGreaterEqual(len(results), 1)
                 self.assertEqual(results[0]["document"], "abs_doc.pdf")
