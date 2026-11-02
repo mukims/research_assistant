@@ -317,6 +317,9 @@ def run(
     seed_file: str | None = None,
     audit_citations: bool = False,
 ) -> int:
+    # A CLI invocation starts a fresh run. A sidebar Stop that outlived the run it was
+    # meant for would otherwise end this one at its first checkpoint.
+    pipeline_status.clear_cancel_request()
     app = build_graph()
     thread_key = query or (os.path.abspath(seed_file) if seed_file else "") or (seed_url or "") or "run"
     thread_id = hashlib.sha1(thread_key.encode()).hexdigest()[:12]

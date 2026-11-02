@@ -141,9 +141,9 @@ class TestChallengerCycle1CleanPass(unittest.TestCase):
             self.assertTrue(os.path.exists(deliverable_path))
             self.assertGreater(os.path.getsize(deliverable_path), 0)
 
-    def test_cycle1_clean_pass_when_chat_fails_gracefully_with_stub(self):
-        """When chat raises network error, deliverable stub is materialized and passes if valid."""
-        graph = TaskGraph(paper_id="p_c1_stub", paper_title="Cycle 1 Stub Pass")
+    def test_cycle1_chat_failure_fails_the_task(self):
+        """A task whose generation call fails is FAILED, not passed on a stub deliverable."""
+        graph = TaskGraph(paper_id="p_c1_stub", paper_title="Cycle 1 Chat Failure")
         task = Task(
             task_id="t_c1_stub",
             title="Stub Task",
@@ -155,12 +155,13 @@ class TestChallengerCycle1CleanPass(unittest.TestCase):
 
         runner = TaskRunner(graph=graph, workspace_dir=self.tmp_dir, mode=ExecutionMode.AUTONOMOUS)
 
-        with patch("research_assistant.shared.llm.chat", side_effect=ConnectionError("Ollama offline")):
-            with patch.object(runner, "_execute_harness_subprocess", return_value=(0, "OK")):
+        # runner imports chat inside execute_with_reflection, so the patch goes on its source.
+        with patch("research_assistant.shared.llm.chat", side_effect=RuntimeError("Ollama offline")):
+            with patch.object(runner, "_execute_harness_subprocess", return_value=(0, "OK")) as harness:
                 status = runner.execute_with_reflection(task, max_reflection_cycles=2)
-                self.assertEqual(status, TaskStatus.COMPLETED)
-                self.assertEqual(task.metadata.get("reflection_cycles"), 1)
-                self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, "env.txt")))
+        self.assertEqual(status, TaskStatus.FAILED)
+        self.assertIn("Ollama offline", task.metadata.get("error", ""))
+        harness.assert_not_called()
 
 
 class TestChallengerCycle2Recovery(unittest.TestCase):

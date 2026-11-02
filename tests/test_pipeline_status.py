@@ -5,6 +5,7 @@ Tests for research_assistant/shared/pipeline_status.py (unittest.TestCase migrat
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import tempfile
@@ -765,10 +766,13 @@ class TestPipelineStatus(unittest.TestCase):
     def test_multiprocess_concurrency(self):
         """Verify multiple concurrent OS processes writing events and progress do not deadlock or corrupt JSON."""
         temp_status_file = self.temp_status_file
-        import multiprocessing
-
+        # "spawn" on every platform, not the platform default and not "fork": the default
+        # is spawn on macOS and fork on Linux, so the test meant different things on each,
+        # and four children forked from a pytest process that has already imported lancedb
+        # (tokio) hang on macOS ("failed to wake I/O driver") once the whole suite has run.
+        # Separate interpreters are also the stricter test of the cross-process file lock.
         procs = [
-            multiprocessing.Process(target=_mp_worker, args=(p, temp_status_file))
+            multiprocessing.get_context("spawn").Process(target=_mp_worker, args=(p, temp_status_file))
             for p in range(4)
         ]
         try:
@@ -788,13 +792,12 @@ class TestPipelineStatus(unittest.TestCase):
         self.assertEqual(len(st["recent_events"]), 15)
         self.assertTrue(st["active"] is True or st["active"] is False)
 
+    @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "needs fork")
     def test_fork_lock_safety(self):
         """Verify that child process forked while parent has lock depth resets lock depth cleanly."""
         temp_status_file = self.temp_status_file
-        import multiprocessing
-
         with pipeline_status._status_lock():
-            p = multiprocessing.Process(target=_fork_worker, args=(temp_status_file,))
+            p = multiprocessing.get_context("fork").Process(target=_fork_worker, args=(temp_status_file,))
             p.start()
         try:
             p.join(timeout=15.0)

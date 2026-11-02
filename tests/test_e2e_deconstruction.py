@@ -893,9 +893,13 @@ class TestTier1FeatureCoverage(BaseE2ETestCase):
         runner_inst = TaskRunner(graph=g, workspace_dir=self.workspace, mode=ExecutionMode.AUTONOMOUS)
         # Simulate Cycle 1 fail, Cycle 2 pass
         side_effects = [(1, "SyntaxError on line 1"), (0, "OK")]
-        with patch.object(runner_inst, "_execute_harness_subprocess", side_effect=side_effects):
+        # The runner now fails a task whose generation call fails, so each cycle needs a
+        # model that answers; the point here is the second harness run, not the model.
+        with patch("research_assistant.shared.llm.chat", return_value=ChatResult(content="fixed")), \
+             patch.object(runner_inst, "_execute_harness_subprocess", side_effect=side_effects) as harness:
             status = runner_inst.execute_with_reflection(t, max_reflection_cycles=2)
             self.assertEqual(status, TaskStatus.COMPLETED)
+            self.assertEqual(harness.call_count, 2)
 
     def test_f14_reflexion_caps_at_two_cycles(self):
         """F14.5: Reflexion recovery is capped at 2 cycles to prevent infinite loops."""

@@ -1939,6 +1939,32 @@ class TestResolutionConflicts(unittest.TestCase):
         c = [x for x in extract_seed_citation_claims(BeautifulSoup(CONFLICT_TEI_XML, "xml")) if "Plain positional" in x["sentence"]][0]
         self.assertEqual(c["ref"]["xml_id"], "b3"); self.assertEqual(c["resolution"], "position")
 
+    def test_printed_label_breaks_a_link_position_disagreement(self):
+        from research_assistant.audit.resolver import _resolve_ref
+        # Two real entries disagree (link -> a, position 3 -> b); only b carries the
+        # printed label "[3]" the citation text names, so b wins as a printed label.
+        a = {"xml_id": "a", "title": "Paper A", "raw_reference": "Alpha et al. Paper A. 2001.",
+             "authors": ["Alpha, A."], "year": 2001, "printed_index": None, "position_index": 2}
+        b = {"xml_id": "b", "title": "Paper B", "raw_reference": "[3] Beta et al. Paper B. 2002.",
+             "authors": ["Beta, B."], "year": 2002, "printed_index": 3, "position_index": 3}
+        bib_by_id = {"a": a, "b": b}
+        ref, how, note = _resolve_ref("a", "[3]", bib_by_id, {2: a, 3: b}, {})
+        self.assertIs(ref, b)
+        self.assertEqual(how, "printed_label")
+        self.assertEqual(note, "")
+
+    def test_two_real_entries_with_no_printed_label_stay_ambiguous_whatever_their_positions(self):
+        from research_assistant.audit.resolver import _resolve_ref
+        a = {"xml_id": "a", "title": "Paper A", "raw_reference": "Alpha. Paper A.",
+             "authors": ["Alpha, A."], "year": 2001, "printed_index": None, "position_index": 2}
+        b = {"xml_id": "b", "title": "Paper B", "raw_reference": "Beta. Paper B.",
+             "authors": ["Beta, B."], "year": 2002, "printed_index": None, "position_index": 3}
+        ref, how, note = _resolve_ref("a", "[3]", {"a": a, "b": b}, {2: a, 3: b}, {})
+        self.assertIsNone(ref)
+        self.assertEqual(how, "ambiguous")
+        self.assertIn("Paper A", note)
+        self.assertIn("Paper B", note)
+
     def test_ambiguous_reference_reason_reaches_the_audit_record(self):
         with tempfile.NamedTemporaryFile("w", suffix=".tei.xml", delete=False, encoding="utf-8") as tf:
             tf.write(CONFLICT_TEI_XML); tei_file = tf.name

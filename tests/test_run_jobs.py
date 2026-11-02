@@ -84,14 +84,18 @@ class TestStartJob(_RunsDir):
         gate.set(); _wait(job)
         self.assertEqual(job.state, "done")
 
-    def test_failure_is_recorded_and_nothing_is_saved(self):
+    def test_failure_is_recorded_and_saved_as_failed(self):
         def runner():
             raise RuntimeError("chroma is unreachable")
 
         job = _wait(run_jobs.start_job("job4", "p.pdf", runner, origin="audit"))
         self.assertEqual(job.state, "failed")
         self.assertIn("chroma is unreachable", job.error)
-        self.assertIsNone(run_jobs.load_run("job4"))
+        # Saved on purpose: after a server restart the UI's _resolve_job reads this
+        # record to say "that run failed", not "no record of it".
+        saved = run_jobs.load_run("job4")
+        self.assertEqual(saved["state"], "failed")
+        self.assertIn("chroma is unreachable", saved["error"])
 
     def test_cancellation_is_its_own_state(self):
         def runner():
@@ -99,7 +103,7 @@ class TestStartJob(_RunsDir):
 
         job = _wait(run_jobs.start_job("job5", "p.pdf", runner, origin="audit"))
         self.assertEqual(job.state, "cancelled")
-        self.assertIsNone(run_jobs.load_run("job5"))
+        self.assertEqual(run_jobs.load_run("job5")["state"], "cancelled")
 
 
 class TestSingleFlight(_RunsDir):
@@ -138,6 +142,12 @@ class TestRunsOnDisk(_RunsDir):
         self.assertEqual([r["job_id"] for r in runs], ["new", "old"])
         self.assertEqual(runs[0]["label"], "second.pdf")
         self.assertEqual(runs[0]["origin"], "audit")
+
+    def test_recent_runs_list_only_finished_runs(self):
+        _wait(run_jobs.start_job("ok1", "a.pdf", lambda: {"seed_path": "a.pdf"}, origin="audit"))
+        _wait(run_jobs.start_job("bad1", "b.pdf", lambda: (_ for _ in ()).throw(RuntimeError("x")), origin="audit"))
+        self.assertEqual([r["job_id"] for r in run_jobs.list_runs()], ["ok1"])
+        self.assertEqual({r["job_id"] for r in run_jobs.list_runs(states=None)}, {"ok1", "bad1"})
 
     def test_unserialisable_values_do_not_lose_the_run(self):
         class Odd:

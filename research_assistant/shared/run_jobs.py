@@ -247,8 +247,12 @@ def load_run(job_id: str) -> Optional[dict]:
         return None
 
 
-def list_runs(limit: int = 20) -> list[dict]:
-    """Newest first: what the "Recent runs" picker shows."""
+def list_runs(limit: int = 20, states: Optional[tuple[str, ...]] = ("done",)) -> list[dict]:
+    """Newest first: what the "Recent runs" picker shows.
+
+    Only finished runs by default: failed and cancelled runs are saved too (the UI
+    reads them after a restart to say what happened), but they are not runs to open.
+    states=None lists every state. A record saved before states existed counts as done."""
     directory = runs_dir()
     if not os.path.isdir(directory):
         return []
@@ -259,6 +263,8 @@ def list_runs(limit: int = 20) -> list[dict]:
         path = os.path.join(directory, name)
         record = load_run(name[:-5])
         if not record:
+            continue
+        if states is not None and record.get("state", "done") not in states:
             continue
         entries.append({
             "job_id": record.get("job_id", name[:-5]),

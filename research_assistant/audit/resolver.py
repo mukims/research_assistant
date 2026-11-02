@@ -170,14 +170,13 @@ def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map) -> tuple[Opti
     if tgt is not None and pos is not None:
         if tgt is pos:
             return tgt, "target", ""
-        if _ref_matches_number(tgt, k):
-            return tgt, "target", ""
-        if _ref_matches_number(pos, k):
-            return pos, "position", ""
-        if pos.get("position_index") == k and tgt.get("position_index") != k:
-            return pos, "position", ""
-        if tgt.get("position_index") == k and pos.get("position_index") != k:
-            return tgt, "target", ""
+        # Two real, different entries. Only the printed label the citation names can
+        # break the tie; "position_index == k" cannot, because that is the very
+        # position witness that disagrees with the link (2026-11-02: it silently
+        # overrode the link and judged the claim against a guess).
+        tgt_labelled, pos_labelled = _ref_matches_number(tgt, k), _ref_matches_number(pos, k)
+        if tgt_labelled != pos_labelled:
+            return (tgt if tgt_labelled else pos), "printed_label", ""
         return None, "ambiguous", (
             f"GROBID links {txt} to '{_name(tgt)}' but list position {k} is '{_name(pos)}'; not judged against a guess."
         )

@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research_assistant import config
+from research_assistant.shared import pipeline_status
 from research_assistant.transfer import engine, stages, store
 from research_assistant.transfer.deps import TransferSettings
 from research_assistant.transfer.premises import PremiseChecker
@@ -34,6 +35,10 @@ def main(argv=None) -> int:
     except engine.BusyError as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
+
+    # Only past the busy guard: a cancel pending against another live run is not stale,
+    # and clearing it here would un-stop that run. With no run active, it is.
+    pipeline_status.clear_cancel_request()
 
     settings = TransferSettings(
         bottlenecks=args.bottlenecks,

@@ -11,6 +11,10 @@ from research_assistant.shared import db
 
 
 class FakeResponse:
+    # _GemmaEmbeddings._post reads status_code and text before it trusts the body.
+    status_code = 200
+    text = ""
+
     def __init__(self, payload):
         self._payload = payload
 

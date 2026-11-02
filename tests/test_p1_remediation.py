@@ -12,7 +12,10 @@ Validates production fixes across all 7 Tier P1 functional areas:
 
 import json
 import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from bs4 import BeautifulSoup
 
@@ -266,11 +269,23 @@ class TestArea7LLMHardening(unittest.TestCase):
 
     def test_model_defaults_gemini_3_5_flash_lite(self):
         """Default models must use gemini-3.5-flash-lite, never deprecated gemini-2.5-flash."""
-        self.assertIn("3.5-flash-lite", config._default_llm_model)
-        self.assertNotIn("2.5", config._default_llm_model)
-        with patch.object(config, "JUDGEMENT_MODEL", "gemini-3.5-flash-lite"):
-            self.assertIn("3.5-flash-lite", judge._judgement_model())
-            self.assertNotIn("2.5", judge._judgement_model())
+        # config picks the defaults at import time from the environment, so ask a fresh
+        # interpreter with a key set and no .env, not this process's (hermetic) config.
+        env = {**os.environ, "GEMINI_API_KEY": "test-key", "CITATION_DISABLE_DOTENV": "1"}
+        for name in ("CITATION_LLM_MODEL", "CITATION_CHAT_MODEL", "CITATION_JUDGEMENT_MODEL",
+                     "CITATION_LLM_BACKEND", "LLM_BACKEND"):
+            env.pop(name, None)
+        probe = (
+            "from research_assistant import config; "
+            "from research_assistant.judgement import judge; "
+            "print(config._default_llm_model); print(judge._judgement_model())"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", probe],
+            env=env, cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True, timeout=120, check=True,
+        ).stdout.split()
+        self.assertEqual(out[-2:], ["gemini-3.5-flash-lite", "gemini-3.5-flash-lite"])
+        self.assertNotIn("2.5", " ".join(out))
 
     def test_summary_fallback_to_ollama_gemma4_e2b_mlx(self):
         """When primary summary model fails, ingestion must fallback to Ollama gemma4:e2b-mlx."""
