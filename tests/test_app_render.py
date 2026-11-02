@@ -410,3 +410,23 @@ class TestJobCarriesTheSessionModel(unittest.TestCase):
             run_jobs.get_job(job_id).thread.join(timeout=5.0)
         inputs = run.call_args.args[0]
         self.assertEqual((inputs["model"], inputs["backend"]), ("m", "ollama"))
+
+
+class TestAuditTabSynthesisModel(unittest.TestCase):
+    def test_collection_upload_synthesis_uses_the_session_model(self):
+        import streamlit as st
+        from unittest.mock import patch
+        from research_assistant.shared import retrieve
+        from research_assistant.ui import audit_tab
+
+        st.session_state["llm_model"] = "m"
+        st.session_state["llm_backend"] = "ollama"
+        self.addCleanup(st.session_state.pop, "llm_model", None)
+        self.addCleanup(st.session_state.pop, "llm_backend", None)
+        progress = object()
+        with patch.object(retrieve, "research_answer", return_value={"suggestion": "s"}) as ra:
+            audit_tab._research_answer_for_session("q", progress)
+        self.assertEqual(ra.call_args.args, ("q",))
+        self.assertEqual(ra.call_args.kwargs["model"], "m")
+        self.assertEqual(ra.call_args.kwargs["backend"], "ollama")
+        self.assertIs(ra.call_args.kwargs["on_progress"], progress)

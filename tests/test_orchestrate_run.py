@@ -70,10 +70,6 @@ class TestStaleCancel(unittest.TestCase):
         self.assertTrue(pipeline_status.is_cancel_requested())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestRunModel(unittest.TestCase):
     """The model chosen in a session travels with the run's inputs."""
 
@@ -94,3 +90,7 @@ class TestRunModel(unittest.TestCase):
             orchestrate.fallback({"query": "q", "ask": True, "model": "m", "backend": "ollama"})
         self.assertEqual(chat.call_args.kwargs["model"], "m")
         self.assertEqual(chat.call_args.kwargs["backend"], "ollama")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -23,6 +23,18 @@ from research_assistant.ui.status import _render_live_pipeline_status
 logger = get_logger("app")
 
 
+def _research_answer_for_session(query: str, on_progress):
+    """Related-work synthesis on this session's sidebar model (not the config default)."""
+    from research_assistant.shared import retrieve
+
+    return retrieve.research_answer(
+        query,
+        on_progress=on_progress,
+        model=st.session_state.get("llm_model"),
+        backend=st.session_state.get("llm_backend"),
+    )
+
+
 def render_audit_tab():
     """Tab: audit the citations of an uploaded manuscript against its references."""
     _render_live_pipeline_status("tab_audit")
@@ -283,7 +295,7 @@ def render_audit_tab():
                                     st.write(f"🧠 Synthesis written ({payload.get('seconds', '?')}s)")
 
                             try:
-                                answer = retrieve.research_answer(effective_q, on_progress=_on_progress)
+                                answer = _research_answer_for_session(effective_q, _on_progress)
                             except Exception as exc:
                                 logger.error("Synthesis failed: %s", exc)
                                 answer = {

@@ -462,6 +462,7 @@ class TestFeature18UISecurityAndPerformanceRemediation(unittest.TestCase):
         from research_assistant.ui import common
 
         fake_session = {}
+        before = (config.LLM_MODEL, config.LLM_BACKEND)
         with patch.object(common, "st") as mock_st, \
              patch.object(common, "_get_model_choices", return_value=[{"label": "Test Ollama", "model": "qwen2.5:14b", "backend": "ollama"}]):
 
@@ -474,7 +475,7 @@ class TestFeature18UISecurityAndPerformanceRemediation(unittest.TestCase):
             self.assertEqual(fake_session.get("llm_backend"), "ollama")
             # The pick is per session: it must not rewrite process-wide config
             # (see tests/test_app_render.py::TestSidebarModelIsPerSession).
-            self.assertNotEqual(config.LLM_MODEL, "qwen2.5:14b")
+            self.assertEqual((config.LLM_MODEL, config.LLM_BACKEND), before)
 
     def test_is_safe_path_directory_traversal(self):
         from research_assistant.shared.batch_uploader import is_safe_path
