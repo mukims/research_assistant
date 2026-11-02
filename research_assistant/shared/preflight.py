@@ -16,6 +16,7 @@ from research_assistant import config
 
 _OLLAMA_TIMEOUT_S = 3
 _BACKEND_FIX = "Start Ollama (ollama serve) or set GEMINI_API_KEY in .env"
+_EMBED_BACKEND_FIX = "Start Ollama (ollama serve): embeddings run on Ollama even with a hosted chat model"
 _GROBID_FIX = (
     "docker run --rm -d --name grobid -p 8070:8070 grobid/grobid:0.8.1 "
     "(without it, references fall back to regex)"
@@ -41,9 +42,9 @@ def _model_present(model: str, tags: list) -> bool:
 
 def _ollama_tags(http_get):
     """(tags, None) when Ollama answers /api/tags, else (None, reason)."""
-    from research_assistant.shared import llm
-
     try:
+        from research_assistant.shared import llm
+
         resp = http_get(f"{llm._ollama_host()}/api/tags", timeout=_OLLAMA_TIMEOUT_S)
         if resp.status_code != 200:
             return None, f"Ollama answered HTTP {resp.status_code}"
@@ -121,8 +122,14 @@ def run_checks(http_get=requests.get, grobid_alive=None, open_store=None) -> lis
 
     if tags is not None and uses_ollama_chat:
         checks.append(_model_check("Chat model", config.CHAT_MODEL, tags))
-    if tags is not None and uses_ollama_embed:
-        checks.append(_model_check("Embedding model", config.EMBED_MODEL, tags))
+    if uses_ollama_embed:
+        if tags is not None:
+            checks.append(_model_check("Embedding model", config.EMBED_MODEL, tags))
+        elif not uses_ollama_chat:
+            # A hosted chat model has no Ollama line of its own to say the daemon is
+            # needed, yet embeddings still run on it. (With Ollama chat, Model backend
+            # already reports the outage.)
+            checks.append(Check("Embedding model", False, why, _EMBED_BACKEND_FIX))
 
     checks.append(_vector_store_check(open_store))
     checks.append(_data_folder_check())

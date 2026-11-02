@@ -119,6 +119,35 @@ class TestRunChecks(unittest.TestCase):
         self.assertNotIn("Chat model", checks)
         self.assertNotIn("Embedding model", checks)
 
+    def test_hosted_chat_still_needs_ollama_for_embeddings(self):
+        with mock.patch.object(config, "LLM_BACKEND", "openai"), mock.patch.object(config, "OPENAI_API_KEY", "sk-test"):
+            checks = _by_name(self._run(http_get=_raises))
+        self.assertTrue(checks["Model backend"].ok)
+        self.assertNotIn("Chat model", checks)
+        embed = checks["Embedding model"]
+        self.assertFalse(embed.ok)
+        self.assertTrue(embed.blocking)
+        self.assertIn("refused", embed.detail)
+        self.assertEqual(embed.fix, "Start Ollama (ollama serve): embeddings run on Ollama even with a hosted chat model")
+
+    def test_hosted_chat_reports_a_missing_embedding_model(self):
+        with mock.patch.object(config, "LLM_BACKEND", "openai"), mock.patch.object(config, "OPENAI_API_KEY", "sk-test"):
+            checks = _by_name(self._run(http_get=_http_with("gemma4:e2b")))
+        self.assertNotIn("Chat model", checks)
+        self.assertFalse(checks["Embedding model"].ok)
+        self.assertEqual(checks["Embedding model"].fix, "ollama pull embeddinggemma-2")
+
+    def test_an_import_failure_in_the_probe_is_a_failed_check(self):
+        from research_assistant import shared
+
+        # `from package import submodule` reads the package attribute first, so drop it as
+        # well as blocking the module, or the import still succeeds.
+        self.addCleanup(setattr, shared, "llm", shared.llm)
+        del shared.llm
+        with mock.patch.dict("sys.modules", {"research_assistant.shared.llm": None}):
+            checks = _by_name(self._run())
+        self.assertFalse(checks["Model backend"].ok)
+
     def test_a_remote_embedder_skips_only_the_embedding_check(self):
         with mock.patch.object(config, "EMBED_BACKEND", "openai"):
             checks = _by_name(self._run())
