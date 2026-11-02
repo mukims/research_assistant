@@ -23,6 +23,7 @@ from research_assistant.ui.draft_tab import render_draft_tab
 from research_assistant.ui.grobid import _render_docker_fallback_notice, _render_grobid_controls
 from research_assistant.ui.help_tab import render_help_tab
 from research_assistant.ui.idea_tab import render_idea_tab
+from research_assistant.ui.preflight import render_preflight_banner, render_preflight_sidebar
 from research_assistant.ui.transfer_tab import render_transfer_tab
 from research_assistant.ui.status import _render_live_pipeline_status, _render_sidebar_pipeline_status
 
@@ -31,6 +32,8 @@ os.makedirs(config.DATA_DIR, exist_ok=True)
 
 if not _check_auth():
     st.stop()
+
+render_preflight_banner()
 
 # ─── UI Styling ─────────────────────────────────────────────────────────────
 
@@ -100,6 +103,7 @@ with st.sidebar:
     _render_grobid_controls()
     if config.LLM_BACKEND == "openai" and not config.OPENAI_API_KEY:
         st.error("No OPENAI_API_KEY / HF_TOKEN set.", icon="🚫")
+    render_preflight_sidebar()
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
