@@ -361,6 +361,13 @@ def _render_synthesis(answer, heading, query: str = "", final: dict | None = Non
         )
 
 
+def _render_ungrounded_answer(answer):
+    """An answer from general knowledge: no shortlist, no export buttons."""
+    with st.container(border=True):
+        st.markdown("###### Answer (not grounded in retrieved papers)")
+        st.markdown(answer["suggestion"])
+
+
 def _render_build(final, query, origin="audit"):
     if final.get("batch_uploaded"):
         staged = final["batch_uploaded"]
@@ -381,7 +388,9 @@ def _render_build(final, query, origin="audit"):
                 )
 
         answer = final.get("answer")
-        if answer:
+        if answer and answer.get("ungrounded"):
+            _render_ungrounded_answer(answer)
+        elif answer:
             _render_shortlist(answer.get("selected"))
             _render_notes(answer)
             _render_synthesis(answer, "Related work across collection", query=query, final=final)
@@ -410,9 +419,7 @@ def _render_build(final, query, origin="audit"):
                 icon="💡",
             )
         if final.get("answer"):
-            with st.container(border=True):
-                st.markdown("###### Answer (not grounded in retrieved papers)")
-                st.markdown(final["answer"]["suggestion"])
+            _render_ungrounded_answer(final["answer"])
         if origin == "audit":
             from research_assistant.ui.jobs import _render_interrupted_run_prompt
             _render_interrupted_run_prompt(
@@ -425,7 +432,11 @@ def _render_build(final, query, origin="audit"):
         return
 
     answer = final.get("answer")
-    if answer:
+    if answer and answer.get("ungrounded"):
+        # Keyed on the answer's own flag: an ungrounded answer is not a synthesis, whether or
+        # not the run also recorded a stop reason.
+        _render_ungrounded_answer(answer)
+    elif answer:
         _render_shortlist(answer.get("selected"))
         _render_notes(answer)
         _render_synthesis(answer, "Related work", query=query, final=final)

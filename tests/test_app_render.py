@@ -3,6 +3,7 @@
 reader sees, how an audit item is badged, how a run is found again. Everything
 else in research_assistant/ui/ is Streamlit calls."""
 
+import sys
 import unittest
 
 from research_assistant.ui import audit as ui_audit
@@ -297,3 +298,56 @@ class TestInterruptedJobPrompt(unittest.TestCase):
             self.assertFalse(pipeline_status.is_cancel_requested(job_id))
             run_jobs.remove_job(job_id)
 
+
+def _render_build_script(final, origin):
+    """AppTest script: render one run's results exactly as the Results tab does."""
+    from research_assistant.ui.results import _render_build
+    _render_build(final, "q", origin=origin)
+
+
+class TestUngroundedLabel(unittest.TestCase):
+    """An answer from general knowledge (no seed paper) carries `ungrounded`. The label
+    and the missing export buttons must follow that flag, not the run-level `stopped`
+    note that only some ungrounded runs also set."""
+
+    LABEL = "Answer (not grounded in retrieved papers)"
+
+    def _render(self, final, origin="idea"):
+        from streamlit.testing.v1 import AppTest
+        at = AppTest.from_function(_render_build_script, args=(final, origin))
+        # Streamlit's script runner swaps sys.modules["__main__"] for the script and never
+        # swaps it back. multiprocessing's spawn children re-run __main__, so a stale one
+        # kills every later spawn test in the same process.
+        main = sys.modules["__main__"]
+        try:
+            at.run()
+        finally:
+            sys.modules["__main__"] = main
+        self.assertEqual([e.value for e in at.exception], [])
+        return at
+
+    def _labels(self, at):
+        return [m.value for m in at.markdown if self.LABEL in m.value]
+
+    def test_ungrounded_answer_without_stopped_is_still_labelled(self):
+        at = self._render({"answer": {"suggestion": "x", "ungrounded": True}})
+        self.assertEqual(len(self._labels(at)), 1)
+        self.assertEqual(len(at.get("download_button")), 0)
+
+    def test_ungrounded_answer_with_stopped_is_labelled_once(self):
+        at = self._render({"answer": {"suggestion": "x", "ungrounded": True},
+                           "stopped": "Pipeline stopped by user via UI"})
+        self.assertEqual(len(self._labels(at)), 1)
+        self.assertEqual(len(at.warning), 1)
+        self.assertEqual(len(at.get("download_button")), 0)
+
+    def test_ungrounded_answer_in_an_uploaded_collection_is_labelled_too(self):
+        at = self._render({"batch_uploaded": [{"filename": "a.pdf"}],
+                           "answer": {"suggestion": "x", "ungrounded": True}})
+        self.assertEqual(len(self._labels(at)), 1)
+        self.assertEqual(len(at.get("download_button")), 0)
+
+    def test_grounded_answer_keeps_its_synthesis_and_exports(self):
+        at = self._render({"answer": {"suggestion": "x", "citations": [], "passages": []}})
+        self.assertEqual(self._labels(at), [])
+        self.assertEqual(len(at.get("download_button")), 2)
