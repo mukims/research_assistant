@@ -151,10 +151,10 @@ def start_job(
                 job.state = "done"
             except BaseException as exc:  # noqa: BLE001 — a thread must never die silently
                 if pipeline_status.is_cancellation(exc) or pipeline_status.is_cancel_requested(job_id):
-                    job.state = "cancelled"
+                    end_state = "cancelled"
                     job.error = pipeline_status.format_exception_detail(exc)
                 else:
-                    job.state = "failed"
+                    end_state = "failed"
                     job.error = pipeline_status.format_exception_detail(exc)
                     logger.error("Run %s failed: %s\n%s", job_id, job.error, traceback.format_exc())
                 try:
@@ -164,11 +164,14 @@ def start_job(
                         label=label,
                         origin=origin,
                         metadata=job.metadata,
-                        state=job.state,
+                        state=end_state,
                         error=job.error,
                     )
                 except Exception as save_err:
                     logger.warning("Could not save interrupted run %s: %s", job_id, save_err)
+                # State flips last, as on the success path: a reader that sees
+                # "failed" or "cancelled" may rely on the record being on disk.
+                job.state = end_state
             finally:
                 job.finished_at = _now()
 

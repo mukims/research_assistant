@@ -198,48 +198,57 @@ class TestLanceTableAdapterOptimizeCompactionAndCleanup(unittest.TestCase):
         ])
 
         # Execute optimize with 0 days cleanup (should not crash regardless of pylance availability)
-        adapter.optimize(cleanup_older_than_days=0)
+        # lancedb warns that 0 days drops every version but the latest; that is the point here.
+        with self.assertWarnsRegex(UserWarning, "removes every version except the latest"):
+            adapter.optimize(cleanup_older_than_days=0)
         self.assertEqual(adapter.count(), 5)
 
     def test_optimize_invokes_underlying_table_methods(self):
-        """Verifies optimize invokes compact_files and cleanup_old_versions with correct timedelta."""
+        """Verifies optimize calls Table.optimize with the cleanup window as a timedelta."""
         mock_table = MagicMock()
         mock_table.name = "physics_papers_v3"
         adapter = LanceTableAdapter(mock_table)
 
         adapter.optimize(cleanup_older_than_days=10)
 
-        mock_table.compact_files.assert_called_once()
-        mock_table.cleanup_old_versions.assert_called_once()
-
-        _, kwargs = mock_table.cleanup_old_versions.call_args
-        self.assertIn("older_than", kwargs)
-        self.assertEqual(kwargs["older_than"], timedelta(days=10))
+        mock_table.optimize.assert_called_once_with(cleanup_older_than=timedelta(days=10))
+        # The deprecated pair (lancedb >= 0.21) is not touched when optimize exists.
+        mock_table.compact_files.assert_not_called()
+        mock_table.cleanup_old_versions.assert_not_called()
 
     def test_optimize_survives_compaction_locked_files(self):
-        """Verifies optimize catches compaction lock errors and still executes cleanup_old_versions."""
+        """Verifies optimize catches a lock error raised while compacting."""
         mock_table = MagicMock()
         mock_table.name = "physics_papers_v3"
-        mock_table.compact_files.side_effect = PermissionError("Locked file: table.manifest is in use by another process")
+        mock_table.optimize.side_effect = PermissionError("Locked file: table.manifest is in use by another process")
 
         adapter = LanceTableAdapter(mock_table)
         # Must not raise
         adapter.optimize(cleanup_older_than_days=3)
 
-        mock_table.compact_files.assert_called_once()
-        mock_table.cleanup_old_versions.assert_called_once_with(older_than=timedelta(days=3))
+        mock_table.optimize.assert_called_once_with(cleanup_older_than=timedelta(days=3))
 
     def test_optimize_survives_cleanup_old_versions_failure(self):
-        """Verifies optimize catches cleanup_old_versions exceptions cleanly."""
+        """Verifies optimize catches a read-only-filesystem failure cleanly."""
         mock_table = MagicMock()
         mock_table.name = "physics_papers_v3"
-        mock_table.cleanup_old_versions.side_effect = OSError("Read-only filesystem")
+        mock_table.optimize.side_effect = OSError("Read-only filesystem")
 
         adapter = LanceTableAdapter(mock_table)
         adapter.optimize(cleanup_older_than_days=7)
 
+        mock_table.optimize.assert_called_once()
+
+    def test_optimize_falls_back_to_the_old_pair_when_optimize_is_absent(self):
+        """A table without Table.optimize (lancedb < 0.21) still gets compacted and cleaned."""
+        mock_table = MagicMock(spec=["name", "compact_files", "cleanup_old_versions"])
+        mock_table.compact_files.side_effect = PermissionError("Locked file")
+
+        adapter = LanceTableAdapter(mock_table)
+        adapter.optimize(cleanup_older_than_days=3)
+
         mock_table.compact_files.assert_called_once()
-        mock_table.cleanup_old_versions.assert_called_once()
+        mock_table.cleanup_old_versions.assert_called_once_with(older_than=timedelta(days=3))
 
     def test_optimize_legacy_table_missing_methods(self):
         """Verifies optimize runs safely on legacy table object lacking compact_files or cleanup_old_versions."""

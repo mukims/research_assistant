@@ -520,6 +520,21 @@ class LanceTableAdapter:
 
     def optimize(self, cleanup_older_than_days: int = 7):
         """Compact small files and clean up old table versions."""
+        from datetime import timedelta
+
+        older_than = timedelta(days=cleanup_older_than_days)
+        if hasattr(self.table, "optimize"):
+            # compact_files / cleanup_old_versions are deprecated since lancedb 0.21.
+            try:
+                self.table.optimize(cleanup_older_than=older_than)
+                logger.info(
+                    "Optimized LanceDB table %s (versions older than %d days cleaned up)",
+                    self.name, cleanup_older_than_days,
+                )
+            except Exception as exc:
+                logger.warning("Table optimize failed on %s: %s", self.name, exc)
+            return
+
         try:
             if hasattr(self.table, "compact_files"):
                 self.table.compact_files()
@@ -529,8 +544,7 @@ class LanceTableAdapter:
 
         try:
             if hasattr(self.table, "cleanup_old_versions"):
-                from datetime import timedelta
-                self.table.cleanup_old_versions(older_than=timedelta(days=cleanup_older_than_days))
+                self.table.cleanup_old_versions(older_than=older_than)
                 logger.info("Cleaned up old versions older than %d days for LanceDB table %s", cleanup_older_than_days, self.name)
         except Exception as exc:
             logger.warning("Table cleanup_old_versions failed on %s: %s", self.name, exc)

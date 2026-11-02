@@ -120,27 +120,22 @@ class TestFeature15LanceDBRemediation(unittest.TestCase):
             mock_col.optimize.assert_called_once()
 
     def test_lance_table_adapter_optimize(self):
-        """Verifies LanceTableAdapter.optimize calls compact_files and cleanup_old_versions."""
+        """Verifies LanceTableAdapter.optimize calls Table.optimize with the cleanup window."""
+        from datetime import timedelta
         from research_assistant.shared.lance_store import LanceTableAdapter
 
         mock_lance_table = MagicMock()
         adapter = LanceTableAdapter(mock_lance_table, "test_table")
 
         adapter.optimize(cleanup_older_than_days=14)
-        mock_lance_table.compact_files.assert_called_once()
-        mock_lance_table.cleanup_old_versions.assert_called_once()
-
-        # Check older_than timedelta parameter passed
-        _, cleanup_kwargs = mock_lance_table.cleanup_old_versions.call_args
-        self.assertIn("older_than", cleanup_kwargs)
-        self.assertEqual(cleanup_kwargs["older_than"].days, 14)
+        mock_lance_table.optimize.assert_called_once_with(cleanup_older_than=timedelta(days=14))
 
     def test_lance_table_adapter_optimize_graceful_fallback(self):
-        """Verifies optimize does not crash when compact_files or cleanup_old_versions is missing or fails."""
+        """Verifies optimize does not crash when the table's optimize fails."""
         from research_assistant.shared.lance_store import LanceTableAdapter
 
         mock_lance_table = MagicMock()
-        mock_lance_table.compact_files.side_effect = RuntimeError("Compaction lock error")
+        mock_lance_table.optimize.side_effect = RuntimeError("Compaction lock error")
         adapter = LanceTableAdapter(mock_lance_table, "test_table")
 
         # Must not raise

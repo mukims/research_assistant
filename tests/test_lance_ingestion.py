@@ -14,7 +14,6 @@ import shutil
 import tempfile
 import types
 import unittest
-import warnings
 from unittest.mock import patch
 
 import research_assistant.shared.db as db
@@ -112,14 +111,10 @@ class TestIngestThenSearch(_TmpDirCase):
              patch.object(lance_store, "LANCEDB_PATH", self.tmp), \
              patch("research_assistant.shared.llm.get_embeddings", return_value=embedder), \
              patch("research_assistant.shared.search._get_embeddings", return_value=embedder):
-            with warnings.catch_warnings():
-                # LanceTableAdapter.optimize() still calls compact_files/cleanup_old_versions,
-                # which lancedb 0.41 deprecates in favour of Table.optimize.
-                warnings.simplefilter("ignore", DeprecationWarning)
-                added = ing.upsert_corpus([
-                    self._entry("a.pdf", "alpha alpha particles scatter off heavy nuclei"),
-                    self._entry("b.pdf", "beta decay changes a neutron into a proton"),
-                ])
+            added = ing.upsert_corpus([
+                self._entry("a.pdf", "alpha alpha particles scatter off heavy nuclei"),
+                self._entry("b.pdf", "beta decay changes a neutron into a proton"),
+            ])
             self.assertEqual(added, 2)
 
             collection, bm25, texts, metadatas = db.load_search_resources()
