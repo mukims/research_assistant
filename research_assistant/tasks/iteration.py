@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from research_assistant.config import LLM_MODEL
+from research_assistant.config import LLM_MODEL, TASK_OLLAMA_OPTIONS
 from research_assistant.shared.llm import chat
 from research_assistant.shared.log import get_logger
 from research_assistant.tasks.critic import (
@@ -125,7 +125,7 @@ def _build_heuristic_7phase_fallback(paper_id: str, paper_title: str, context: O
         task_id="task_02_data",
         title=f"Acquire & Preprocess {domain} Data",
         category=TaskCategory.DATA_PREPROCESSING,
-        description=f"Download raw scientific datasets and synthesize configurations for {domain}, apply normalization, and partition into reproducible train, validation, and test splits with fixed random seed 42.",
+        description=f"Download raw scientific datasets and synthesize configurations for {domain} following governing equations and mathematical parameters, apply normalization, and partition into reproducible train, validation, and test splits with fixed random seed 42.",
         assigned_role=AgentRole.DATA_ENGINEER,
         dependencies=["task_01_env"],
         inputs=["env_ready.lock", "data_spec.yaml"],
@@ -634,7 +634,7 @@ class ProposerCriticEngine:
             ]
 
         try:
-            res = self.chat_fn(messages, model=self.model, backend=self.backend, temperature=0.1, options={"num_ctx": 4096})
+            res = self.chat_fn(messages, model=self.model, backend=self.backend, temperature=0.1, options=TASK_OLLAMA_OPTIONS)
             raw = res.content.strip() if hasattr(res, "content") else str(res).strip()
             graph = self._parse_llm_json(raw, paper_id, paper_title)
             if graph and len(graph.tasks) > 0:

@@ -160,8 +160,10 @@ class TestTaskRunnerReflection(unittest.TestCase):
         self.assertEqual(report.failed_count, 1)
         self.assertIn("Cycle 2 Acceptance Harness: FAILED after refinement", report.results["t_fail"].logs)
 
-    def test_execute_with_reflection_direct_cycle1_success(self):
+    @patch("research_assistant.shared.llm.chat")
+    def test_execute_with_reflection_direct_cycle1_success(self, mock_chat):
         """Direct test of execute_with_reflection completing in Cycle 1."""
+        mock_chat.return_value = MagicMock(content="def task(): return 1")
         graph = TaskGraph(paper_id="p1", paper_title="Direct Reflection")
         t = Task(task_id="t_direct", title="Direct Task", outputs=["out.txt"])
         graph.add_task(t)
@@ -172,8 +174,10 @@ class TestTaskRunnerReflection(unittest.TestCase):
             self.assertEqual(status, TaskStatus.COMPLETED)
             self.assertEqual(t.metadata.get("reflection_cycles"), 1)
 
-    def test_execute_with_reflection_direct_cycle2_recovery(self):
+    @patch("research_assistant.shared.llm.chat")
+    def test_execute_with_reflection_direct_cycle2_recovery(self, mock_chat):
         """Direct test of execute_with_reflection recovering in Cycle 2."""
+        mock_chat.return_value = MagicMock(content="def task(): return 1")
         graph = TaskGraph(paper_id="p1", paper_title="Direct Recovery")
         t = Task(task_id="t_recov", title="Recoverable Task", outputs=["fix.txt"])
         graph.add_task(t)
@@ -185,8 +189,10 @@ class TestTaskRunnerReflection(unittest.TestCase):
             self.assertEqual(status, TaskStatus.COMPLETED)
             self.assertEqual(t.metadata.get("reflection_cycles"), 2)
 
-    def test_execute_with_reflection_direct_max_cycles_exhausted(self):
+    @patch("research_assistant.shared.llm.chat")
+    def test_execute_with_reflection_direct_max_cycles_exhausted(self, mock_chat):
         """Direct test of execute_with_reflection failing when max cycles exhausted."""
+        mock_chat.return_value = MagicMock(content="def task(): return 1")
         graph = TaskGraph(paper_id="p1", paper_title="Direct Failure")
         t = Task(task_id="t_exhaust", title="Exhausted Task", outputs=["never.txt"])
         graph.add_task(t)

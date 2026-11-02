@@ -319,24 +319,52 @@ def develop(
     seen_chunks: set[int] = set()
 
     ev_chunk = card.evidence.chunk_index
+    resolved_chunk_idx = None
+    resolved_text = None
+    resolved_meta = {}
+
     if ev_chunk is not None and 0 <= ev_chunk < len(deps.texts):
-        seen_chunks.add(ev_chunk)
+        meta = deps.metadatas[ev_chunk] if ev_chunk < len(deps.metadatas) else {}
+        if meta.get("document") == card.document:
+            resolved_chunk_idx = ev_chunk
+            resolved_text = deps.texts[ev_chunk]
+            resolved_meta = meta
+
+    # If positional lookup did not match card.document, search by document and chunk/seq
+    if resolved_text is None and card.document:
+        for idx, (txt, m) in enumerate(zip(deps.texts, deps.metadatas)):
+            if m.get("document") == card.document:
+                if m.get("seq") == ev_chunk or m.get("chunk_index") == ev_chunk:
+                    resolved_chunk_idx = idx
+                    resolved_text = txt
+                    resolved_meta = m
+                    break
+        if resolved_text is None:
+            # Fallback to first chunk matching card.document
+            for idx, (txt, m) in enumerate(zip(deps.texts, deps.metadatas)):
+                if m.get("document") == card.document:
+                    resolved_chunk_idx = idx
+                    resolved_text = txt
+                    resolved_meta = m
+                    break
+
+    if resolved_chunk_idx is not None and resolved_text is not None:
+        seen_chunks.add(resolved_chunk_idx)
         existing = next(
-            (p for p in grounding.passages.values() if p.chunk_index == ev_chunk and p.document == card.document),
+            (p for p in grounding.passages.values() if p.chunk_index == resolved_chunk_idx and p.document == card.document),
             None,
         )
         if existing:
             p_ev = existing
         else:
-            meta = deps.metadatas[ev_chunk] if ev_chunk < len(deps.metadatas) else {}
             k = f"C{len(grounding.passages) + 1}"
             p_ev = Passage(
                 key=k,
-                chunk_index=ev_chunk,
+                chunk_index=resolved_chunk_idx,
                 document=card.document,
                 citation=card.citation,
-                section=meta.get("section", "methods"),
-                text=deps.texts[ev_chunk],
+                section=resolved_meta.get("section", "methods"),
+                text=resolved_text,
                 role="source",
             )
             grounding.passages[k] = p_ev
@@ -552,6 +580,23 @@ def develop(
                     critique.objections[idx]["answered"] = True
                     critique.objections[idx]["response"] = item.get("response", "")
                     critique.objections[idx]["conceded"] = bool(item.get("concede", False))
+
+            # Apply revisions to transfer fields if supplied by the reviser
+            rev_mapping = rev_dict.get("mapping") or rev_dict.get("revised_mapping")
+            if rev_mapping and isinstance(rev_mapping, list):
+                mapping_list = rev_mapping
+            rev_steps = rev_dict.get("steps") or rev_dict.get("revised_steps")
+            if rev_steps and isinstance(rev_steps, list):
+                steps_list = rev_steps
+            rev_pred = rev_dict.get("prediction") or rev_dict.get("revised_prediction")
+            if rev_pred and isinstance(rev_pred, str):
+                reply_dict["prediction"] = rev_pred
+            rev_summary = rev_dict.get("summary") or rev_dict.get("revised_summary")
+            if rev_summary and isinstance(rev_summary, str):
+                reply_dict["summary"] = rev_summary
+            rev_title = rev_dict.get("title") or rev_dict.get("revised_title")
+            if rev_title and isinstance(rev_title, str):
+                reply_dict["title"] = rev_title
         except Exception as err:
             transfer_warnings.append(f"revision failed for {transfer_id}: {err}")
 

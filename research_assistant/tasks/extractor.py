@@ -29,10 +29,10 @@ METHOD_KEYWORDS = (
     "setup", "implementation", "dataset", "benchmark", "evaluation",
     "simulation", "results", "analysis", "theory", "approach",
     "framework", "design", "protocol", "pipeline", "workflow",
-    "hamiltonian", "disorder", "spectrum", "spectral", "correlation",
-    "hyperuniform", "potential", "inverse", "determination", "conductance",
-    "transport", "lattice", "solver", "greens", "green", "formalism",
-    "formulation", "derivation", "calculation", "computation", "tight-binding",
+    "formulation", "derivation", "calculation", "computation", "operator",
+    "parameter", "variable", "equation", "constraint", "distribution",
+    "transform", "solver", "formalism", "statistical", "empirical",
+    "metric", "measurement", "validation", "tolerance",
     "optimization", "numerical",
 )
 
@@ -778,11 +778,11 @@ def extract_grounded_excerpts_and_domain(
     phase_keywords = {
         "env": ("environment", "python", "package", "setup", "cuda", "runtime", "dependency", "library"),
         "data": (
-            "disorder", "dataset", "split", "sample", "configuration", "structure factor",
-            "s(k)", "parameter", "synthetic", "lead", "lattice", "fourier", "cutoff",
-            "heaviside", "onsite", "stealthy", "gaussian", "amplitudes", "w_k",
+            "dataset", "split", "sample", "configuration", "feature", "parameter",
+            "synthetic", "distribution", "fourier", "cutoff", "gaussian", "sampling",
+            "generation", "preprocessing", "normalization",
         ),
-        "model": ("model", "hamiltonian", "green", "rgf", "solver", "architecture", "equation", "formula", "operator", "tight-binding", "matrix"),
+        "model": ("model", "computational", "solver", "architecture", "equation", "formula", "operator", "differential", "matrix", "network"),
         "smoke": ("smoke", "gradient", "forward", "check", "finite", "dimension", "step", "verification"),
         "experiment": ("simulation", "experiment", "transport", "conductance", "transmittance", "sweep", "training", "ensemble", "realization"),
         "evaluation": ("misfit", "metric", "error", "benchmark", "accuracy", "recovery", "target", "comparison", "table", "figure", "fig"),
@@ -828,7 +828,7 @@ def extract_grounded_excerpts_and_domain(
                 if 30 <= len(s_clean) <= 250:
                     s_lower = s_clean.lower()
                     score = head_match + sum(1 for kw in kws if kw in s_lower)
-                    if phase == "data" and any(m in s_lower for m in ("s(k)", "fourier", "heaviside", "gaussian", "w k", "w_k", "cutoff", "w j", "w_j")):
+                    if phase == "data" and any(m in s_lower for m in ("formula", "algorithm", "equation", "parameter", "distribution", "sampling", "fourier", "gaussian", "cutoff")):
                         score += 3
                     if score > best_score:
                         best_score = score

@@ -82,12 +82,12 @@ def check_or_ingest_paper(
         ingested_docs = set()
 
     if doc_key in ingested_docs:
-        logger.info("Paper %s is already grounded in ChromaDB (doc_key=%s)", path_str, doc_key)
+        logger.info("Paper %s is already grounded in vector database (doc_key=%s)", path_str, doc_key)
         return doc_key
 
     # Check if paper file exists on disk to trigger auto-ingestion
     if os.path.isfile(path_str):
-        logger.info("Target paper %s not found in ChromaDB; triggering auto-ingestion...", path_str)
+        logger.info("Target paper %s not found in vector database; triggering auto-ingestion...", path_str)
         try:
             ingest_res = ingest_pdfs(
                 {path_str: title or ""},
@@ -101,7 +101,7 @@ def check_or_ingest_paper(
             logger.error("Auto-ingestion failed for %s: %s", path_str, e)
     else:
         logger.warning(
-            "Target paper '%s' is not an accessible file on disk and not found in ChromaDB.",
+            "Target paper '%s' is not an accessible file on disk and not found in vector database.",
             path_str,
         )
 
@@ -113,7 +113,7 @@ def ensure_target_paper_grounded(
     title: Optional[str] = None,
 ) -> Tuple[str, bool]:
     """
-    Verifies if target paper is already grounded in ChromaDB / manifest.
+    Verifies if target paper is already grounded in vector database / manifest.
     If present, returns (doc_key, False).
     If absent, calls check_or_ingest_paper(tei_or_path, title=title) and returns (doc_key, True).
 
@@ -137,7 +137,7 @@ def ensure_target_paper_grounded(
         ingested_docs = set()
 
     if doc_key in ingested_docs:
-        logger.info("Paper %s is already grounded in ChromaDB (doc_key=%s)", path_str, doc_key)
+        logger.info("Paper %s is already grounded in vector database (doc_key=%s)", path_str, doc_key)
         return (doc_key, False)
 
     # Absent: ingest paper via check_or_ingest_paper
@@ -555,11 +555,11 @@ def _ensure_references_built_for_pdf(pdf_path: str) -> None:
         return
     try:
         from research_assistant.agents.agent1_extractor import extract_citations_from_pdf
-        from research_assistant.agents.agent2_fetcher import fetch_missing_citations
+        from research_assistant.agents.agent2_fetcher import fetch_papers
 
         logger.info("Building reference database around seed PDF: %s", pdf_path)
         extract_citations_from_pdf(pdf_path)
-        newly_downloaded = fetch_missing_citations()
+        newly_downloaded = fetch_papers()
         if newly_downloaded:
             ingest_pdfs(
                 newly_downloaded,
@@ -570,6 +570,9 @@ def _ensure_references_built_for_pdf(pdf_path: str) -> None:
             )
     except Exception as e:
         logger.warning("Reference database build step skipped or failed for %s: %s", pdf_path, e)
+
+
+auto_ingest_paper_if_needed = _ensure_references_built_for_pdf
 
 
 def build_paper_reference_subgraph(

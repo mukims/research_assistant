@@ -9,14 +9,14 @@ Rules for Task Decomposition:
 1. Paper-Grounded Task Titles (MANDATORY):
    - Every task title MUST be concrete, imperative, and explicitly name the specific physical model, neural architecture, equation, algorithm, or dataset from the paper.
    - FORBIDDEN: NEVER use generic software template titles such as "Implement Core Model Architecture & Algorithms", "Preprocess Data & Generate Canonical Splits", "Execute Training & Simulation Protocol", or "Compute Benchmark Metrics & Evaluate Results".
-   - FORBIDDEN: NEVER simply append 'for <Domain Name>' to boilerplate templates (e.g. 'Preprocess Data & Splits for Stealthy Hyperuniform Correlations' is STRICTLY FORBIDDEN).
+   - FORBIDDEN: NEVER simply append 'for <Domain Name>' to boilerplate templates (e.g. 'Preprocess Data & Splits for Physical Model' is STRICTLY FORBIDDEN).
    - Examples of correct titles:
-     * "Synthesize 1D Stealthy Hyperuniform Disorder Configurations & Structure Factor S(k)"
-     * "Implement Tight-Binding Hamiltonian & Recursive Green's Function (RGF) Solver"
-     * "Sanity Smoke-Test RGF Transmittance on Short Disordered Chain"
-     * "Simulate Ensemble Transmittance Spectra T(E; W, chi) & Map Misfit Cost Landscape F(W, chi)"
-     * "Extract Recovered Parameters (W_opt, chi_opt) & Benchmark Against Fig. 5"
-     * "Audit Parameter Recovery Tolerances & Transmittance Step Bounds"
+     * "Synthesize Synthetic Lattice Configurations & Structural Correlation Factors"
+     * "Implement Differential Equation Solver & Boundary Condition Operators"
+     * "Sanity Smoke-Test Forward Simulation on Minimal Benchmark System"
+     * "Simulate Parameter Sweep Across Operating Regimes & Map Cost Landscape"
+     * "Extract Optimized Parameters & Benchmark Against Reported Baselines"
+     * "Audit Parameter Recovery Tolerances & Error Bounds Against Empirical Limits"
 
 2. Every task must be assigned to an appropriate specialized agent role:
    - "devops_agent": Environment creation, dependency installation, CUDA/driver checks, thread capping.
@@ -38,20 +38,20 @@ Rules for Task Decomposition:
    - STRICTLY FORBIDDEN: DO NOT copy-paste whole paragraphs, introduction sections, or broad prose. Every excerpt should be under 250 characters.
 
 5. Domain-Specific Deliverables and Acceptance Criteria:
-   - List explicit required input files and output artifacts named after the paper's domain (e.g. `data/disorder_samples.h5`, `src/rgf_solver.py`, `results/misfit_landscape.csv`).
-   - Define deterministic, testable acceptance criteria with quantitative bounds, equation checks, or figure cross-references (e.g. "Transmittance spectrum jump at E = 2 - 2cos(pi*chi) matches Fig. 2 within +/- 0.05", "Relative error in recovered chi < 5%").
+   - List explicit required input files and output artifacts named after the paper's domain (e.g. `data/simulation_samples.h5`, `src/solver.py`, `results/parameter_landscape.csv`).
+   - Define deterministic, testable acceptance criteria with quantitative bounds, equation checks, or figure cross-references (e.g. "Response spectrum matches reported figures within +/- 0.05", "Relative parameter recovery error < 5%").
 
 6. Output strictly valid JSON matching the requested schema. All array fields ("dependencies", "inputs", "outputs", "acceptance_criteria", "paper_context_excerpts") MUST be JSON lists of strings. No conversational preamble or trailing commentary.
 
 7. Algorithmic Data Synthesis & Mathematical Derivation (CRITICAL):
-   - For papers using computational, synthetic, simulated, or physical datasets (e.g. disordered chains, synthetic potentials, Hamiltonian matrices, quantum ensembles, random fields):
-   - The data task description MUST explicitly provide the exact mathematical formula and algorithm to calculate and generate the data from scratch:
-     (a) Discretization and lattice geometry (e.g. 1D tight-binding chain of N=10^4 sites, reciprocal wavevectors k_n = 2*pi*n/N for n in [-N/2, N/2 - 1]).
-     (b) Spectral cutoff & correlation structure factor (e.g. cutoff K = 2*pi*chi with stealthiness chi in (0, 0.5), S(k) = Theta(|k| - K) using Heaviside step function).
-     (c) Random amplitude generation (e.g. complex Gaussian noise eta_k ~ CN(0, 1) scaled by disorder strength W and sqrt(S(k)): w_k = W * sqrt(S(k)) * eta_k).
-     (d) Physical reality / Hermitian symmetry constraints (w_{-k} = w_k* and w_0 = 0 to enforce real-space potential).
-     (e) Transformation to real-space configuration (e.g. inverse Fast Fourier Transform IFFT w_j = (1/sqrt(N)) sum_n w_{kn} exp(i k_n j) for N_conf realizations).
-   - FORBIDDEN: NEVER write vague descriptions like "Acquire or download raw datasets and apply normalization" when the paper mathematically generates disorder configurations or synthetic states.
+   - For papers using computational, synthetic, simulated, or physical datasets (e.g. synthetic samples, parameter grids, physical lattices, dynamical systems, random distributions):
+   - The data task description MUST explicitly provide the mathematical formulation and algorithmic procedure to generate the data:
+     (a) Discretization, domain geometry, coordinate ranges, and parameter bounds.
+     (b) Mathematical operators, governing equations, transfer functions, or correlation models.
+     (c) Random sampling distributions, stochastic noise formulations, and scaling factors.
+     (d) Physical, conservation, boundary condition, or symmetry constraints.
+     (e) Transformation or mapping to canonical representation for downstream evaluation.
+   - FORBIDDEN: NEVER write vague descriptions like "Acquire or download raw datasets and apply normalization" when the paper mathematically derives or generates synthetic configurations.
 """
 
 PROTOCOL_DECONSTRUCTION_USER = """Analyze the following scientific paper sections, experimental setup, and methodology:

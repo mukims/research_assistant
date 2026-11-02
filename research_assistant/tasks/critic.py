@@ -430,8 +430,8 @@ class MicroCritic:
             )
         elif task.category in (TaskCategory.DATA_PREPROCESSING, TaskCategory.DATA_ACQUISITION):
             context_str = desc.lower() + " " + title.lower()
-            if any(k in context_str for k in ("hyperuniform", "stealthy")):
-                if not any(k in desc.lower() for k in ("fourier", "s(k)", "cutoff", "wavevector", "heaviside", "w_k", "w k")):
+            if any(k in context_str for k in ("synthetic", "simulated", "generation", "synthesize")):
+                if not any(k in desc.lower() for k in ("formula", "algorithm", "equation", "parameter", "distribution", "sampling", "function", "fourier")):
                     flaws.append(
                         CritiqueFlaw(
                             flaw_id=f"micro_data_algorithm_missing_{t_id}",
@@ -439,8 +439,8 @@ class MicroCritic:
                             critic_level="micro",
                             severity=FlawSeverity.WARNING.value,
                             category="vague_instruction",
-                            description=f"Task '{t_id}' for stealthy hyperuniform disorder does not reveal how to calculate the disorder configurations from first principles.",
-                            suggestion="Detail the exact mathematical generation algorithm: reciprocal wavevectors k_n=2*pi*n/N, spectral cutoff K=2*pi*chi with S(k)=Theta(|k|-K), complex Gaussian Fourier amplitudes w_k=W*sqrt(S(k))*eta_k, Hermitian symmetry w_{-k}=w_k*, and inverse FFT to real-space on-site potential w_j.",
+                            description=f"Task '{t_id}' for synthetic or simulated data generation does not specify the mathematical formulation or generation algorithm.",
+                            suggestion="Detail the exact mathematical formulation, generation algorithm, parameter bounds, equations, and sampling distributions.",
                         )
                     )
 
@@ -699,6 +699,8 @@ class MicroCritic:
                     )
 
         return flaws
+
+    critique_task = scrutinize_task
 
     def compute_contract_score(self, graph: TaskGraph, flaws: List[CritiqueFlaw]) -> float:
         """Computes 0-100 contract score."""

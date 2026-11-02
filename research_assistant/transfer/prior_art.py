@@ -172,7 +172,7 @@ class PriorArtClient:
             if before_year is not None:
                 all_hits = [
                     h for h in all_hits
-                    if h.get("year") is None or h["year"] < before_year
+                    if h.get("year") is not None and h["year"] < before_year
                 ]
 
             if not all_hits or self.embed_documents is None:

@@ -309,10 +309,14 @@ class Task:
 @dataclass
 class TaskGraph:
     """Directed Acyclic Graph (DAG) representing the complete decomposition of a paper."""
-    paper_id: str
-    paper_title: str
+    paper_id: str = ""
+    paper_title: str = ""
     tasks: Dict[str, Task] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if isinstance(self.tasks, list):
+            self.tasks = {t.task_id: t for t in self.tasks}
 
     def add_task(self, task: Task) -> None:
         self.tasks[task.task_id] = task

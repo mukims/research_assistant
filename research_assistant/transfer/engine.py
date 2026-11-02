@@ -226,3 +226,50 @@ def run_best_of_n(
         seconds=round(time.time() - start_time, 2),
         warnings=run_warnings,
     )
+
+
+class TransferEngine:
+    """High-level runner for Cross-Disciplinary Technique Transfer."""
+
+    def __init__(self, deps: Deps | None = None, card_dir: str | None = None):
+        self._deps = deps
+        self._card_dir = card_dir
+
+    def get_deps(self) -> Deps:
+        if self._deps is None:
+            self._deps = live_deps(card_dir=self._card_dir)
+        return self._deps
+
+    def run(
+        self,
+        query: str,
+        candidates: int = 3,
+        temperature: float = 0.2,
+        prior_art_before_year: int | None = None,
+        bottlenecks: int | None = None,
+        techniques_per_bottleneck: int | None = None,
+        progress_cb: Callable[[int, int, str], None] | None = None,
+    ) -> RunResult:
+        ensure_idle()
+        deps = self.get_deps()
+        if progress_cb is not None:
+            deps = dataclasses.replace(deps, progress=progress_cb)
+
+        kw = {
+            "cards_per_query": candidates,
+            "temperature": temperature,
+            "prior_art_before_year": prior_art_before_year,
+        }
+        if bottlenecks is not None:
+            kw["bottlenecks"] = bottlenecks
+        if techniques_per_bottleneck is not None:
+            kw["techniques_per_bottleneck"] = techniques_per_bottleneck
+
+        settings = TransferSettings(**kw)
+        return run_best_of_n(query, deps, settings)
+
+
+def default_engine() -> TransferEngine:
+    """Return a standard TransferEngine instance."""
+    return TransferEngine()
+

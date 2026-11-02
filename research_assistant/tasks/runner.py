@@ -460,6 +460,22 @@ class TaskRunner:
 
         return named, unnamed
 
+    def _materialize_artifacts(
+        self,
+        task: Task,
+        content: str,
+        role_name: str = "DATA_ENGINEER",
+        overwrite: bool = False,
+        is_simulation: bool = False,
+    ) -> List[str]:
+        return self._materialize_deliverables(
+            task=task,
+            content=content,
+            role_name=role_name,
+            overwrite=overwrite,
+            is_simulation=is_simulation,
+        )
+
     def _materialize_deliverables(
         self,
         task: Task,
@@ -516,7 +532,7 @@ class TaskRunner:
                             f.write(b"dummy_tensor_data\n")
                 else:
                     with open(out_path, "w", encoding="utf-8") as f:
-                        if contract and (contract.artifact_type == ArtifactType.METRICS_JSON or out.endswith(".json")):
+                        if (contract and contract.artifact_type == ArtifactType.METRICS_JSON) or out.endswith(".json"):
                             wrote_json = False
                             if content and "{" in content and "}" in content:
                                 try:
@@ -532,19 +548,32 @@ class TaskRunner:
                                 except Exception:
                                     pass
                             if not wrote_json and is_simulation:
-                                req_keys = contract.required_keys or ["accuracy", "loss", "metric"]
+                                req_keys = (contract.required_keys if contract else None) or ["accuracy", "loss", "metric"]
                                 dummy_data = {k: 0.95 for k in req_keys}
                                 json.dump(dummy_data, f, indent=2)
-                        elif contract and (contract.artifact_type == ArtifactType.TABULAR or out.endswith(".csv")):
+                        elif (contract and contract.artifact_type == ArtifactType.TABULAR) or out.endswith(".csv"):
                             wrote_csv = False
-                            if content and "," in content:
-                                f.write(content[:5000])
-                                wrote_csv = True
+                            if content:
+                                # Strip code fences if present
+                                csv_text = content
+                                if "```" in csv_text:
+                                    fence_match = re.search(r"```(?:csv)?\s*\n(.*?)\n```", csv_text, re.DOTALL)
+                                    if fence_match:
+                                        csv_text = fence_match.group(1).strip()
+                                # Extract valid CSV rows, discarding conversational prose
+                                lines = [line.strip() for line in csv_text.splitlines() if line.strip()]
+                                valid_csv_lines = []
+                                for line in lines:
+                                    if "," in line and not line.startswith(("#", "//", "/*", "*", "Certainly", "Here", "Note:")):
+                                        valid_csv_lines.append(line)
+                                if valid_csv_lines:
+                                    f.write("\n".join(valid_csv_lines) + "\n")
+                                    wrote_csv = True
                             if not wrote_csv and is_simulation:
-                                cols = list(contract.columns.keys()) if contract.columns else ["id", "feature", "label"]
+                                cols = (list(contract.columns.keys()) if (contract and contract.columns) else ["id", "feature", "label"])
                                 f.write(",".join(cols) + "\n")
                                 f.write(",".join(["1"] * len(cols)) + "\n")
-                        elif contract and (contract.artifact_type == ArtifactType.CODE or out.endswith(".py")):
+                        elif (contract and contract.artifact_type == ArtifactType.CODE) or out.endswith(".py"):
                             out_base = os.path.basename(out)
                             if out_base in named_blocks:
                                 code_to_write = named_blocks[out_base]
@@ -559,8 +588,16 @@ class TaskRunner:
 
                             code_output_idx += 1
 
+                            # Strip markdown code fences if present
+                            if code_to_write and "```" in code_to_write:
+                                code_match = re.search(r"```(?:python)?\s*\n(.*?)\n```", code_to_write, re.DOTALL)
+                                if code_match:
+                                    code_to_write = code_match.group(1).strip()
+                                else:
+                                    code_to_write = re.sub(r"^```[a-zA-Z0-9_-]*\s*$", "", code_to_write, flags=re.MULTILINE).strip()
+
                             if code_to_write and ("def " in code_to_write or "class " in code_to_write or "import " in code_to_write or ":" in code_to_write):
-                                f.write(code_to_write)
+                                f.write(code_to_write + "\n")
                             elif is_simulation:
                                 f.write(f"# Deliverable for {task.task_id} generated by {role_name}\n")
                                 f.write(content[:3000] if content else "def execute_pipeline():\n    return True\n")
@@ -785,8 +822,14 @@ class TaskRunner:
                     last_llm_response = res_c1.content
                     logs.append(f"[AGENT] Cycle 1 LLM response received ({len(res_c1.content)} chars).")
                 except Exception as exc:
-                    logger.warning("Cycle 1 LLM chat call failed: %s; using deliverable stub", exc)
-                    last_llm_response = f"# Deliverable for {task.task_id} ({task.title})\n"
+                    logger.error("Cycle 1 LLM chat call failed: %s", exc)
+                    logs.append(f"[AGENT] Cycle 1 LLM chat call failed: {exc}")
+                    task.status = TaskStatus.FAILED
+                    task.metadata["error"] = str(exc)
+                    task.execution_log = "\n".join(logs)
+                    if self.on_task_update:
+                        self.on_task_update(task, TaskStatus.FAILED)
+                    return TaskStatus.FAILED
 
                 self._materialize_deliverables(task, last_llm_response, role_spec.name, overwrite=True, is_simulation=False)
 
@@ -841,8 +884,14 @@ class TaskRunner:
                     last_llm_response = res_c2.content
                     logs.append(f"[AGENT] Cycle 2 Refinement response received ({len(res_c2.content)} chars).")
                 except Exception as exc:
-                    logger.warning("Cycle 2 LLM chat call failed: %s; using deliverable stub", exc)
-                    last_llm_response = f"# Refined Deliverable for {task.task_id} ({task.title})\n"
+                    logger.error("Cycle 2 LLM chat call failed: %s", exc)
+                    logs.append(f"[AGENT] Cycle 2 Refinement chat call failed: {exc}")
+                    task.status = TaskStatus.FAILED
+                    task.metadata["error"] = str(exc)
+                    task.execution_log = "\n".join(logs)
+                    if self.on_task_update:
+                        self.on_task_update(task, TaskStatus.FAILED)
+                    return TaskStatus.FAILED
 
                 self._materialize_deliverables(task, last_llm_response, role_spec.name, overwrite=True, is_simulation=False)
 
@@ -896,7 +945,13 @@ class TaskRunner:
                 hashes[out] = _compute_sha256(out_path)
 
         failure_info = task.metadata.get("failure_details", {})
-        err_msg = failure_info.get("raw_output") or failure_info.get("assertion") if status == TaskStatus.FAILED else None
+        err_msg = (
+            failure_info.get("raw_output")
+            or failure_info.get("assertion")
+            or task.metadata.get("error")
+            if status == TaskStatus.FAILED
+            else None
+        )
 
         return TaskExecutionResult(
             task_id=task.task_id,

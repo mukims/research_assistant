@@ -2,6 +2,7 @@
 Streamlit UI Component for Scientific Agent Task Planner & Replication DAGs.
 """
 
+import html
 import json
 import os
 import re
@@ -83,7 +84,7 @@ def _list_existing_workspace_runs() -> List[str]:
 
 def _render_mermaid_interactive(mermaid_code: str, height: int = 420):
     """Renders Mermaid diagram in an iframe with interactive pan/zoom support."""
-    html = f"""
+    html_markup = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -116,10 +117,10 @@ def _render_mermaid_interactive(mermaid_code: str, height: int = 420):
               mermaid.initialize({{
                 startOnLoad: false,
                 theme: 'default',
-                securityLevel: 'loose',
+                securityLevel: 'strict',
                 flowchart: {{
                   useMaxWidth: true,
-                  htmlLabels: true,
+                  htmlLabels: false,
                   curve: 'basis'
                 }}
               }});
@@ -144,7 +145,7 @@ def _render_mermaid_interactive(mermaid_code: str, height: int = 420):
     </body>
     </html>
     """
-    st.components.v1.html(html, height=height, scrolling=True)
+    st.components.v1.html(html_markup, height=height, scrolling=True)
 
 
 
@@ -381,17 +382,21 @@ def render_planner_tab():
                             else ("🟡 In Progress" if task.status == TaskStatus.RUNNING
                             else ("⚪ Ready" if task.status == TaskStatus.READY else "🔴 Blocked"))
                         )
-                        deliverables_str = ", ".join(f"`{out}`" for out in task.outputs) if task.outputs else "None specified"
+                        safe_task_id = html.escape(str(task.task_id))
+                        safe_status_badge = html.escape(str(status_badge))
+                        safe_title = html.escape(str(task.title))
+                        safe_role_val = html.escape(str(role_val))
+                        safe_deliverables = ", ".join(f"<code>{html.escape(str(out))}</code>" for out in task.outputs) if task.outputs else "None specified"
                         st.markdown(
                             f"""
                             <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-bottom: 10px; background-color: #f8fafc;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                                    <span style="font-size: 11px; font-weight: 700; color: #475569; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">{task.task_id}</span>
-                                    <span style="font-size: 11px; font-weight: 600;">{status_badge}</span>
+                                    <span style="font-size: 11px; font-weight: 700; color: #475569; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">{safe_task_id}</span>
+                                    <span style="font-size: 11px; font-weight: 600;">{safe_status_badge}</span>
                                 </div>
-                                <div style="font-weight: 600; font-size: 13px; color: #0f172a; margin-bottom: 4px;">{task.title}</div>
-                                <div style="font-size: 12px; color: #64748b; margin-bottom: 6px;">{role_icon} {role_val}</div>
-                                <div style="font-size: 11px; color: #334155;"><strong>Deliverables:</strong> {deliverables_str}</div>
+                                <div style="font-weight: 600; font-size: 13px; color: #0f172a; margin-bottom: 4px;">{safe_title}</div>
+                                <div style="font-size: 12px; color: #64748b; margin-bottom: 6px;">{role_icon} {safe_role_val}</div>
+                                <div style="font-size: 11px; color: #334155;"><strong>Deliverables:</strong> {safe_deliverables}</div>
                             </div>
                             """,
                             unsafe_allow_html=True,
