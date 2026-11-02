@@ -366,7 +366,7 @@ class TestTaskHarness(unittest.TestCase):
         self.assertIn("Expected CLI argument missing", stderr_miss)
 
     def test_run_task_test_script_env_injection(self):
-        """Verifies that run_task_test_script injects thread caps and custom environment variables."""
+        """Verifies that run_task_test_script injects thread caps and narrows a caller env to the allowlist."""
         test_py = (
             "import os\n"
             "import unittest\n"
@@ -374,7 +374,8 @@ class TestTaskHarness(unittest.TestCase):
             "    def test_env_caps(self):\n"
             "        self.assertEqual(os.environ.get('OMP_NUM_THREADS'), '1')\n"
             "        self.assertEqual(os.environ.get('TORCH_NUM_THREADS'), '1')\n"
-            "        self.assertEqual(os.environ.get('CUSTOM_TEST_KEY'), 'custom_value')\n"
+            "        # A caller-supplied env is allowlisted, not passed through, so a non-allowlisted key must not arrive.\n"
+            "        self.assertIsNone(os.environ.get('CUSTOM_TEST_KEY'))\n"
             "if __name__ == '__main__':\n"
             "    unittest.main()\n"
         )

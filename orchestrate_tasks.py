@@ -79,6 +79,16 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    # Autonomous mode executes code the model wrote from an untrusted paper, so it needs explicit consent.
+    if args.mode == "autonomous" and not args.allow_untrusted_code:
+        print(
+            "Error: --mode autonomous runs code the model writes on this computer. "
+            "It cannot see your API keys, but it is not sandboxed. "
+            "Re-run with --allow-untrusted-code to accept that.",
+            file=sys.stderr,
+        )
+        return 2
+
     plan_path = args.plan_json
     if not os.path.exists(plan_path):
         print(f"Error: Plan file '{plan_path}' not found.", file=sys.stderr)
@@ -205,6 +215,11 @@ def main() -> int:
     p_run.add_argument("plan_json", help="Path to TaskGraph JSON file")
     p_run.add_argument("--workspace", "-w", help="Working directory for task outputs")
     p_run.add_argument("--mode", choices=["simulation", "autonomous"], default="simulation")
+    p_run.add_argument(
+        "--allow-untrusted-code",
+        action="store_true",
+        help="Required for --mode autonomous: acknowledge that model-written code runs on this computer, unsandboxed",
+    )
     p_run.add_argument("--report-out", help="Path to write execution scorecard report")
 
     # show command

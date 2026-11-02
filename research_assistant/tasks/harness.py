@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tempfile
 from typing import Dict, Optional, Tuple
 
 from research_assistant.shared.log import get_logger
+from research_assistant.tasks.sandbox import python_argv, sandbox_env
 from research_assistant.tasks.models import (
     ArtifactType,
     Task,
@@ -304,14 +304,9 @@ def run_task_test_script(
         tmp_f.write(script_content)
 
     try:
-        sub_env = env.copy() if env is not None else os.environ.copy()
-        sub_env.setdefault("OMP_NUM_THREADS", "1")
-        sub_env.setdefault("MKL_NUM_THREADS", "1")
-        sub_env.setdefault("OPENBLAS_NUM_THREADS", "1")
-        sub_env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-        sub_env.setdefault("NUMEXPR_NUM_THREADS", "1")
-        sub_env.setdefault("TORCH_NUM_THREADS", "1")
-        cmd = [sys.executable, "-m", "unittest", os.path.basename(tmp_path)]
+        # A caller-supplied env is narrowed to the allowlist too; it is never passed through raw.
+        sub_env = sandbox_env(workspace_dir, base=env)
+        cmd = python_argv("-m", "unittest", os.path.basename(tmp_path))
         res = subprocess.run(
             cmd,
             cwd=workspace_dir,

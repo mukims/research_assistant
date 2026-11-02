@@ -367,7 +367,10 @@ python orchestrate_tasks.py run plan.json --mode simulation --report-out report.
 deliverables. `--mode autonomous` has the model write each task's deliverables
 into the workspace, runs a generated acceptance test over them in a subprocess,
 and gives a failing task one reflection retry. Give it a scratch `--workspace`;
-the runner refuses to point at the persistent data directory.
+the runner refuses to point at the persistent data directory. The generated code
+runs with only `PATH`/locale variables (no API keys or `APP_PASSWORD`) but is
+**not sandboxed** (it can still read your files), so autonomous mode needs
+`--allow-untrusted-code` on the command line or the acknowledgement checkbox in the UI.
 
 ## Where things are
 

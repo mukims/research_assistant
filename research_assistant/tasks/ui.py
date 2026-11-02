@@ -287,6 +287,13 @@ def render_planner_tab():
             format_func=lambda m: "🧪 Dry-Run Simulation" if m == "simulation" else "🤖 Autonomous Agent Execution",
             key="planner_exec_mode",
         )
+        autonomous_ack = True
+        if exec_mode_choice == "autonomous":
+            autonomous_ack = st.checkbox(
+                "I understand: autonomous mode runs code the model writes on this computer. "
+                "It cannot see your API keys, but it is not sandboxed.",
+                key="planner_autonomous_ack",
+            )
 
         st.markdown("<div style='margin-top: 18px;'></div>", unsafe_allow_html=True)
         btn_deconstruct = st.button(
@@ -451,7 +458,13 @@ def render_planner_tab():
         col_run_btn, col_down_json, col_down_md, col_down_ag = st.columns([2, 1, 1, 1])
 
         with col_run_btn:
-            if st.button("🚀 Execute Task Graph Now", type="primary", use_container_width=True, key="planner_btn_exec"):
+            if st.button(
+                "🚀 Execute Task Graph Now",
+                type="primary",
+                use_container_width=True,
+                disabled=not autonomous_ack,
+                key="planner_btn_exec",
+            ):
                 from research_assistant.tasks.workspace import get_paper_workspace_dir
                 workspace = get_paper_workspace_dir(graph.paper_id)
                 mode = ExecutionMode.AUTONOMOUS if exec_mode_choice == "autonomous" else ExecutionMode.SIMULATION

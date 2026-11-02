@@ -119,6 +119,16 @@ class TestTaskCLI(unittest.TestCase):
         self.assertIn("Replication Scorecard", report_content)
         self.assertIn("CERTIFIED_REPLICABLE", report_content)
 
+    def test_autonomous_mode_requires_the_acknowledgement_flag(self):
+        plan_file = self.tmp_path / "plan.json"
+        plan_file.write_text("{}")
+        res = subprocess.run([
+            sys.executable, "orchestrate_tasks.py", "run", str(plan_file),
+            "--workspace", str(self.tmp_path / "ws"), "--mode", "autonomous",
+        ], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("--allow-untrusted-code", res.stderr)
+
     def test_cli_plan_missing_file(self):
         missing = self.tmp_path / "does_not_exist.pdf"
         res = subprocess.run([

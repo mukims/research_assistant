@@ -18,7 +18,6 @@ import os
 import py_compile
 import re
 import subprocess
-import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -32,6 +31,7 @@ from research_assistant.tasks.models import (
     TaskStatus,
 )
 from research_assistant.tasks.roles import format_agent_prompt, get_role_spec
+from research_assistant.tasks.sandbox import python_argv, sandbox_env
 
 logger = get_logger("task_runner")
 
@@ -643,13 +643,7 @@ class TaskRunner:
         if not entrypoint_candidates:
             return 0, ""
 
-        env = os.environ.copy()
-        env["OMP_NUM_THREADS"] = "1"
-        env["MKL_NUM_THREADS"] = "1"
-        env["OPENBLAS_NUM_THREADS"] = "1"
-        env["VECLIB_MAXIMUM_THREADS"] = "1"
-        env["NUMEXPR_NUM_THREADS"] = "1"
-        env["TORCH_NUM_THREADS"] = "1"
+        env = sandbox_env(self.workspace_dir)
 
         all_output = []
         for script_name, script_path, script_content in entrypoint_candidates:
@@ -661,7 +655,7 @@ class TaskRunner:
 
             try:
                 proc = subprocess.run(
-                    [sys.executable, script_path],
+                    python_argv(script_path),
                     cwd=self.workspace_dir,
                     capture_output=True,
                     text=True,
@@ -673,7 +667,7 @@ class TaskRunner:
                     # If it exited because required CLI args were not passed, test with --help
                     if "usage:" in out.lower() or "required" in out.lower() or "unrecognized" in out.lower():
                         help_proc = subprocess.run(
-                            [sys.executable, script_path, "--help"],
+                            python_argv(script_path, "--help"),
                             cwd=self.workspace_dir,
                             capture_output=True,
                             text=True,
@@ -711,13 +705,7 @@ class TaskRunner:
             else:
                 return 1, "No test script or task provided"
 
-        env = os.environ.copy()
-        env["OMP_NUM_THREADS"] = "1"
-        env["MKL_NUM_THREADS"] = "1"
-        env["OPENBLAS_NUM_THREADS"] = "1"
-        env["VECLIB_MAXIMUM_THREADS"] = "1"
-        env["NUMEXPR_NUM_THREADS"] = "1"
-        env["TORCH_NUM_THREADS"] = "1"
+        env = sandbox_env(self.workspace_dir)
 
         success, stdout, stderr = run_task_test_script(
             script_content,
