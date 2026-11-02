@@ -68,6 +68,11 @@ DERIVED_FIELDS = {
     "model_judgement", "rubric_mismatch", "rubric_violations", "span_verified", "span_cites_others",
 }
 
+# Added by judge() itself: which model produced the verdict, and the vote that
+# produced it. `votes` / `vote_split` are absent from a single-vote verdict, so
+# every copy site takes these only when present (`if k in verdict`).
+PROVENANCE_FIELDS = ("judge_model", "judge_model_version", "votes", "vote_split")
+
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 
 # Verdicts that assert the passages report something, and so rest on the
@@ -446,6 +451,10 @@ def _tally(votes: list[dict]) -> dict:
     out = dict(votes[0])
     out["judgement"] = "Unclear / insufficient evidence"
     out["confidence"] = "Low"
+    # The copy keeps vote 1's reason and span, which may argue for a verdict
+    # the vote did not reach; say so at the head of the reason.
+    tally = ", ".join(f"{v}: {n}" for v, n in sorted(counts.items()))
+    out["reason"] = f"Votes split ({tally}): {out.get('reason') or ''}".rstrip()
     out["votes"] = counts
     out["vote_split"] = True
     return out

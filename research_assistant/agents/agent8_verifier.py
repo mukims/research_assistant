@@ -47,6 +47,7 @@ from research_assistant.judgement.evidence import (
 )
 from research_assistant.judgement.judge import (
     DERIVED_FIELDS,
+    PROVENANCE_FIELDS,
     REQUIRED_FIELDS,
     JudgementParseError,
     judge,
@@ -309,6 +310,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             entry["outcome"] = "judged"
             entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
             entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
+            entry.update({field: verdict[field] for field in PROVENANCE_FIELDS if field in verdict})
             logger.info(" -> %s (%s confidence) [replayed evidence]", verdict["judgement"], verdict["confidence"])
             return entry
 
@@ -443,6 +445,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         entry["outcome"] = "judged"
         entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
         entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
+        entry.update({field: verdict[field] for field in PROVENANCE_FIELDS if field in verdict})
         logger.info(" -> %s (%s confidence)", verdict["judgement"], verdict["confidence"])
         return entry
 

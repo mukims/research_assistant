@@ -1611,6 +1611,40 @@ class TestHonestOutcomes(unittest.TestCase):
         self.assertEqual(mj.call_args.kwargs.get("context") or mj.call_args.args[2], item["context"])
 
 
+class TestProvenanceInTheAuditEntry(unittest.TestCase):
+    """judge_model / judge_model_version (and votes, when voting) must survive
+    the audit's field copy, or the record cannot say which model judged it."""
+
+    def _entry(self, **extra):
+        from research_assistant.shared.seed_audit import _judge_claim_entry
+        item = {"claim": "Graphene is a semimetal with linear dispersion.", "document": "x.pdf", "context": ""}
+        hits = [{"text": "t1", "metadata": {"document": "x.pdf", "section": "results", "page": 4}}]
+        verdict = {"judgement": "Supports", "confidence": "High", "supporting_span": "t1", "reason": "r",
+                   "slots": {"finding": {"assertion": "a", "verdict": "Supports"}, "scope": {"assertion": "s", "verdict": "Supports"},
+                             "strength": {"assertion": "t", "verdict": "Not applicable"}},
+                   "evidence_sufficiency": "sufficient", **extra}
+        with patch("research_assistant.shared.seed_audit.hybrid_search", return_value=hits), \
+             patch("research_assistant.shared.seed_audit._judge_once", return_value=verdict):
+            _judge_claim_entry(item, MagicMock(), MagicMock(), [], [], top_k=1, escalate_k=0)
+        return item
+
+    def test_model_and_votes_reach_the_entry(self):
+        item = self._entry(judge_model="gemini-3.5-flash-lite", judge_model_version="gemini-3.5-flash-lite-001",
+                           votes={"Supports": 2, "Does not support": 1})
+        self.assertEqual(item["outcome"], "judged")
+        self.assertEqual(item["judge_model"], "gemini-3.5-flash-lite")
+        self.assertEqual(item["judge_model_version"], "gemini-3.5-flash-lite-001")
+        self.assertEqual(item["votes"], {"Supports": 2, "Does not support": 1})
+        self.assertNotIn("vote_split", item)
+
+    def test_a_single_vote_entry_has_no_vote_keys(self):
+        item = self._entry(judge_model="m", judge_model_version=None)
+        self.assertEqual(item["judge_model"], "m")
+        self.assertIsNone(item["judge_model_version"])
+        self.assertNotIn("votes", item)
+        self.assertNotIn("vote_split", item)
+
+
 BREAKER_TEI_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
 <div><head>Results</head>

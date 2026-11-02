@@ -445,6 +445,16 @@ class TestCiteByJudge(unittest.TestCase):
         self.assertEqual(judge.call_count, 2)          # stopped at the first pass
         chat.assert_not_called()
 
+    def test_the_candidate_record_carries_the_judge_provenance_when_present(self):
+        with_prov = dict(_verdict("Supports"), judge_model="m", judge_model_version="m-001", votes={"Supports": 3})
+        res, _, _ = self._cite([with_prov])
+        rec = res.verdicts[0]
+        self.assertEqual((rec["judge_model"], rec["judge_model_version"], rec["votes"]), ("m", "m-001", {"Supports": 3}))
+        self.assertNotIn("vote_split", rec)
+        res, _, _ = self._cite([_verdict("Supports")])
+        for key in ("judge_model", "judge_model_version", "votes", "vote_split"):
+            self.assertNotIn(key, res.verdicts[0])
+
     def test_supports_without_a_verified_span_is_not_accepted(self):
         res, judge, _ = self._cite([_verdict("Supports", span_verified=False),
                                     _verdict("Does not support"), _verdict("Unclear / insufficient evidence")])

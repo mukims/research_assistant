@@ -665,6 +665,33 @@ class TestDerivedFieldsInTheRecord(VerifyDraftTestCase):
         self.assertIn("model said Supports", md)
         self.assertIn("not found verbatim", md)
 
+    def test_provenance_fields_reach_the_search_path_entry(self):
+        v = self._verdict_with(judge_model="gemini-3.5-flash-lite", judge_model_version="gemini-3.5-flash-lite-001",
+                               votes={"Supports": 3}, vote_split=False)
+        _, report = self._run(
+            "Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"}, [("Smith 2020", "a.pdf")],
+            [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=lambda c, e, **k: v,
+        )
+        entry = report["results"][0]
+        self.assertEqual(entry["judge_model"], "gemini-3.5-flash-lite")
+        self.assertEqual(entry["judge_model_version"], "gemini-3.5-flash-lite-001")
+        self.assertEqual(entry["votes"], {"Supports": 3})
+        self.assertIs(entry["vote_split"], False)
+
+    def test_single_vote_entry_has_the_model_but_no_vote_keys(self):
+        v = self._verdict_with(judge_model="m", judge_model_version=None)
+        _, report = self._run(
+            "Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"}, [("Smith 2020", "a.pdf")],
+            [{"text": "Graphene is highly conductive.", "metadata": {"document": "a.pdf"}}],
+            judge_side_effect=lambda c, e, **k: v,
+        )
+        entry = report["results"][0]
+        self.assertEqual(entry["judge_model"], "m")
+        self.assertIsNone(entry["judge_model_version"])
+        self.assertNotIn("votes", entry)
+        self.assertNotIn("vote_split", entry)
+
     def test_a_verdict_without_derived_fields_still_works(self):
         # Older stubs and older records have no derived fields.
         _, report = self._run(
@@ -826,6 +853,19 @@ class TestReplayedEvidence(VerifyDraftTestCase):
         # Verify markdown mentions replayed evidence
         md = self._markdown(draft_path)
         self.assertIn("Ground truth accepted during citation", md)
+
+    def test_provenance_fields_reach_the_replayed_entry(self):
+        draft_path = self._write("Graphene conducts well \\cite{cite_1}.", {"Smith 2020": "cite_1"})
+        with open(draft_path.replace(".txt", "_citation_evidence.json"), "w", encoding="utf-8") as fh:
+            json.dump({"cite_1": {"key": "cite_1", "citation_source": "Smith 2020", "document": "smith2020.pdf",
+                                  "chunk_index": 5, "evidence": "Ground truth evidence passage."}}, fh)
+        verdict = dict(_verdict("Supports"), judge_model="m", judge_model_version="m-001")
+        import research_assistant.agents.agent8_verifier as a8
+        with patch.object(a8, "judge", return_value=verdict):
+            report = verify_draft(draft_path, search_resources=(FakeCollection([]), None, [], []))
+        entry = report["results"][0]
+        self.assertEqual((entry["judge_model"], entry["judge_model_version"]), ("m", "m-001"))
+        self.assertNotIn("votes", entry)
 
 
 class TestParallelVerification(VerifyDraftTestCase):

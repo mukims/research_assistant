@@ -634,6 +634,11 @@ class TestModelAndVoting(unittest.TestCase):
         self.assertEqual(out["confidence"], "Low")
         self.assertIs(out["vote_split"], True)
         self.assertEqual(out["votes"], {"Supports": 1, "Contradicts": 1, "Does not support": 1})
+        # The copy keeps vote 1's reason, so the split is stated at its head.
+        self.assertTrue(
+            out["reason"].startswith("Votes split (Contradicts: 1, Does not support: 1, Supports: 1): "),
+            out["reason"])
+        self.assertTrue(out["reason"].endswith(": r"), out["reason"])
 
     def test_the_rubric_is_enforced_on_every_vote_before_counting(self):
         """A vote whose span is invented is Unclear after enforce_rubric, so it
@@ -644,6 +649,14 @@ class TestModelAndVoting(unittest.TestCase):
         out, _ = self._judge(replies, votes=3)
         self.assertEqual(out["votes"], {self.UNCLEAR: 2, "Supports": 1})
         self.assertEqual(out["judgement"], self.UNCLEAR)
+
+    def test_a_failed_vote_never_degrades_to_fewer_votes(self):
+        """One unparseable vote fails the judgement (the caller's retry runs it
+        again); a verdict is never built from two of three votes."""
+        replies = self._replies("Supports", "Supports", "Supports")
+        replies[1].content = "not json"
+        with self.assertRaises(JudgementParseError):
+            self._judge(replies, votes=3)
 
     def test_even_vote_count_rounds_up(self):
         import subprocess

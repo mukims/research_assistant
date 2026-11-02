@@ -22,7 +22,7 @@ from research_assistant.config import (
     JUDGEMENT_NEIGHBOUR_WINDOW,
 )
 from research_assistant.judgement.evidence import assemble_evidence, _warn_if_context_is_tight
-from research_assistant.judgement.judge import compose_context, judge
+from research_assistant.judgement.judge import PROVENANCE_FIELDS, compose_context, judge
 from research_assistant.shared.claim_text import (  # re-exported: seed_audit, agent8 and tests import from here
     _CITE_RE,
     _TERMINAL,
@@ -299,6 +299,7 @@ def _cite_by_judge(sentence, hits, candidates, *, context, query, texts, metadat
             verdicts.append(record)
             continue
         record.update({k: v.get(k) for k in _VERDICT_FIELDS})
+        record.update({k: v[k] for k in PROVENANCE_FIELDS if k in v})
         verdicts.append(record)
         if v.get("judgement") == "Supports" and v.get("span_verified") is True:
             return _accepted(sentence, cand, record, candidates, verdicts, query, partial=False)

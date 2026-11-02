@@ -497,6 +497,7 @@ def _judge_claim_entry(
     """Evaluate a single claim against its cited document in the vector store."""
     from research_assistant.judgement.judge import (
         DERIVED_FIELDS,
+        PROVENANCE_FIELDS,
         REQUIRED_FIELDS,
         JudgementParseError,
     )
@@ -659,7 +660,7 @@ def _judge_claim_entry(
         for k in REQUIRED_FIELDS:
             if k in verdict:
                 item[k] = verdict[k]
-        for k in DERIVED_FIELDS:
+        for k in (*DERIVED_FIELDS, *PROVENANCE_FIELDS):
             if k in verdict:
                 item[k] = verdict[k]
         logger.info(
