@@ -18,7 +18,7 @@ from research_assistant.config import (
 )
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.transfer.models import Card, Passage, card_from_dict, card_to_dict
-from research_assistant.transfer.premises import PremiseChecker
+from research_assistant.transfer.premises import PremiseChecker, chunk_seq
 from research_assistant.transfer.prompts import CARDS_USER, SYSTEM, format_passages
 from research_assistant.transfer.replies import ask_json, resolve_premises
 
@@ -87,6 +87,7 @@ def select_card_passages(
             Passage(
                 key=f"C{key_counter}",
                 chunk_index=idx,
+                seq=chunk_seq(meta, idx),
                 document=document,
                 citation=citation,
                 section=sec,

@@ -561,7 +561,7 @@ class TestAdversarialTechniqueTransfer(unittest.TestCase):
             inputs="A matrix, b vector",
             outputs="x solution vector",
             assumptions=["linearity"],
-            evidence=Premise(claim="Hamiltonian matrix formulation", key="C1", document="s1", chunk_index=0),
+            evidence=Premise(claim="Hamiltonian matrix formulation", key="C1", document="s1", chunk_index=0, seq=0),
         )
 
         seed = Seed(bottleneck_id="B1", card=card, score=0.92, level="mid", rank=1)

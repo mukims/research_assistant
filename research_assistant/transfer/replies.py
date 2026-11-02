@@ -89,7 +89,7 @@ def resolve_premises(
     """
     Resolve raw premise items against shown passages.
 
-    Copies document and chunk_index from the cited passage.
+    Copies document, seq and chunk_index from the cited passage.
     Drops unknown keys, empty claims, duplicates, and items beyond limit.
     """
     premises: list[Premise] = []
@@ -129,6 +129,7 @@ def resolve_premises(
                 key=norm_key,
                 document=passage.document,
                 chunk_index=passage.chunk_index,
+                seq=passage.seq,
             )
         )
 

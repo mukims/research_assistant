@@ -39,7 +39,7 @@ class TestPremiseChecker(unittest.TestCase):
         ]
         seen = []
         premises.PremiseChecker(lambda c, e: (seen.append(e), OK)[1], texts, metas).check(
-            models.Premise("B.", "C1", "b.pdf", 1))
+            models.Premise("B.", "C1", "b.pdf", 1, seq=1))
         self.assertIn("b one", seen[0])
         self.assertNotIn("a one", seen[0])
 

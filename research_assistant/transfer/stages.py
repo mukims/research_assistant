@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from research_assistant.config import DOC_SELECT_K
@@ -21,7 +21,7 @@ from research_assistant.transfer.models import (
     Step,
     Transfer,
 )
-from research_assistant.transfer.premises import PremiseChecker, resolve_chunk
+from research_assistant.transfer.premises import PremiseChecker, chunk_seq, resolve_chunk, resolve_premise
 from research_assistant.transfer.prompts import (
     BOTTLENECKS_USER,
     CRITIQUE_USER,
@@ -48,10 +48,14 @@ class CorpusCoverageError(RuntimeError):
         )
 
 
-def _passage_key(document: str, chunk_index: int) -> tuple[str, int]:
-    """Identity of a passage. chunk_index alone is not unique: on the LanceDB backend it is the
-    per-document sequence number, so two papers share every small value."""
-    return (document, chunk_index)
+def _passage_key(document: str, seq: int) -> tuple[str, int]:
+    """Identity of a passage: its paper and its seq within it (see Passage). Never chunk_index,
+    which is a position in texts for a card passage but the seq for a LanceDB search hit."""
+    return (document, seq)
+
+
+def _passage_of(passages: dict[str, Passage], document: str, seq: int) -> Passage | None:
+    return next((p for p in passages.values() if p.document == document and p.seq == seq), None)
 
 
 @dataclass
@@ -100,7 +104,8 @@ def ground(
         # hybrid_search keeps the paper and its citation in the chunk metadata.
         meta = h.get("metadata") or {}
         doc = meta.get("document", "")
-        passage_id = _passage_key(doc, c_idx)
+        seq = chunk_seq(meta, c_idx)
+        passage_id = _passage_key(doc, seq)
         if passage_id in seen_chunks:
             continue
         seen_chunks.add(passage_id)
@@ -108,6 +113,7 @@ def ground(
         passages[key] = Passage(
             key=key,
             chunk_index=c_idx,
+            seq=seq,
             document=doc,
             citation=meta.get("citation_source") or doc,
             section=meta.get("section", "methods"),
@@ -301,9 +307,12 @@ def candidate_cards(
 def resolve_card_evidence(deps: Deps, card: Card) -> tuple[int, str, dict] | None:
     """Find the chunk a card's evidence points at, as (position in deps.texts, text, metadata).
 
-    See resolve_chunk: None when the chunk cannot be found, never the paper's first chunk.
+    See resolve_premise: None when the chunk cannot be found, never the paper's first chunk.
     """
-    return resolve_chunk(deps.texts, deps.metadatas, card.document, card.evidence.chunk_index)
+    ev = card.evidence
+    if ev.document != card.document:
+        ev = replace(ev, document=card.document)
+    return resolve_premise(deps.texts, deps.metadatas, ev)
 
 
 def develop(
@@ -341,11 +350,10 @@ def develop(
         )
     else:
         resolved_chunk_idx, resolved_text, resolved_meta = resolved
-        seen_chunks.add(_passage_key(card.document, resolved_chunk_idx))
-        existing = next(
-            (p for p in grounding.passages.values() if p.chunk_index == resolved_chunk_idx and p.document == card.document),
-            None,
-        )
+        # The resolved row's own seq: a card saved before seq existed carries only a position.
+        ev_seq = chunk_seq(resolved_meta, resolved_chunk_idx)
+        seen_chunks.add(_passage_key(card.document, ev_seq))
+        existing = _passage_of(grounding.passages, card.document, ev_seq)
         if existing:
             p_ev = existing
         else:
@@ -353,6 +361,7 @@ def develop(
             p_ev = Passage(
                 key=k,
                 chunk_index=resolved_chunk_idx,
+                seq=ev_seq,
                 document=card.document,
                 citation=card.citation,
                 section=resolved_meta.get("section", "methods"),
@@ -371,25 +380,30 @@ def develop(
     )
     for hit in search_hits:
         c_idx = hit.get("chunk_index")
-        if c_idx is None or _passage_key(card.document, c_idx) in seen_chunks:
+        if c_idx is None:
             continue
-        seen_chunks.add(_passage_key(card.document, c_idx))
-        existing = next(
-            (p for p in grounding.passages.values() if p.chunk_index == c_idx and p.document == card.document),
-            None,
-        )
+        meta = hit.get("metadata") or {}
+        seq = chunk_seq(meta, c_idx)
+        if _passage_key(card.document, seq) in seen_chunks:
+            continue
+        seen_chunks.add(_passage_key(card.document, seq))
+        existing = _passage_of(grounding.passages, card.document, seq)
         if existing:
             p_src = existing
         else:
             k = f"C{len(grounding.passages) + 1}"
-            meta = hit.get("metadata", {})
+            text = hit.get("text")
+            if text is None:
+                found = resolve_chunk(deps.texts, deps.metadatas, card.document, seq, position=c_idx)
+                text = found[1] if found else ""
             p_src = Passage(
                 key=k,
                 chunk_index=c_idx,
+                seq=seq,
                 document=card.document,
                 citation=meta.get("citation", card.citation),
                 section=meta.get("section", "methods"),
-                text=hit.get("text", deps.texts[c_idx] if c_idx < len(deps.texts) else ""),
+                text=text,
                 role="source",
             )
             grounding.passages[k] = p_src

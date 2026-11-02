@@ -13,31 +13,61 @@ from research_assistant.shared.search import expand_neighbours
 from research_assistant.transfer.models import Premise
 
 
+def chunk_seq(meta: dict | None, position: int) -> int:
+    """A chunk's identity within its paper: metadata["seq"], the per-document sequence number.
+
+    LanceDB and v2/v3 Chroma ingestion record it. A store that records none (v1 Chroma chunks, the
+    list-backed test corpora) has only the chunk's position in texts, which is also what its search
+    hits report as chunk_index, so the position is that chunk's seq.
+    """
+    seq = (meta or {}).get("seq")
+    return position if seq is None else int(seq)
+
+
 def resolve_chunk(
     texts: list[str],
     metadatas: list[dict],
     document: str,
-    chunk_index: int | None,
+    seq: int | None,
+    position: int | None = None,
 ) -> tuple[int, str, dict] | None:
-    """Find a paper's chunk as (position in texts, text, metadata).
+    """Find chunk (document, seq) as (position in texts, text, metadata); None when there is none.
 
-    chunk_index is a global position on the Chroma backend but the per-document seq on LanceDB, so
-    the positional entry is trusted only when it belongs to `document`; otherwise the paper's chunk
-    whose seq or chunk_index equals it is used. Returns None when neither exists. There is
-    deliberately no fallback to another chunk: that would misattribute the evidence.
+    `position` is where the caller expects the chunk to sit. A row is taken without a search only
+    when it is proven to be the chunk: same paper and same seq. Otherwise the paper's chunk with that
+    seq is searched for. There is deliberately no fallback to another chunk: that would misattribute
+    the evidence.
     """
-    if chunk_index is None or not document:
+    if seq is None or not document:
         return None
 
-    if 0 <= chunk_index < len(texts):
-        meta = metadatas[chunk_index] if chunk_index < len(metadatas) else {}
-        if meta.get("document") == document:
-            return chunk_index, texts[chunk_index], meta
+    n = len(texts)
+    for guess in dict.fromkeys(g for g in (position, seq) if g is not None):
+        if 0 <= guess < n and guess < len(metadatas):
+            meta = metadatas[guess]
+            if meta.get("document") == document and chunk_seq(meta, guess) == seq:
+                return guess, texts[guess], meta
 
-    for idx, (txt, m) in enumerate(zip(texts, metadatas)):
-        if m.get("document") == document and (m.get("seq") == chunk_index or m.get("chunk_index") == chunk_index):
-            return idx, txt, m
+    # Metadata only: on LanceDB every item read is a table query, so texts is read once, on a match.
+    for idx, m in enumerate(metadatas):
+        if m.get("document") == document and chunk_seq(m, idx) == seq:
+            return idx, texts[idx], m
     return None
+
+
+def resolve_premise(texts: list[str], metadatas: list[dict], p: Premise) -> tuple[int, str, dict] | None:
+    """Find the chunk a premise cites. A premise saved before seq existed is card evidence, whose
+    chunk_index was always a position in texts: that row is used if it is still the same paper's,
+    and is never re-read as a seq."""
+    if p.seq is not None:
+        return resolve_chunk(texts, metadatas, p.document, p.seq, position=p.chunk_index)
+    idx = p.chunk_index
+    if idx is None or not p.document or not (0 <= idx < len(texts)) or idx >= len(metadatas):
+        return None
+    meta = metadatas[idx]
+    if meta.get("document") != p.document:
+        return None
+    return idx, texts[idx], meta
 
 
 class PremiseChecker:
@@ -53,17 +83,19 @@ class PremiseChecker:
         self.texts = texts
         self.metadatas = metadatas
         self.calls: int = 0
-        self._cache: dict[tuple[str, str, int | None], tuple[dict | None, str | None]] = {}
+        self._cache: dict[tuple, tuple[dict | None, str | None]] = {}
 
     def check(self, p: Premise) -> Premise:
         """Check a single premise against its cited chunk and neighbours."""
         claim_norm = " ".join(p.claim.lower().split())
-        cache_key = (claim_norm, p.document, p.chunk_index)
+        # Keyed by the chunk's identity: a premise saved before seq existed has only its position.
+        identity = ("seq", p.seq) if p.seq is not None else ("position", p.chunk_index)
+        cache_key = (claim_norm, p.document, identity)
 
         if cache_key in self._cache:
             verdict, err = self._cache[cache_key]
         else:
-            resolved = resolve_chunk(self.texts, self.metadatas, p.document, p.chunk_index)
+            resolved = resolve_premise(self.texts, self.metadatas, p)
             if resolved is None:
                 # Nothing to judge against: report it rather than judge some other paper's chunk.
                 verdict, err = None, f"evidence chunk not found in {p.document}"

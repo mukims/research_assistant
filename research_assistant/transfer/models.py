@@ -10,6 +10,12 @@ from typing import Any
 
 @dataclass
 class Passage:
+    """A chunk shown to the model. Its identity is (document, seq), the same on every store.
+
+    chunk_index is where the store reported the chunk: a position in texts for a card passage or a
+    Chroma hit, but the per-document seq for a LanceDB hit. It is only a lookup hint, never compared
+    as an identity. seq is None only on passages saved before it existed.
+    """
     key: str
     chunk_index: int
     document: str
@@ -17,6 +23,7 @@ class Passage:
     section: str
     text: str
     role: str  # "near", "source", or "card"
+    seq: int | None = None
 
 
 @dataclass
@@ -30,6 +37,9 @@ class Premise:
     supporting_span: str | None = None
     reason: str | None = None
     error: str | None = None
+    # The cited passage's identity within `document` (see Passage). None on premises saved before it
+    # existed: those are card evidence, whose chunk_index was always a position in texts.
+    seq: int | None = None
 
     @property
     def accepted(self) -> bool:

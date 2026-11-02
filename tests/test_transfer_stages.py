@@ -235,6 +235,6 @@ class TestDevelop(unittest.TestCase):
             {"document": "elsewhere", "section": "methods", "seq": 7},
             {"document": doc, "section": "methods", "seq": 7},
         ])
-        seed.card.evidence.chunk_index = 7            # per-document seq, not a position in the corpus
+        seed.card.evidence.seq = 7                    # per-document seq, not a position in the corpus
         idx, text, meta = stages.resolve_card_evidence(deps, seed.card)
         self.assertEqual((idx, text, meta["document"]), (len(deps.texts) - 1, "right chunk", doc))
