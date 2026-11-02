@@ -488,7 +488,7 @@ class TestBoundedConcurrencyStress(unittest.TestCase):
         active_threads = set()
         thread_lock = threading.Lock()
 
-        def mock_paper_notes(query, key, title, hits):
+        def mock_paper_notes(query, key, title, hits, **kw):
             tid = threading.get_ident()
             with thread_lock:
                 active_threads.add(tid)
@@ -500,7 +500,7 @@ class TestBoundedConcurrencyStress(unittest.TestCase):
         passages = {f"P{i:02d}": [{"text": f"Passage {i}"}] for i in range(num_papers)}
 
         with patch.object(retrieve, "rank_documents", return_value=selected), \
-             patch.object(retrieve, "gate_documents", side_effect=lambda q, r: r), \
+             patch.object(retrieve, "gate_documents", side_effect=lambda q, r, **kw: r), \
              patch.object(retrieve, "passages_per_paper", return_value=passages), \
              patch.object(retrieve, "paper_notes", side_effect=mock_paper_notes), \
              patch.object(retrieve, "synthesise", return_value="Final consolidated synthesis."):

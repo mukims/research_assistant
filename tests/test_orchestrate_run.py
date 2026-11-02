@@ -7,6 +7,7 @@ doing any work. CLI entry points start a fresh run; a cancel that predates it is
 """
 
 import io
+import types
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -71,3 +72,25 @@ class TestStaleCancel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunModel(unittest.TestCase):
+    """The model chosen in a session travels with the run's inputs."""
+
+    def setUp(self):
+        pipeline_status.clear_cancel_request()
+        self.addCleanup(pipeline_status.clear_cancel_request)
+
+    def test_respond_passes_the_run_model(self):
+        from research_assistant.shared import retrieve
+        with patch.object(retrieve, "research_answer", return_value={"suggestion": "s", "citations": []}) as ra:
+            orchestrate.respond({"query": "q", "ask": True, "model": "m", "backend": "ollama"})
+        self.assertEqual(ra.call_args.kwargs["model"], "m")
+        self.assertEqual(ra.call_args.kwargs["backend"], "ollama")
+
+    def test_fallback_passes_the_run_model(self):
+        import research_assistant.shared.llm as llm
+        with patch.object(llm, "chat", return_value=types.SimpleNamespace(content="a")) as chat:
+            orchestrate.fallback({"query": "q", "ask": True, "model": "m", "backend": "ollama"})
+        self.assertEqual(chat.call_args.kwargs["model"], "m")
+        self.assertEqual(chat.call_args.kwargs["backend"], "ollama")

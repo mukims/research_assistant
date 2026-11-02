@@ -101,7 +101,8 @@ with st.sidebar:
 
     st.subheader("Server & Services")
     _render_grobid_controls()
-    if config.LLM_BACKEND == "openai" and not config.OPENAI_API_KEY:
+    # This session's pick (set just above by the picker); config holds only the default.
+    if (st.session_state.get("llm_backend") or config.LLM_BACKEND) == "openai" and not config.OPENAI_API_KEY:
         st.error("No OPENAI_API_KEY / HF_TOKEN set.", icon="🚫")
     render_preflight_sidebar()
 

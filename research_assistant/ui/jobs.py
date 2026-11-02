@@ -121,6 +121,10 @@ def _start_pipeline_job(
         "audit_citations": audit_citations,
         "synthesis_mode": synthesis_mode,
         "enable_ocr": enable_ocr,
+        # This session's sidebar choice rides with the run, so it is not read from
+        # process-wide config (which another session or a running job would share).
+        "model": st.session_state.get("llm_model"),
+        "backend": st.session_state.get("llm_backend"),
     }
     display_q = query or (os.path.basename(seed_file_path) if seed_file_path else "") or (seed_url_val or "") or "topic"
     metadata = {

@@ -130,14 +130,15 @@ def parse_gate_verdicts(text: str, n: int):
     return [found[i] for i in range(1, n + 1)]
 
 
-def _gate_one_by_one(query: str, ranked: list[dict]) -> list[dict]:
+def _gate_one_by_one(query: str, ranked: list[dict], *, model: str | None = None,
+                     backend: str | None = None) -> list[dict]:
     kept = []
     for r in ranked:
         try:
             ans = chat([{
                 "role": "user",
                 "content": DOC_RELEVANCE_GATE.format(query=query, summary=r["summary"]),
-            }]).content.strip().upper()
+            }], model=model, backend=backend).content.strip().upper()
         except Exception as e:
             logger.warning("Gate call failed for %s: %s — keeping it.", r["document"], e)
             kept.append(r)
@@ -147,7 +148,8 @@ def _gate_one_by_one(query: str, ranked: list[dict]) -> list[dict]:
     return kept
 
 
-def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
+def gate_documents(query: str, ranked: list[dict], *, model: str | None = None,
+                   backend: str | None = None) -> list[dict]:
     """Ask the LLM to keep only the summaries that could be relevant prior work."""
     kept = None
     if GATE_BATCHED and ranked:
@@ -156,7 +158,7 @@ def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
             reply = chat([{
                 "role": "user",
                 "content": DOC_RELEVANCE_GATE_BATCH.format(query=query, n=len(ranked), summaries=summaries),
-            }]).content
+            }], model=model, backend=backend).content
             verdicts = parse_gate_verdicts(reply, len(ranked))
         except Exception as e:
             logger.warning("Batched gate call failed: %s — falling back to per-summary calls.", e)
@@ -166,7 +168,7 @@ def gate_documents(query: str, ranked: list[dict]) -> list[dict]:
         else:
             kept = [r for r, keep in zip(ranked, verdicts) if keep]
     if kept is None:
-        kept = _gate_one_by_one(query, ranked)
+        kept = _gate_one_by_one(query, ranked, model=model, backend=backend)
 
     if not kept:
         logger.info("Gate rejected everything — falling back to the top summary.")
@@ -254,13 +256,15 @@ def deep_search(query: str, documents, top_k: int = DEFAULT_TOP_K) -> list[dict]
 # ─── Map: notes per paper ───────────────────────────────────────────────────
 
 
-def paper_notes(query: str, key: str, title: str, hits: list[dict]):
+def paper_notes(query: str, key: str, title: str, hits: list[dict], *, model: str | None = None,
+                backend: str | None = None):
     """One call over one paper's passages. Returns (notes, relevant)."""
     passages = format_passages(hits, SYNTHESIS_PER_PAPER_MAX_CHARS)
     text = chat(
         [{"role": "system", "content": SYNTHESIS_SYSTEM},
          {"role": "user", "content": PAPER_NOTES_USER.format(query=query, key=key, title=title, passages=passages)}],
         temperature=SYNTHESIS_TEMPERATURE, options=CHAT_OLLAMA_OPTIONS,
+        model=model, backend=backend,
     ).content.strip()
     relevant = not text.lower().startswith("not relevant")
     return text, relevant
@@ -269,11 +273,13 @@ def paper_notes(query: str, key: str, title: str, hits: list[dict]):
 # ─── Reduce: the synthesis ──────────────────────────────────────────────────
 
 
-def synthesise(query: str, material: str, n: int) -> str:
+def synthesise(query: str, material: str, n: int, *, model: str | None = None,
+               backend: str | None = None) -> str:
     return chat(
         [{"role": "system", "content": SYNTHESIS_SYSTEM},
          {"role": "user", "content": SYNTHESIS_USER.format(query=query, n=n, material=material)}],
         temperature=SYNTHESIS_TEMPERATURE, options=SYNTHESIS_OLLAMA_OPTIONS,
+        model=model, backend=backend,
     ).content.strip()
 
 
@@ -295,7 +301,8 @@ def check_citation_keys(text: str, valid_keys):
 # ─── End to end ─────────────────────────────────────────────────────────────
 
 
-def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = None, on_progress=None) -> dict | None:
+def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = None, on_progress=None,
+                    *, model: str | None = None, backend: str | None = None) -> dict | None:
     """Shortlist papers → read each one → synthesise, citing by key.
 
     Returns None when the corpus is empty. Otherwise a dict shaped as before
@@ -304,6 +311,12 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
     ``unverified_citations`` (keys not on the shortlist), ``irrelevant_cited``
     and ``timings``. ``on_progress(stage, payload)`` is called with
     ``shortlist``, ``notes`` (once per paper) and ``synthesis``.
+
+    ``model`` / ``backend`` pick the chat model for this run (the session's
+    sidebar choice). They are passed down as arguments, never read from
+    config, so two sessions with different models do not interfere and the
+    notes threads below need no context propagation. None keeps the configured
+    default.
     """
     mode = (mode or SYNTHESIS_MODE).lower()
     if mode not in ("map_reduce", "single"):
@@ -323,7 +336,7 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
         return None
 
     t0 = time.perf_counter()
-    selected = gate_documents(query, ranked) if DOC_GATE else ranked
+    selected = gate_documents(query, ranked, model=model, backend=backend) if DOC_GATE else ranked
     selected = dedupe_shortlist(selected)
     keys = assign_keys(selected)
     t_gate = time.perf_counter() - t0
@@ -347,7 +360,7 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
             t1 = time.perf_counter()
             if hits:
                 try:
-                    text, relevant = paper_notes(query, key, title, hits)
+                    text, relevant = paper_notes(query, key, title, hits, model=model, backend=backend)
                 except Exception as e:
                     logger.warning("Notes failed for %s (%s) — using its summary.", key, e)
                     text, relevant, hits = r.get("summary", ""), True, []
@@ -379,7 +392,7 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
         material = "\n\n".join(blocks)
 
     t0 = time.perf_counter()
-    answer = synthesise(query, material, len(selected))
+    answer = synthesise(query, material, len(selected), model=model, backend=backend)
     t_reduce = time.perf_counter() - t0
     emit("synthesis", {"seconds": round(t_reduce, 1)})
 

@@ -211,10 +211,6 @@ def _render_sidebar_backend_controls():
     st.session_state["selected_model"] = final_model
     st.session_state["selected_backend"] = final_backend
 
-    # Propagate to global config runtime settings across all tabs
-    config.LLM_MODEL = final_model
-    config.LLM_BACKEND = final_backend
-
     if "chat_agent" in st.session_state and st.session_state["chat_agent"] is not None:
         agent = st.session_state["chat_agent"]
         if getattr(agent, "model", None) != final_model or getattr(agent, "backend", None) != final_backend:
@@ -222,5 +218,10 @@ def _render_sidebar_backend_controls():
 
     b_badge = "🦙 Ollama Local" if final_backend == "ollama" else "✨ Cloud API"
     st.caption(f"**Backend:** {b_badge}")
+    st.caption(
+        "Applies to chat, synthesis and the planner. "
+        f"Citation verdicts use {config.JUDGEMENT_MODEL or config.LLM_MODEL}; "
+        f"paper summaries use {config.SUMMARY_MODEL or config.LLM_MODEL}."
+    )
     st.caption(f"**Embeddings** — `{config.EMBED_MODEL}` · {config.EMBED_BACKEND}")
 

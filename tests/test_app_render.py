@@ -305,6 +305,20 @@ def _render_build_script(final, origin):
     _render_build(final, "q", origin=origin)
 
 
+def _run_app_test(at):
+    """Run an AppTest, then restore ``sys.modules["__main__"]``.
+
+    Streamlit's script runner swaps it for the script and never swaps it back.
+    multiprocessing's spawn children re-run __main__, so a stale one kills every
+    later spawn test in the same process."""
+    main = sys.modules["__main__"]
+    try:
+        at.run()
+    finally:
+        sys.modules["__main__"] = main
+    return at
+
+
 class TestUngroundedLabel(unittest.TestCase):
     """An answer from general knowledge (no seed paper) carries `ungrounded`. The label
     and the missing export buttons must follow that flag, not the run-level `stopped`
@@ -314,15 +328,7 @@ class TestUngroundedLabel(unittest.TestCase):
 
     def _render(self, final, origin="idea"):
         from streamlit.testing.v1 import AppTest
-        at = AppTest.from_function(_render_build_script, args=(final, origin))
-        # Streamlit's script runner swaps sys.modules["__main__"] for the script and never
-        # swaps it back. multiprocessing's spawn children re-run __main__, so a stale one
-        # kills every later spawn test in the same process.
-        main = sys.modules["__main__"]
-        try:
-            at.run()
-        finally:
-            sys.modules["__main__"] = main
+        at = _run_app_test(AppTest.from_function(_render_build_script, args=(final, origin)))
         self.assertEqual([e.value for e in at.exception], [])
         return at
 
@@ -351,3 +357,56 @@ class TestUngroundedLabel(unittest.TestCase):
         at = self._render({"answer": {"suggestion": "x", "citations": [], "passages": []}})
         self.assertEqual(self._labels(at), [])
         self.assertEqual(len(at.get("download_button")), 2)
+
+
+def _sidebar_script():
+    from research_assistant.ui.common import _render_sidebar_backend_controls
+    _render_sidebar_backend_controls()
+
+
+class TestSidebarModelIsPerSession(unittest.TestCase):
+    """The sidebar picker used to assign config.LLM_MODEL / LLM_BACKEND: a process-wide
+    write that leaked into other browser sessions and into jobs already running."""
+
+    def test_sidebar_choice_does_not_touch_global_config(self):
+        from unittest.mock import patch
+        from streamlit.testing.v1 import AppTest
+        from research_assistant import config
+        before = (config.LLM_MODEL, config.LLM_BACKEND)
+        at = AppTest.from_function(_sidebar_script)
+        at.session_state["chat_model"] = "llama3.2:latest"
+        with patch("research_assistant.shared.llm.list_ollama_models", return_value=["llama3.2:latest"]):
+            _run_app_test(at)
+        self.assertEqual([e.value for e in at.exception], [])
+        self.assertEqual((config.LLM_MODEL, config.LLM_BACKEND), before)
+        # The choice itself still lives in the session.
+        self.assertEqual(at.session_state["llm_model"], "llama3.2:latest")
+        self.assertEqual(at.session_state["llm_backend"], "ollama")
+
+    def test_sidebar_says_which_calls_the_model_governs(self):
+        from unittest.mock import patch
+        from streamlit.testing.v1 import AppTest
+        at = AppTest.from_function(_sidebar_script)
+        with patch("research_assistant.shared.llm.list_ollama_models", return_value=[]):
+            _run_app_test(at)
+        self.assertTrue(any("Applies to chat, synthesis and the planner." in c.value for c in at.caption))
+
+
+class TestJobCarriesTheSessionModel(unittest.TestCase):
+    def test_start_pipeline_job_puts_the_session_model_in_the_inputs(self):
+        import streamlit as st
+        from unittest.mock import patch
+        from research_assistant.shared import run_jobs
+
+        job_id = run_jobs.job_id_for("model_inputs_doc.pdf")
+        run_jobs.remove_job(job_id)
+        self.addCleanup(run_jobs.remove_job, job_id)
+        st.session_state["llm_model"] = "m"
+        st.session_state["llm_backend"] = "ollama"
+        self.addCleanup(st.session_state.pop, "llm_model", None)
+        self.addCleanup(st.session_state.pop, "llm_backend", None)
+        with patch("research_assistant.ui.jobs._execute_pipeline", return_value={"status": "success"}) as run:
+            ui_jobs._start_pipeline_job(query="", seed_file_path="/tmp/model_inputs_doc.pdf", origin="audit")
+            run_jobs.get_job(job_id).thread.join(timeout=5.0)
+        inputs = run.call_args.args[0]
+        self.assertEqual((inputs["model"], inputs["backend"]), ("m", "ollama"))

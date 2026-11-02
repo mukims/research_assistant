@@ -70,6 +70,44 @@ class TestGateDocuments(unittest.TestCase):
         self.assertEqual(chat.call_count, 3)
 
 
+class TestSynthesisModel(unittest.TestCase):
+    """The sidebar's model is a per-run choice: it must reach every synthesis call
+    as an argument, because shared/llm.py binds LLM_MODEL once at import."""
+
+    def test_synthesis_uses_the_requested_model(self):
+        with patch.object(rt, "chat", return_value=_reply("text")) as chat:
+            rt.synthesise("q", "material", 2, model="m", backend="openai")
+            rt.paper_notes("q", "P1", "Paper 1", [{"text": "t", "page": 1}], model="m", backend="openai")
+        self.assertEqual(chat.call_count, 2)
+        for call in chat.call_args_list:
+            self.assertEqual(call.kwargs["model"], "m")
+            self.assertEqual(call.kwargs["backend"], "openai")
+
+    def test_the_gate_uses_the_requested_model(self):
+        for batched, reply in ((True, _reply("1: YES\n2: NO")), (False, _reply("YES"))):
+            with self.subTest(batched=batched), patch.object(rt, "GATE_BATCHED", batched), \
+                 patch.object(rt, "chat", return_value=reply) as chat:
+                rt.gate_documents("q", _ranked(2), model="m", backend="ollama")
+            self.assertTrue(chat.call_args_list)
+            for call in chat.call_args_list:
+                self.assertEqual((call.kwargs["model"], call.kwargs["backend"]), ("m", "ollama"))
+
+    def test_a_misaligned_batch_reply_still_gates_per_summary_on_the_requested_model(self):
+        replies = iter([_reply("1: YES\n1: YES"), _reply("YES"), _reply("NO")])
+        with patch.object(rt, "GATE_BATCHED", True), \
+             patch.object(rt, "chat", side_effect=lambda *a, **k: next(replies)) as chat:
+            rt.gate_documents("q", _ranked(2), model="m", backend="ollama")
+        self.assertEqual(chat.call_count, 3)
+        for call in chat.call_args_list:
+            self.assertEqual((call.kwargs["model"], call.kwargs["backend"]), ("m", "ollama"))
+
+    def test_the_default_is_no_override(self):
+        with patch.object(rt, "chat", return_value=_reply("text")) as chat:
+            rt.synthesise("q", "material", 2)
+        self.assertIsNone(chat.call_args.kwargs["model"])
+        self.assertIsNone(chat.call_args.kwargs["backend"])
+
+
 class TestShortlist(unittest.TestCase):
     def test_dedupe_by_title_keeps_the_higher_score(self):
         ranked = [{"document": "arxiv_1.pdf", "citation": "Conductance Quantization in Ribbons", "summary": "a", "score": 0.7},
@@ -137,9 +175,10 @@ class ResearchAnswerTestCase(unittest.TestCase):
         p = patch.object(rt, "hybrid_search", side_effect=fake_search); p.start(); self.addCleanup(p.stop)
         self.calls = []
 
-        def fake_chat(messages, model=None, images=None, temperature=None, options=None):
+        def fake_chat(messages, model=None, images=None, temperature=None, options=None, backend=None):
             content = messages[-1]["content"]
-            self.calls.append({"content": content, "temperature": temperature, "options": options})
+            self.calls.append({"content": content, "temperature": temperature, "options": options,
+                               "model": model, "backend": backend})
             if "Paper P2" in content and "Write notes" in content:
                 return _reply("Not relevant: it is about something else.")
             if "Write notes" in content:
@@ -199,6 +238,18 @@ class TestMapReduce(ResearchAnswerTestCase):
         self.assertEqual(out["notes"][0]["notes"], "summary 1")
         self.assertTrue(out["notes"][0]["relevant"])
         self.assertEqual(out["notes"][0]["passages_used"], 0)
+
+
+class TestResearchAnswerModel(ResearchAnswerTestCase):
+    def test_every_call_of_a_run_uses_the_requested_model(self):
+        # Map-reduce notes run in a thread pool; the model is passed as an argument, not a context.
+        rt.research_answer("idea", mode="map_reduce", model="m", backend="ollama")
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual({(c["model"], c["backend"]) for c in self.calls}, {("m", "ollama")})
+
+    def test_single_mode_uses_the_requested_model(self):
+        rt.research_answer("idea", mode="single", model="m", backend="ollama")
+        self.assertEqual({(c["model"], c["backend"]) for c in self.calls}, {("m", "ollama")})
 
 
 class TestSingle(ResearchAnswerTestCase):

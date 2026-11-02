@@ -82,6 +82,11 @@ class PipelineState(_Inputs, total=False):
     discovery_trace: Optional[dict]
     context_profile: Optional[dict]
     synthesis_mode: Optional[str]
+    # The session's chat model for this run (sidebar choice). None → the
+    # configured default. Carried in state, not read from config, so a model
+    # picked in one browser session cannot change another session's run.
+    model: Optional[str]
+    backend: Optional[str]
 
 
 def _banner(title: str) -> None:
@@ -214,7 +219,9 @@ def respond(state: PipelineState) -> dict:
     with pipeline_status.track_stage("respond", "Synthesizing answer", current_step=5, total_steps=5, detail=f"Synthesizing related-work response for: {state.get('query', '')[:50]}"):
         pipeline_status.add_event("✍️ Formulating related-work synthesis…")
         synth_mode = state.get("synthesis_mode") or config.SYNTHESIS_MODE
-        result = retrieve.research_answer(state["query"], mode=synth_mode)
+        result = retrieve.research_answer(
+            state["query"], mode=synth_mode, model=state.get("model"), backend=state.get("backend"),
+        )
         pipeline_status.add_event("✅ Related-work synthesis complete")
 
         audit_result = None
@@ -249,7 +256,8 @@ def fallback(state: PipelineState) -> dict:
         pipeline_status.add_event("💭 Generating ungrounded fallback answer…")
         try:
             text = chat(
-                [{"role": "user", "content": NO_CORPUS_FALLBACK.format(query=state["query"])}]
+                [{"role": "user", "content": NO_CORPUS_FALLBACK.format(query=state["query"])}],
+                model=state.get("model"), backend=state.get("backend"),
             ).content
         except Exception as e:  # noqa: BLE001
             logger.error("Fallback answer failed: %s", e)
