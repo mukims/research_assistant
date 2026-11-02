@@ -180,6 +180,20 @@ def _resolve_job(job_id: str):
 
 def _adopt_job_result(final: dict, origin: str) -> None:
     """Put a finished run where the tabs already look for it."""
+    if origin == "draft":
+        # A draft run is neither an audit nor an idea run: it feeds the draft
+        # tab's own keys and must leave the other tabs' results alone.
+        written = final.get("written")
+        if "verification" in final:
+            st.session_state[f"verification:{written}"] = final["verification"]
+            # After a refresh the cited draft itself is not in the session yet.
+            st.session_state.setdefault("batch_result", written)
+        else:
+            # None is a result too: the citation-need check could not be aligned.
+            st.session_state["batch_result"] = written
+        st.session_state.pop("active_job", None)
+        st.session_state.pop("active_job_origin", None)
+        return
     label = final.get("query") or final.get("seed_label") or os.path.basename(final.get("seed_path") or "") or ""
     if origin == "idea":
         st.session_state["idea_result"] = final
@@ -206,6 +220,14 @@ def _render_job_progress(job_id: str):
         return
     with st.container(border=True):
         st.markdown(f"#### ⏳ Running: `{job.label}`")
+        if job.origin == "draft":
+            # Not a pipeline run: pipeline_status has no steps for it, and its
+            # progress bar would show another run's stage.
+            st.caption(
+                "This runs on the server, one model call per sentence or citation, so a long draft "
+                "takes a while. You can refresh this page or come back later — the result will be here."
+            )
+            return
         st.caption(
             "This run continues on the server. You can refresh this page, open it in another tab, "
             "or come back later — the URL keeps the job id, and the report will be here when it finishes."
@@ -340,6 +362,26 @@ def _render_interrupted_run_prompt(
                 st.rerun(scope="app")
 
 
+def _draft_result_adopted(final: dict) -> bool:
+    """Has this session already taken a finished draft job's result? A refresh
+    or a second browser has not; a later rerun of the same session has, and
+    must not overwrite what the reader has done since."""
+    if "verification" in final:
+        return f"verification:{final.get('written')}" in st.session_state
+    return "batch_result" in st.session_state
+
+
+def _draft_job_kind(job_id: str) -> Optional[str]:
+    """"cite" or "verify", from the job's metadata (registry, then disk)."""
+    from research_assistant.shared import run_jobs
+
+    job = run_jobs.get_job(job_id)
+    if job is not None:
+        return job.metadata.get("kind")
+    record = run_jobs.load_run(job_id)
+    return (record.get("metadata") or {}).get("kind") if record else None
+
+
 def _handle_job_state(origin: str) -> bool:
     """Show a running job, adopt a finished one, explain a failed one.
 
@@ -357,6 +399,10 @@ def _handle_job_state(origin: str) -> bool:
         _render_job_progress(job_id)
         return True
     if state == "done":
+        if origin == "draft":
+            if st.session_state.get("active_job") == job_id or not _draft_result_adopted(final or {}):
+                _adopt_job_result(final or {}, "draft")
+            return False
         already = st.session_state.get("idea_result" if origin == "idea" else "audit_result")
         if not already or st.session_state.get("active_job") == job_id:
             _adopt_job_result(final or {}, job_origin or origin)
@@ -365,6 +411,13 @@ def _handle_job_state(origin: str) -> bool:
             return True
         return False
     if state in ("failed", "cancelled"):
+        if origin == "draft" and state == "failed":
+            # One accurate error, not a traceback plus an unrelated message.
+            st.session_state.pop("active_job", None)
+            st.session_state.pop("active_job_origin", None)
+            what = "Verification" if _draft_job_kind(job_id) == "verify" else "Citing"
+            st.error(f"{what} failed: {error}", icon="❌")
+            return False
         if origin == "audit":
             _render_interrupted_run_prompt(origin=origin, state=state, error=error, job_id=job_id, final=final)
             return True

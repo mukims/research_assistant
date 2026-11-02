@@ -2,55 +2,134 @@
 
 import json
 import os
+from typing import Literal
 
 import streamlit as st
 
 from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
+from research_assistant.shared.draft_input import DraftInputError, read_draft
 from research_assistant.ui.common import _get_resources_mtime, get_cached_search_resources
+from research_assistant.ui.jobs import _handle_job_state
+
+
+def _run_cite(draft_path: str, out_path: str, search_resources) -> dict:
+    """Job runner: cite the draft. Runs in a job thread (see shared/run_jobs.py),
+    so it must never touch Streamlit; the session resolves *search_resources*
+    first because the cache that holds them is a Streamlit one."""
+    from research_assistant.agents import agent5_batch_citer
+
+    written = agent5_batch_citer.run_batch_citer(draft_path, out_path, search_resources=search_resources)
+    return {"written": written}
+
+
+def _run_verify(written: str) -> dict:
+    """Job runner: judge every citation in a cited draft. No Streamlit (job thread).
+    The draft's path rides along so a session that was not there when the run
+    started can file the result under the right draft."""
+    return {"verification": verify_draft(written), "written": written}
+
+
+def _start_draft_job(kind: Literal["cite", "verify"], text_or_path: str) -> str | None:
+    """Start citing a draft (*text_or_path* is its text) or verifying a cited
+    one (*text_or_path* is the cited draft's path) as a server-side job and
+    remember it in the URL, so a refresh finds the run again.
+
+    Returns the job id, or None when it could not start (the reason is shown).
+    """
+    import tempfile
+
+    from research_assistant.shared import pipeline_status, run_jobs
+
+    draft_path = None
+    if kind == "cite":
+        try:
+            cached_res = get_cached_search_resources(_get_resources_mtime())
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Citing failed: {exc}", icon="❌")
+            return None
+        os.makedirs(config.DRAFTS_DIR, exist_ok=True)
+        # A fresh path per run: verification results are filed under it, so a
+        # re-cited draft never shows an older draft's verification.
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".txt", dir=config.DRAFTS_DIR, delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write(text_or_path)
+            draft_path = fh.name
+        out_path = draft_path.replace(".txt", "_cited.txt")
+        job_id = run_jobs.job_id_for(f"draft-cite:{draft_path}")
+        label = "Citing the draft"
+
+        def runner():
+            return _run_cite(draft_path, out_path, cached_res)
+    else:
+        job_id = run_jobs.job_id_for(f"draft-verify:{text_or_path}")
+        label = "Verifying citations"
+
+        def runner():
+            return _run_verify(text_or_path)
+
+    metadata = {"kind": kind, "label": label, "draft_path": draft_path or text_or_path}
+    pipeline_status.clear_cancel_request(job_id=job_id)
+    try:
+        run_jobs.start_job(job_id, label, runner, origin="draft", metadata=metadata)
+    except run_jobs.JobBusy as busy:
+        if draft_path:
+            try:
+                os.unlink(draft_path)
+            except OSError:
+                pass
+        st.warning(
+            f"A run is already active on the server ({busy.job.label}). "
+            "Wait for it to finish, or stop it from the sidebar, then submit again.",
+            icon="⏳",
+        )
+        return None
+    if kind == "cite":
+        # The previous draft's result must not sit under this run's outcome.
+        st.session_state.pop("batch_result", None)
+    st.query_params["job"] = job_id
+    st.session_state["active_job"] = job_id
+    st.session_state["active_job_origin"] = "draft"
+    return job_id
+
 
 def render_draft_tab(chunks):
     """Tab: cite and verify a whole draft. `chunks` is the corpus size shown in the sidebar."""
     st.subheader("✍️ Cite a Research Draft")
     st.caption(
-        "Upload a plain-text draft (.txt) or paste it below. Every sentence that makes a factual claim "
+        "Upload a plain-text draft (.txt or .md) or paste it below. Every sentence that makes a factual claim "
         "is checked against your indexed corpus, cited where a source supports it, and verified for accuracy."
     )
     if chunks == 0:
         st.info("No corpus yet — build one in **Citation auditor** or **Research idea** first.", icon="📭")
 
-    uploaded = st.file_uploader("Draft (.txt)", type=["txt"], key="batch_upload")
+    # A running or just-finished citing/verification job (this session's, or one
+    # found in the URL after a refresh) is shown here instead of the form.
+    if _handle_job_state("draft"):
+        return
+
+    uploaded = st.file_uploader("Draft (.txt, .md)", type=["txt", "md"], key="batch_upload")
     pasted = st.text_area("…or paste it here", height=200, key="batch_paste")
     run_batch = st.button("Cite the draft", type="primary", disabled=chunks == 0)
 
-    if run_batch and (uploaded or pasted.strip()):
-        import tempfile
-
-        from research_assistant.agents import agent5_batch_citer
-
-        os.makedirs(config.DRAFTS_DIR, exist_ok=True)
-        text = uploaded.read().decode("utf-8") if uploaded else pasted
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".txt", dir=config.DRAFTS_DIR, delete=False, encoding="utf-8"
-        ) as fh:
-            fh.write(text)
-            draft_path = fh.name
-        out_path = draft_path.replace(".txt", "_cited.txt")
-
-        with st.spinner("Checking each sentence and retrieving sources…"):
-            try:
-                cached_res = get_cached_search_resources(_get_resources_mtime())
-                written = agent5_batch_citer.run_batch_citer(
-                    draft_path, out_path, search_resources=cached_res
-                )
-            except Exception as e:  # noqa: BLE001
-                st.exception(e)
-                written = None
-        st.session_state["batch_result"] = written
+    if run_batch:
+        try:
+            if uploaded:
+                text = read_draft(uploaded.name, uploaded.read())
+            else:
+                text = read_draft("pasted.txt", pasted.encode("utf-8"))
+        except DraftInputError as exc:
+            st.error(str(exc), icon="⚠️")
+        else:
+            if _start_draft_job("cite", text):
+                st.rerun()
 
     written = st.session_state.get("batch_result")
-    if written is None and st.session_state.get("batch_result", "unset") != "unset":
-        # run_batch_citer returns None only when it aborted before writing.
+    if written is None and "batch_result" in st.session_state:
+        # Only a job that finished and wrote nothing lands here: run_batch_citer
+        # returns None when it aborted before writing. A job that failed is
+        # reported by _handle_job_state and never sets batch_result.
         st.error(
             "The citation-need check could not be aligned to the draft's "
             "sentences, so nothing was written. Try again, or shorten the draft "
@@ -85,18 +164,8 @@ def render_draft_tab(chunks):
             "it cites — one model call per citation, so a long draft is not free."
         )
         if st.button("Verify citations", key="verify_citations"):
-            with st.status("Judging each citation…", expanded=True) as status:
-                try:
-                    verification = verify_draft(written)
-                except FileNotFoundError as exc:
-                    status.update(label="Verification failed", state="error")
-                    st.error(str(exc))
-                except Exception as exc:
-                    status.update(label="Verification failed", state="error")
-                    st.error(f"Verification failed: {exc}")
-                else:
-                    status.update(label="Verification complete", state="complete")
-                    st.session_state[f"verification:{written}"] = verification
+            if _start_draft_job("verify", written):
+                st.rerun()
 
         # Named `verification`, not `report`: a few lines above, `report` is
         # already bound to the text of agent 5's _report.md in this same block.

@@ -319,6 +319,217 @@ def _run_app_test(at):
     return at
 
 
+def _adopt_draft_script(final):
+    """AppTest script: adopt a finished draft job, then report what landed in session state."""
+    import streamlit as st
+    from research_assistant.ui.jobs import _adopt_job_result
+    st.session_state["active_job"] = "j1"
+    st.session_state["active_job_origin"] = "draft"
+    _adopt_job_result(final, "draft")
+
+
+class TestAdoptDraftResult(unittest.TestCase):
+    def _adopt(self, final):
+        from streamlit.testing.v1 import AppTest
+        at = _run_app_test(AppTest.from_function(_adopt_draft_script, args=(final,)))
+        self.assertEqual([e.value for e in at.exception], [])
+        return at
+
+    def test_adopt_draft_result(self):
+        at = self._adopt({"written": "/x_cited.txt"})
+        self.assertEqual(at.session_state["batch_result"], "/x_cited.txt")
+        # A draft run is not an audit or an idea run.
+        for key in ("audit_result", "audit_query", "build_result", "build_query", "idea_result", "idea_query"):
+            self.assertNotIn(key, at.session_state)
+        self.assertNotIn("active_job", at.session_state)
+        self.assertNotIn("active_job_origin", at.session_state)
+
+    def test_adopting_a_run_that_wrote_nothing_keeps_the_none(self):
+        at = self._adopt({"written": None})
+        self.assertIn("batch_result", at.session_state)
+        self.assertIsNone(at.session_state["batch_result"])
+
+    def test_adopt_verification_result_is_keyed_by_the_draft(self):
+        verification = {"totals": {"total": 1, "judged": 1}}
+        at = self._adopt({"verification": verification, "written": "/x_cited.txt"})
+        self.assertEqual(at.session_state["verification:/x_cited.txt"], verification)
+
+
+class TestDraftJobs(unittest.TestCase):
+    """The draft tab's citing and verification are server-side jobs, with one error per failure."""
+
+    KEYS = ("active_job", "active_job_origin", "batch_result", "idea_result", "audit_result")
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        import streamlit as st
+        import research_assistant.shared.seed_audit as sa
+        from research_assistant import config
+        from research_assistant.shared import run_jobs
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        for target, attr in ((sa, "AUDIT_DIR"), (config, "DRAFTS_DIR")):
+            p = patch.object(target, attr, self.tmp.name); p.start(); self.addCleanup(p.stop)
+        run_jobs._reset_registry_for_tests()
+        self.run_jobs = run_jobs
+        self.st = st
+        self.addCleanup(self._clear_state)
+        self._clear_state()
+
+    def _clear_state(self):
+        for key in list(self.st.session_state.keys()):
+            if key in self.KEYS or key.startswith("verification:"):
+                del self.st.session_state[key]
+        self.st.query_params.clear()
+
+    def _wait(self, job_id):
+        import time
+        job = self.run_jobs.get_job(job_id)
+        deadline = time.time() + 5
+        while job.state == "running" and time.time() < deadline:
+            time.sleep(0.01)
+        return job
+
+    def test_cite_job_runs_the_citer_and_returns_the_written_path(self):
+        from unittest.mock import patch
+        from research_assistant.ui import draft_tab
+        resources = ("coll", "bm25", ["t"], [{}])
+        with patch.object(draft_tab, "get_cached_search_resources", return_value=resources), \
+             patch("research_assistant.agents.agent5_batch_citer.run_batch_citer", side_effect=lambda path, out, search_resources=None: out) as citer:
+            job_id = draft_tab._start_draft_job("cite", "A claim. Another claim.")
+            self.assertIsNotNone(job_id)
+            job = self._wait(job_id)
+        self.assertEqual(job.state, "done")
+        self.assertEqual(job.origin, "draft")
+        path, out = citer.call_args[0]
+        self.assertTrue(out.endswith("_cited.txt"))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "A claim. Another claim.")
+        # The job thread got the resources the session resolved; it never resolves them itself.
+        self.assertEqual(citer.call_args[1]["search_resources"], resources)
+        self.assertEqual(job.result, {"written": out})
+        self.assertEqual(self.st.session_state["active_job"], job_id)
+        self.assertEqual(self.st.session_state["active_job_origin"], "draft")
+        self.assertEqual(self.st.query_params["job"], job_id)
+
+    def test_verify_job_returns_the_verification_for_that_draft(self):
+        from unittest.mock import patch
+        from research_assistant.ui import draft_tab
+        verification = {"totals": {"total": 2, "judged": 2}}
+        with patch.object(draft_tab, "verify_draft", return_value=verification) as verify:
+            job_id = draft_tab._start_draft_job("verify", "/d/x_cited.txt")
+            job = self._wait(job_id)
+        verify.assert_called_once_with("/d/x_cited.txt")
+        self.assertEqual(job.result["verification"], verification)
+        self.assertEqual(job.result["written"], "/d/x_cited.txt")
+
+    def test_a_second_run_while_one_is_active_warns_and_starts_nothing(self):
+        import threading
+        from unittest.mock import patch
+        from research_assistant.ui import draft_tab
+        gate = threading.Event()
+        self.run_jobs.start_job("busy", "Other run", lambda: (gate.wait(5), {})[1], origin="audit")
+        self.addCleanup(gate.set)
+        with patch.object(draft_tab.st, "warning") as warn:
+            self.assertIsNone(draft_tab._start_draft_job("verify", "/d/x_cited.txt"))
+        warn.assert_called_once()
+        self.assertNotIn("active_job", self.st.session_state)
+
+    def test_failed_citing_job_shows_one_error_and_no_traceback(self):
+        from unittest.mock import patch
+        from research_assistant.ui import draft_tab
+        with patch.object(draft_tab, "get_cached_search_resources", return_value=None), \
+             patch("research_assistant.agents.agent5_batch_citer.run_batch_citer", side_effect=RuntimeError("model down")):
+            job_id = draft_tab._start_draft_job("cite", "A claim.")
+            self.assertEqual(self._wait(job_id).state, "failed")
+        with patch.object(ui_jobs.st, "error") as err, \
+             patch.object(ui_jobs.st, "exception") as exc, \
+             patch.object(ui_jobs.st, "warning") as warn:
+            self.assertFalse(ui_jobs._handle_job_state("draft"))
+        err.assert_called_once()
+        self.assertTrue(err.call_args[0][0].startswith("Citing failed: "))
+        self.assertIn("model down", err.call_args[0][0])
+        exc.assert_not_called()
+        warn.assert_not_called()
+        self.assertNotIn("active_job", self.st.session_state)
+
+    def test_failed_verification_job_says_verification_failed(self):
+        from unittest.mock import patch
+        from research_assistant.ui import draft_tab
+        with patch.object(draft_tab, "verify_draft", side_effect=FileNotFoundError("No citation mapping")):
+            job_id = draft_tab._start_draft_job("verify", "/d/x_cited.txt")
+            self._wait(job_id)
+        with patch.object(ui_jobs.st, "error") as err:
+            ui_jobs._handle_job_state("draft")
+        err.assert_called_once()
+        self.assertTrue(err.call_args[0][0].startswith("Verification failed: "))
+
+    def test_alignment_message_only_when_the_job_succeeded_without_writing(self):
+        from streamlit.testing.v1 import AppTest
+        def script():
+            import streamlit as st
+            from research_assistant.ui.draft_tab import render_draft_tab
+            if "seeded" not in st.session_state:
+                st.session_state["seeded"] = True
+                st.session_state["batch_result"] = None
+            render_draft_tab(5)
+        at = _run_app_test(AppTest.from_function(script))
+        self.assertEqual([e.value for e in at.exception], [])
+        self.assertEqual(len(at.error), 1)
+        self.assertIn("could not be aligned", at.error[0].value)
+
+    def test_no_message_at_all_before_any_run(self):
+        from streamlit.testing.v1 import AppTest
+        def script():
+            from research_assistant.ui.draft_tab import render_draft_tab
+            render_draft_tab(5)
+        at = _run_app_test(AppTest.from_function(script))
+        self.assertEqual([e.value for e in at.exception], [])
+        self.assertEqual(len(at.error), 0)
+
+    def test_the_draft_tab_ignores_other_tabs_jobs_and_they_ignore_its(self):
+        from unittest.mock import patch
+        self.st.session_state["active_job"] = "j"
+        with patch("research_assistant.ui.jobs._resolve_job", return_value=("running", None, None, "audit")), \
+             patch.object(ui_jobs, "_render_job_progress") as progress:
+            self.assertFalse(ui_jobs._handle_job_state("draft"))
+        progress.assert_not_called()
+        for other in ("audit", "idea"):
+            with patch("research_assistant.ui.jobs._resolve_job", return_value=("done", {"written": "/x"}, None, "draft")), \
+                 patch.object(ui_jobs, "_adopt_job_result") as adopt:
+                self.assertFalse(ui_jobs._handle_job_state(other))
+            adopt.assert_not_called()
+
+    def test_a_finished_draft_job_is_adopted_once_per_session(self):
+        from unittest.mock import patch
+        self.st.session_state["active_job"] = "j"
+        with patch("research_assistant.ui.jobs._resolve_job", return_value=("done", {"written": "/x_cited.txt"}, None, "draft")):
+            self.assertFalse(ui_jobs._handle_job_state("draft"))
+            self.assertEqual(self.st.session_state["batch_result"], "/x_cited.txt")
+            self.assertNotIn("active_job", self.st.session_state)
+            # A later rerun finds the job id in the URL; it must not clobber what the user has since.
+            self.st.session_state["batch_result"] = "/y_cited.txt"
+            self.st.query_params["job"] = "j"
+            ui_jobs._handle_job_state("draft")
+        self.assertEqual(self.st.session_state["batch_result"], "/y_cited.txt")
+
+    def test_a_refreshed_session_adopts_a_finished_verification_and_its_draft(self):
+        from unittest.mock import patch
+        self.st.query_params["job"] = "j"
+        final = {"verification": {"totals": {"total": 1, "judged": 1}}, "written": "/x_cited.txt"}
+        with patch("research_assistant.ui.jobs._resolve_job", return_value=("done", final, None, "draft")):
+            ui_jobs._handle_job_state("draft")
+        self.assertEqual(self.st.session_state["verification:/x_cited.txt"], final["verification"])
+        self.assertEqual(self.st.session_state["batch_result"], "/x_cited.txt")
+
+    def test_draft_runners_never_call_streamlit(self):
+        """They run in a job thread with no ScriptRunContext."""
+        import inspect, re
+        from research_assistant.ui import draft_tab
+        for fn in (draft_tab._run_cite, draft_tab._run_verify):
+            self.assertIsNone(re.search(r"\bst\.", inspect.getsource(fn)), fn.__name__)
+
+
 class TestUngroundedLabel(unittest.TestCase):
     """An answer from general knowledge (no seed paper) carries `ungrounded`. The label
     and the missing export buttons must follow that flag, not the run-level `stopped`
