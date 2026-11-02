@@ -55,7 +55,8 @@ _DROPPED_ENVIRONMENT = re.compile(
 )
 # The title may hold one level of braces (\section{On \emph{x}}); rule 6 unwraps them afterwards.
 _SECTION = re.compile(r"\\(?:sub){0,2}section\*?\{((?:[^{}]|\{[^{}]*\})*)\}")
-_EMPHASIS = re.compile(r"\\(?:emph|textbf|textit)\{([^{}]*)\}")
+# One level of nested braces is allowed (\emph{the {BERT} model}); the inner braces are kept.
+_EMPHASIS = re.compile(r"\\(?:emph|textbf|textit)\{((?:[^{}]|\{[^{}]*\})*)\}")
 # Any \command with no brace after it. `\cite`, `\citep` and `\citet` are excluded by name, so
 # they survive with or without an optional argument (\citep[p. 3]{k}); the (?![A-Za-z*{]) tail
 # stops the regex backtracking into half a command name (`\noinden` + `t`) or a starred one.
@@ -70,7 +71,8 @@ def tex_to_text(source: str) -> str:
     rules are applied in this order:
 
     1. keep only the text between \\begin{document} and \\end{document} (when both exist);
-    2. drop % comments, keeping \\% as a literal %;
+    2. drop % comments, keeping \\% as a literal %. Comments are removed before the
+       body is cut out, so a commented \\begin{document} or \\end{document} is ignored;
     3. drop equation, align, gather, multline, figure, table and tabular environments
        (starred forms too);
     4. turn \\section, \\subsection and \\subsubsection into their title followed by a
@@ -80,10 +82,13 @@ def tex_to_text(source: str) -> str:
     7. drop any other \\command that has no braces;
     8. collapse runs of spaces.
     """
-    body = _DOCUMENT_BODY.search(source)
-    text = body.group(1) if body else source
-    text = _COMMENT_LINE.sub("", text)
+    # Comments go first (rule 2 before rule 1): a commented-out "% \\begin{document}" in the
+    # preamble, or "% \\end{document}" after the real one, must not be taken as the body's edge.
+    text = _COMMENT_LINE.sub("", source)
     text = _PERCENT_OR_COMMENT.sub(lambda m: m.group(1) or ("%" if m.group(0) == "\\%" else ""), text)
+    body = _DOCUMENT_BODY.search(text)
+    if body:
+        text = body.group(1)
     text = _DROPPED_ENVIRONMENT.sub("", text)
     # Blank line on both sides, so the title is a paragraph of its own; extra blanks collapse in rule 8.
     text = _SECTION.sub(lambda m: "\n\n" + m.group(1) + "\n\n", text)

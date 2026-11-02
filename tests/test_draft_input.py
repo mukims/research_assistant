@@ -61,6 +61,23 @@ class TestTexToText(unittest.TestCase):
         )
         self.assertEqual(tex_to_text(src), "Body text.")
 
+    def test_commented_begin_document_is_ignored(self):
+        src = (
+            "\\documentclass{article}\n% \\begin{document}\n\\usepackage{x}\n"
+            "\\begin{document}\nBody.\n\\end{document}"
+        )
+        self.assertEqual(tex_to_text(src), "Body.")
+
+    def test_commented_end_document_is_ignored(self):
+        src = "\\begin{document}\nBody.\n\\end{document}\n% \\end{document}\nAppendix junk."
+        self.assertEqual(tex_to_text(src), "Body.")
+
+    def test_emphasis_with_brace_protected_capitals_is_unwrapped(self):
+        self.assertEqual(
+            tex_to_text("We use \\emph{the {BERT} model} and \\textbf{{GPT} output}."),
+            "We use the {BERT} model and {GPT} output.",
+        )
+
     def test_kept_cites_survive_dropping_a_braceless_command(self):
         # Rule 7 must not eat \citep/\cite/\citet, with or without an optional argument.
         src = "\\noindent Water boils \\citep{w} and \\citet[p.~3]{x} and \\cite{y}."
