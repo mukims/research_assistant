@@ -733,7 +733,7 @@ Auditing a paper's full bibliography from scratch takes 10–15 minutes on CPU V
   4. Real-time in-memory policy refresh: re-evaluates `assess_source` and `evaluate_reliability` across all claims (< 50ms) to ensure badges, source grades, and totals reflect current policy logic.
   5. Atomically writes the updated report to `{stem}_audit.json` and `{stem}_audit.md`.
   6. Total turnaround is **2 to 12 seconds** (well under the 60-second limit).
-- **UI Integration**: In Tab 1 (`app.py`), single-paper uploads bypass the 5-stage ingestion pipeline when a cache entry exists, instantly displaying the verified audit report with an audit badge (`⚡ Loaded from Persistent Audit Cache in Xs`). Users can still opt for a full scratch rebuild by checking "Force re-run".
+- **UI Integration**: In the **Citation auditor** tab, single-paper uploads bypass the 5-stage ingestion pipeline when a cache entry exists, instantly displaying the verified audit report with an audit badge (`⚡ Loaded from Persistent Audit Cache in Xs`). Users can still opt for a full scratch rebuild by checking "Force re-run".
 
 ---
 
@@ -882,31 +882,28 @@ extra one is inert.
 
 ## 12. Streamlit Application UI Architecture
 
-The interactive user interface is structured into eight distinct, specialized workspaces. `app.py` only lays out the page (sidebar, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` (and `research_assistant/tasks/ui.py` for the planner), while the pieces they share are the other modules in `research_assistant/ui/`:
+The interactive user interface has seven top-level tabs, in the order `research_assistant/ui/layout.py` gives them (`MAIN_TABS`): the auditor leads because it is the mature product, and the two experimental workspaces sit one level down under **Labs** (`LAB_TABS`). `app.py` only lays out the page (sidebar, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` (and `research_assistant/tasks/ui.py` for the planner), while the pieces they share are the other modules in `research_assistant/ui/`:
 
-1. **🧩 Tab 0: Agent Task Planner (`tab_planner`)**:
-   - Deconstructs papers into replication DAGs for autonomous AI agents across six canonical phases.
-   - Interactive pan/zoom Mermaid flowcharts, expandable task cards, Antigravity agent specs, and single-click wave execution with reflection scorecards.
-2. **⚖️ Tab 1: Citation Auditor (`tab_audit`)**:
+1. **⚖️ Citation auditor (`tab_audit`)**:
    - The primary research verification tool. Accepts an uploaded seed PDF or searches the literature via arXiv.
    - Extracts every in-text citation with GROBID, downloads referenced literature, and computes both factual claim–evidence verdicts and scientific reliability grades.
    - Features top-level Scientific Evidence Reliability metrics (Supports, Partially, Contradicts, Does Not Support, Pending Evidence) and deep per-citation inspection cards with verbatim evidence highlights, missing paywall upload cards, and collection-wide synthesis.
-3. **💡 Tab 2: Research Idea (`tab_idea`)**:
-   - Exploratory idea discovery engine (Agent 0 & Agent 4). Users type high-level research questions, hypotheses, or topics.
-   - Automatically crawls and indexes related literature, synthesizing state-of-the-art overviews and identifying unexplored research gaps.
-4. **🔄 Tab 3: Technique Transfer (`tab_transfer`)**:
-   - Cross-disciplinary method translation engine. Bridges methodologies across scientific disciplines.
-   - Accepts a target physical bottleneck, explores technique cards, maps analogies with identifiability proofs, runs an adversarial critic debate, queries arXiv/OpenAlex for prior art, and renders structured reports and derivation trees.
-5. **✍️ Tab 4: Cite a Draft (`tab_draft`)**:
+2. **✍️ Cite a draft (`tab_draft`)**:
    - Authoring assistant (Agent 5). Accepts draft paragraphs or LaTeX manuscript sections.
    - Discovers where citations are needed across the text and injects precision citations matched against the indexed corpus, followed by Agent 8 claim-evidence verification.
-6. **💬 Tab 5: Research Chat (`tab_chat`)**:
+3. **💡 Research idea (`tab_idea`)**:
+   - Exploratory idea discovery engine (Agent 0 & Agent 4). Users type high-level research questions, hypotheses, or topics.
+   - Automatically crawls and indexes related literature, synthesizing state-of-the-art overviews and identifying unexplored research gaps.
+4. **💬 Research chat (`tab_chat`)**:
    - Multi-turn conversational brainstorming partner (Agent 7).
    - Features query condensation (resolving pronouns and implicit references into standalone queries), multi-lens perspective selectors (Methodology, Contradictions, Hypotheses, Gaps, Explore), and persistent evidence scratchpad.
-7. **📚 Tab 6: Corpus Library (`tab_corpus`)**:
+5. **📚 Corpus library (`tab_corpus`)**:
    - Direct batch ingestion and corpus management bypassing web discovery.
    - Multi-file / ZIP upload, local folder scanning, DOI/arXiv batch resolving, dual-tier OCR (EasyOCR / Vision LLM) for scanned papers, and interactive corpus inspector.
-8. **📖 Tab 7: How to Use (`tab_help`)**:
+6. **🧪 Labs (`tab_labs`)**: two experimental workspaces, as sub-tabs:
+   - **🧩 Agent task planner (experimental)**: deconstructs papers into replication DAGs for autonomous AI agents across six canonical phases, with interactive pan/zoom Mermaid flowcharts, expandable task cards, Antigravity agent specs, and single-click wave execution with reflection scorecards.
+   - **🔄 Technique transfer (experimental)**: cross-disciplinary method translation. Accepts a target physical bottleneck, explores technique cards, maps analogies with identifiability proofs, runs an adversarial critic debate, queries arXiv/OpenAlex for prior art, and renders structured reports and derivation trees.
+7. **📖 How to use (`tab_help`)**:
    - Comprehensive interactive documentation (`HOW_TO_USE.md`) rendering workflows, troubleshooting guides, and system architecture directly within the interface.
 
 ---

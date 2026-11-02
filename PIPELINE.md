@@ -102,7 +102,7 @@ research_assistant/                the checkout root
 ├── .gitignore  .env.example
 ├── model_final.pth                v1 layout checkpoint, no longer read (gitignored; safe to delete)
 │
-├── app.py                         Streamlit page layout: sidebar, eight tabs (also the container entry point)
+├── app.py                         Streamlit page layout: sidebar, seven tabs (Labs holds two more; also the container entry point)
 ├── orchestrate.py                 LangGraph — one research idea, end to end
 ├── orchestrate_tasks.py           CLI for the Agent task planner (plan / show / run)
 ├── watch.py                       watchdog daemon — directory-driven
@@ -421,7 +421,7 @@ While Pipeline 1 builds literature corpora and answers research questions, **Pip
 | **Reflexion Runner & Dispatcher** | `research_assistant.tasks.runner` | Orchestrates topological wave execution, manages artifact routing between parent/child tasks, writes pre-execution `rationale.md` files (AUTOMAT protocol), executes Two-Cycle Reflexion against test harnesses with structured error diagnostics, and compiles `execution_scorecard.md`. |
 | **Workspace Manager** | `research_assistant.tasks.workspace` | Creates and manages dedicated paper root directories (`workspace_runs/<paper_id>/`), strictly protected from persistent data directories. Materializes the complete Markdown bundle (`plan.md`, `dag.md`, `scorecard.md`, `paper_summary.md`, `rationale.md`, `rationales/*.md`, `README.md`, `plan.json`, `antigravity_specs.json`). |
 | **Graph Visualizer & Exporter** | `research_assistant.tasks.graph` | Color-coded Mermaid DAG flowcharts, comprehensive executive Markdown execution plans, Google Antigravity subagent invocation payloads, and atomic JSON persistence. |
-| **Streamlit Interface** | `research_assistant.tasks.ui` | Tab 0 in `app.py`: interactive paper selection, upload staging, instant DAG synthesis, live pan/zoom Mermaid flowcharts, expandable task cards, and single-click wave execution. |
+| **Streamlit Interface** | `research_assistant.tasks.ui` | The **Agent task planner (experimental)** tab under Labs in `app.py`: interactive paper selection, upload staging, instant DAG synthesis, live pan/zoom Mermaid flowcharts, expandable task cards, and single-click wave execution. |
 | **CLI Orchestrator** | `orchestrate_tasks.py` | Command-line interface for planning (`plan`), running (`run`), and previewing (`show`) task graphs with automatic workspace materialization. |
 
 ### Two-Level Hierarchical Critic & Quantitative Rubric Scorecard
