@@ -24,6 +24,7 @@ def _openai_chunk(text):
 class TestChatStreamOllama(unittest.TestCase):
     def test_yields_content_deltas_in_order(self):
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter(
             [_ollama_chunk("Hel"), _ollama_chunk("lo"), _ollama_chunk("!")]
         )
@@ -36,6 +37,7 @@ class TestChatStreamOllama(unittest.TestCase):
 
     def test_empty_deltas_are_skipped(self):
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter(
             [_ollama_chunk(""), _ollama_chunk("x"), _ollama_chunk(None)]
         )
@@ -48,6 +50,7 @@ class TestChatStreamOllama(unittest.TestCase):
     def test_options_are_forwarded(self):
         """CHAT_OLLAMA_OPTIONS carries flash-attention / KV-cache tuning."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter([_ollama_chunk("x")])
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -58,6 +61,7 @@ class TestChatStreamOllama(unittest.TestCase):
     def test_default_options_num_ctx_when_omitted(self):
         """chat_stream() defaults options to num_ctx=4096 when omitted."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter([_ollama_chunk("x")])
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -143,12 +147,14 @@ class TestChatResultModel(unittest.TestCase):
         reply = _ollama_reply("ok")
         reply.model = "gemma4:e2b"
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = reply
         with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
             self.assertEqual(llm.chat([{"role": "user", "content": "hi"}]).model, "gemma4:e2b")
 
     def test_ollama_dict_response_carries_the_model(self):
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = {"model": "gemma4:e2b", "message": {"content": "ok"}}
         with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
             result = llm.chat([{"role": "user", "content": "hi"}])
@@ -180,6 +186,7 @@ class TestChatTemperatureOpenAI(unittest.TestCase):
 class TestChatTemperatureOllama(unittest.TestCase):
     def _run(self, **kwargs):
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = _ollama_reply("ok")
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -201,6 +208,7 @@ class TestChatTemperatureOllama(unittest.TestCase):
         """A module-level config constant must not grow a temperature key."""
         opts = {"num_ctx": 8192}
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = _ollama_reply("ok")
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -251,6 +259,7 @@ class TestNomicPrefixes(unittest.TestCase):
 class TestChatStreamTemperature(unittest.TestCase):
     def test_ollama_gets_temperature_in_a_copied_options_dict(self):
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter([_ollama_chunk("x")])
         opts = {"num_ctx": 4096}
         with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -261,6 +270,7 @@ class TestChatStreamTemperature(unittest.TestCase):
 
     def test_ollama_without_temperature_sends_options_as_is(self):
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter([_ollama_chunk("x")])
         with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
             list(llm.chat_stream([{"role": "user", "content": "q"}], options={"num_ctx": 8192}))
@@ -273,6 +283,50 @@ class TestChatStreamTemperature(unittest.TestCase):
         with patch.dict("sys.modules", {"openai": fake_openai}), patch.object(llm, "LLM_BACKEND", "openai"):
             list(llm.chat_stream([{"role": "user", "content": "q"}], temperature=0.3))
         self.assertEqual(client.chat.completions.create.call_args.kwargs["temperature"], 0.3)
+
+
+class TestOllamaTimeout(unittest.TestCase):
+    """A stuck local model must not hang a pipeline job forever (only one job
+    runs at a time, so a hang blocks everything): every Ollama call goes
+    through a Client that carries CITATION_OLLAMA_TIMEOUT."""
+
+    def test_ollama_calls_carry_a_timeout(self):
+        fake = MagicMock()
+        fake.Client.return_value.chat.return_value = _ollama_reply("ok")
+        with patch.dict("sys.modules", {"ollama": fake}):
+            llm.chat([{"role": "user", "content": "hi"}], backend="ollama")
+        fake.Client.assert_called_once_with(host=llm._ollama_host(), timeout=600)
+        fake.Client.return_value.chat.assert_called_once()
+
+    def test_streaming_carries_the_timeout_too(self):
+        fake = MagicMock()
+        fake.Client.return_value.chat.return_value = iter([_ollama_chunk("x")])
+        with patch.dict("sys.modules", {"ollama": fake}), patch.object(llm, "LLM_BACKEND", "ollama"):
+            list(llm.chat_stream([{"role": "user", "content": "hi"}]))
+        fake.Client.assert_called_once_with(host=llm._ollama_host(), timeout=600)
+
+    def test_model_listing_carries_the_timeout_too(self):
+        fake = MagicMock()
+        fake.Client.return_value.list.return_value = {"models": [{"name": "gemma4:e2b"}]}
+        with patch.dict("sys.modules", {"ollama": fake}):
+            self.assertEqual(llm.list_ollama_models(), ["gemma4:e2b"])
+        fake.Client.assert_called_once_with(host=llm._ollama_host(), timeout=600)
+
+    def test_one_client_is_reused_across_calls(self):
+        fake = MagicMock()
+        fake.Client.return_value.chat.return_value = _ollama_reply("ok")
+        with patch.dict("sys.modules", {"ollama": fake}):
+            llm.chat([{"role": "user", "content": "a"}], backend="ollama")
+            llm.chat([{"role": "user", "content": "b"}], backend="ollama")
+        fake.Client.assert_called_once()
+
+    def test_timeout_follows_the_configured_value(self):
+        fake = MagicMock()
+        fake.Client.return_value.chat.return_value = _ollama_reply("ok")
+        with patch.dict("sys.modules", {"ollama": fake}), \
+             patch.object(llm, "OLLAMA_REQUEST_TIMEOUT", 42):
+            llm.chat([{"role": "user", "content": "hi"}], backend="ollama")
+        fake.Client.assert_called_once_with(host=llm._ollama_host(), timeout=42)
 
 
 if __name__ == "__main__":

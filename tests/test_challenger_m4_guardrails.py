@@ -41,6 +41,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     def test_chat_clamps_num_thread_16_to_1(self):
         """chat() with options={'num_thread': 16} must clamp num_thread down to 1."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = _ollama_reply()
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -57,6 +58,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     def test_ollama_chat_clamps_num_thread_16_to_1(self):
         """_ollama_chat() directly called with options={'num_thread': 16} must clamp to 1."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = _ollama_reply()
         with patch.dict("sys.modules", {"ollama": fake}):
             llm._ollama_chat(
@@ -73,7 +75,9 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     def test_chat_clamps_adversarial_thread_counts(self):
         """Excessive thread counts (4, 32, 64) must all clamp to 1, while safe bounds (1, 2) stay untouched."""
         for excessive in [4, 32, 64]:
+            llm._CLIENT_CACHE.clear()  # a fresh fake per pass, so no cached client from the last
             fake = MagicMock()
+            fake.Client.return_value = fake
             fake.chat.return_value = _ollama_reply()
             with patch.dict("sys.modules", {"ollama": fake}), \
                  patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -85,7 +89,9 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
             )
 
         for safe in [1, 2]:
+            llm._CLIENT_CACHE.clear()  # a fresh fake per pass, so no cached client from the last
             fake = MagicMock()
+            fake.Client.return_value = fake
             fake.chat.return_value = _ollama_reply()
             with patch.dict("sys.modules", {"ollama": fake}), \
                  patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -99,6 +105,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     def test_chat_stream_clamps_num_thread_16_to_1(self):
         """chat_stream() with options={'num_thread': 16} must also clamp to 1."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = iter([_ollama_chunk("chunk")])
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -113,6 +120,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     def test_default_options_num_ctx_4096_when_calling_chat(self):
         """Calling chat() without explicit options must default options to num_ctx=4096."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = _ollama_reply()
         with patch.dict("sys.modules", {"ollama": fake}), \
              patch.object(llm, "LLM_BACKEND", "ollama"):
@@ -133,6 +141,7 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     def test_default_options_num_ctx_4096_when_calling_ollama_chat(self):
         """Calling _ollama_chat() directly without options must also default options to num_ctx=4096."""
         fake = MagicMock()
+        fake.Client.return_value = fake
         fake.chat.return_value = _ollama_reply()
         with patch.dict("sys.modules", {"ollama": fake}):
             llm._ollama_chat(

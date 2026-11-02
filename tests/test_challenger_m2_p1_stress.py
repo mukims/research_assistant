@@ -533,7 +533,7 @@ class TestLLMSchemaAndPrivacyValidation(unittest.TestCase):
         with patch.object(llm, "LLM_BACKEND", "ollama"), \
              patch.object(llm, "GEMINI_API_KEY", "sensitive-gemini-cloud-key"), \
              patch.object(llm, "OPENAI_API_KEY", "sensitive-openai-cloud-key"), \
-             patch("ollama.chat", side_effect=RuntimeError("Ollama daemon unreachable")), \
+             patch("ollama.Client", **{"return_value.chat.side_effect": RuntimeError("Ollama daemon unreachable")}), \
              patch.object(llm, "_openai_chat") as mock_openai_chat:
 
             # 1. Explicit backend="ollama"
@@ -559,7 +559,7 @@ class TestLLMSchemaAndPrivacyValidation(unittest.TestCase):
         with patch.object(llm, "LLM_BACKEND", "ollama"), \
              patch.object(llm, "GEMINI_API_KEY", "sensitive-gemini-cloud-key"), \
              patch.object(llm, "_openai_stream") as mock_openai_stream, \
-             patch("ollama.chat", side_effect=RuntimeError("Ollama stream broken")):
+             patch("ollama.Client", **{"return_value.chat.side_effect": RuntimeError("Ollama stream broken")}):
 
             with self.assertRaises(RuntimeError):
                 stream_gen = llm.chat_stream([{"role": "user", "content": "Stream test"}], backend="ollama")
@@ -672,7 +672,8 @@ class TestLLMSchemaAndPrivacyValidation(unittest.TestCase):
             judgement: str = Field(description="Supports, Contradicts, etc.")
             confidence: str = Field(description="Low, Medium, High")
 
-        with patch("ollama.chat") as mock_ollama_chat:
+        with patch("ollama.Client") as mock_client:
+            mock_ollama_chat = mock_client.return_value.chat
             mock_ollama_chat.return_value = MagicMock(message=MagicMock(content='{"judgement": "Supports"}'))
 
             res = llm._ollama_chat(

@@ -31,6 +31,7 @@ from research_assistant.config import (
     GEMINI_API_KEY,
     HF_TOKEN,
     INDEX_VERSION,
+    OLLAMA_REQUEST_TIMEOUT,
 )
 from research_assistant.shared.log import get_logger
 
@@ -77,12 +78,24 @@ def _get_openai_client(base_url: str, api_key: str, timeout: float = 60.0):
     return client
 
 
+def _ollama_client():
+    """The shared ``ollama.Client``, carrying the request timeout. The module-level
+    ``ollama.chat`` has none, so a stuck model would hang the caller forever."""
+    host = _ollama_host()
+    cache_key = ("ollama", host, OLLAMA_REQUEST_TIMEOUT)
+    client = _CLIENT_CACHE.get(cache_key)
+    if client is None:
+        import ollama
+
+        client = ollama.Client(host=host, timeout=OLLAMA_REQUEST_TIMEOUT)
+        _CLIENT_CACHE[cache_key] = client
+    return client
+
+
 def list_ollama_models() -> list[str]:
     """Return names of locally pulled Ollama models (excluding pure embedding models)."""
     try:
-        import ollama
-
-        res = ollama.list()
+        res = _ollama_client().list()
         raw = res.get("models", []) if isinstance(res, dict) else getattr(res, "models", [])
         names = []
         for m in raw:
@@ -163,8 +176,6 @@ def _ollama_chat(
     response_format=None,
     schema=None,
 ) -> ChatResult:
-    import ollama
-
     if images:
         messages = list(messages)
         messages[-1] = {**messages[-1], "images": list(images)}
@@ -193,7 +204,7 @@ def _ollama_chat(
         elif response_format == "json":
             kwargs["format"] = "json"
 
-    resp = ollama.chat(**kwargs)
+    resp = _ollama_client().chat(**kwargs)
     try:
         content = resp.message.content
     except AttributeError:
@@ -324,8 +335,6 @@ def chat_stream(messages, model=None, options=None, temperature=None, backend=No
 
 
 def _ollama_stream(messages, model, options=None, temperature=None):
-    import ollama
-
     opts = dict(options) if options is not None else {}
     opts.setdefault("num_ctx", 4096)
     if opts.get("num_thread", 0) > 2:
@@ -335,7 +344,7 @@ def _ollama_stream(messages, model, options=None, temperature=None):
         opts["temperature"] = temperature
 
     kwargs = {"model": model, "messages": messages, "stream": True, "options": opts}
-    for chunk in ollama.chat(**kwargs):
+    for chunk in _ollama_client().chat(**kwargs):
         try:
             content = chunk.message.content
         except AttributeError:

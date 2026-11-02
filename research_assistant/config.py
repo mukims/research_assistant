@@ -104,6 +104,12 @@ LLM_BACKEND     = LLM_BACKEND.lower()
 # 25k chunks in ChromaDB work without re-indexing.
 LLM_REQUEST_TIMEOUT = _env_int("LLM_REQUEST_TIMEOUT", 60)
 
+# Seconds an Ollama request may take before the client gives up. Without one a
+# wedged local model hangs a pipeline job forever, and since only one job runs
+# at a time that blocks every other. Generous by default: a cold load of a big
+# model plus a long judgement prompt on CPU legitimately takes minutes.
+OLLAMA_REQUEST_TIMEOUT = _env_int("CITATION_OLLAMA_TIMEOUT", 600)
+
 if (LLM_BACKEND == "openai" or GEMINI_API_KEY) and GEMINI_API_KEY:
     _default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
     _default_llm_model = "gemini-3.5-flash-lite"

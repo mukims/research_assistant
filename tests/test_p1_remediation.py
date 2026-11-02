@@ -332,7 +332,7 @@ class TestArea7LLMHardening(unittest.TestCase):
     def test_ollama_does_not_fallback_to_openai(self):
         """An error in Ollama chat must raise without falling back to OpenAI."""
         with patch.object(llm, "LLM_BACKEND", "ollama"), \
-             patch("ollama.chat", side_effect=RuntimeError("Ollama failed")):
+             patch("ollama.Client", **{"return_value.chat.side_effect": RuntimeError("Ollama failed")}):
             with self.assertRaises(RuntimeError) as ctx:
                 llm.chat([{"role": "user", "content": "hi"}], backend="ollama")
             self.assertIn("Ollama failed", str(ctx.exception))
