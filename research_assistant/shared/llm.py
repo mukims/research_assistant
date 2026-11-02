@@ -37,11 +37,33 @@ from research_assistant.shared.log import get_logger
 logger = get_logger("llm")
 
 
+from typing import Any
+
+try:
+    from pydantic import BaseModel
+except ImportError:
+    BaseModel = None
+
+
 @dataclass
 class ChatResult:
     content: str
     prompt_tokens: object = "N/A"
     completion_tokens: object = "N/A"
+
+
+_CLIENT_CACHE: dict[tuple, Any] = {}
+
+
+def _get_openai_client(base_url: str, api_key: str, timeout: float = 60.0):
+    cache_key = (base_url, api_key, timeout)
+    client = _CLIENT_CACHE.get(cache_key)
+    if client is None:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        _CLIENT_CACHE[cache_key] = client
+    return client
 
 
 def list_ollama_models() -> list[str]:
@@ -69,7 +91,16 @@ def list_ollama_models() -> list[str]:
 # ─── Chat ────────────────────────────────────────────────────────────────────
 
 
-def chat(messages, model=None, images=None, temperature=None, options=None, backend=None) -> ChatResult:
+def chat(
+    messages,
+    model=None,
+    images=None,
+    temperature=None,
+    options=None,
+    backend=None,
+    response_format=None,
+    schema=None,
+) -> ChatResult:
     """Run a chat completion.
 
     Args:
@@ -83,6 +114,8 @@ def chat(messages, model=None, images=None, temperature=None, options=None, back
                   The openai backend has no equivalent and ignores it.
         backend:  explicit backend ("ollama" or "openai"). None falls back
                   to config.LLM_BACKEND.
+        response_format: optional format dict, e.g. {"type": "json_object"}
+        schema:   optional Pydantic model or JSON schema dict for structured output.
     """
     if backend:
         eff_backend = backend.lower()
@@ -90,7 +123,7 @@ def chat(messages, model=None, images=None, temperature=None, options=None, back
         m_lower = model.lower()
         if m_lower.startswith(("gemini", "gpt-", "o1", "o3", "text-embedding")):
             eff_backend = "openai"
-        elif ":" in m_lower or m_lower in ("gemma", "llama", "mistral", "qwen", "deepseek", "phi"):
+        elif ":" in m_lower or m_lower.startswith(("gemma", "llama", "mistral", "qwen", "deepseek", "phi")):
             eff_backend = "ollama"
         else:
             eff_backend = LLM_BACKEND.lower()
@@ -104,19 +137,21 @@ def chat(messages, model=None, images=None, temperature=None, options=None, back
         logger.warning("Clamping excessive num_thread %d to CPU-safe bound (1)", opts["num_thread"])
         opts["num_thread"] = 1
     if eff_backend == "openai":
-        return _openai_chat(messages, model, images, temperature)
+        return _openai_chat(messages, model, images, temperature, response_format=response_format, schema=schema)
     if eff_backend == "ollama":
-        try:
-            return _ollama_chat(messages, model, images, temperature, opts)
-        except Exception as exc:
-            if GEMINI_API_KEY:
-                logger.warning("Ollama chat failed (%s); gracefully falling back to Gemini (%s)", exc, LLM_MODEL)
-                return _openai_chat(messages, LLM_MODEL, images, temperature)
-            raise
+        return _ollama_chat(messages, model, images, temperature, opts, response_format=response_format, schema=schema)
     raise ValueError(f"Unknown LLM_BACKEND {eff_backend!r} (expected 'ollama' or 'openai')")
 
 
-def _ollama_chat(messages, model, images, temperature=None, options=None) -> ChatResult:
+def _ollama_chat(
+    messages,
+    model,
+    images,
+    temperature=None,
+    options=None,
+    response_format=None,
+    schema=None,
+) -> ChatResult:
     import ollama
 
     if images:
@@ -132,7 +167,20 @@ def _ollama_chat(messages, model, images, temperature=None, options=None) -> Cha
     if temperature is not None:
         opts["temperature"] = temperature
 
-    kwargs = {"model": model, "messages": messages, "stream": False, "options": opts}
+    kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": False, "options": opts}
+    if schema is not None:
+        if BaseModel is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
+            kwargs["format"] = schema.model_json_schema() if hasattr(schema, "model_json_schema") else schema.schema()
+        else:
+            kwargs["format"] = schema
+    elif response_format is not None:
+        if isinstance(response_format, dict):
+            if response_format.get("type") == "json_schema" and "json_schema" in response_format:
+                kwargs["format"] = response_format["json_schema"].get("schema", "json")
+            else:
+                kwargs["format"] = "json"
+        elif response_format == "json":
+            kwargs["format"] = "json"
 
     resp = ollama.chat(**kwargs)
     try:
@@ -155,8 +203,15 @@ def _b64_data_url(path):
         return f"data:{mime};base64,{base64.b64encode(fh.read()).decode()}"
 
 
-def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
-    from openai import OpenAI
+def _openai_chat(
+    messages,
+    model,
+    images,
+    temperature=None,
+    response_format=None,
+    schema=None,
+) -> ChatResult:
+    from research_assistant import config
 
     base_url = OPENAI_BASE_URL
     api_key = OPENAI_API_KEY
@@ -164,7 +219,8 @@ def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
         base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
         api_key = GEMINI_API_KEY
 
-    client = OpenAI(base_url=base_url, api_key=api_key)
+    timeout_val = float(getattr(config, "LLM_REQUEST_TIMEOUT", 60.0))
+    client = _get_openai_client(base_url=base_url, api_key=api_key, timeout=timeout_val)
 
     if images:
         messages = list(messages)
@@ -175,9 +231,27 @@ def _openai_chat(messages, model, images, temperature=None) -> ChatResult:
         ]
         messages[-1] = {**last, "content": parts}
 
-    kwargs = {"model": model, "messages": messages, "stream": False}
+    kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": False, "timeout": timeout_val}
     if temperature is not None:
         kwargs["temperature"] = temperature
+
+    if schema is not None:
+        if BaseModel is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
+            schema_name = getattr(schema, "__name__", "StructuredResponse")
+            schema_dict = schema.model_json_schema() if hasattr(schema, "model_json_schema") else schema.schema()
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": schema_dict},
+            }
+        elif isinstance(schema, dict):
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "StructuredResponse", "schema": schema},
+            }
+        else:
+            kwargs["response_format"] = {"type": "json_object"}
+    elif response_format is not None:
+        kwargs["response_format"] = response_format
 
     resp = client.chat.completions.create(**kwargs)
     usage = getattr(resp, "usage", None)
@@ -208,7 +282,19 @@ def chat_stream(messages, model=None, options=None, temperature=None, backend=No
     Deliberately not a generator itself, so an unknown backend raises at the
     call rather than on the first ``next()``.
     """
-    eff_backend = (backend or LLM_BACKEND).lower()
+    if backend:
+        eff_backend = backend.lower()
+    elif model:
+        m_lower = model.lower()
+        if m_lower.startswith(("gemini", "gpt-", "o1", "o3", "text-embedding")):
+            eff_backend = "openai"
+        elif ":" in m_lower or m_lower.startswith(("gemma", "llama", "mistral", "qwen", "deepseek", "phi")):
+            eff_backend = "ollama"
+        else:
+            eff_backend = LLM_BACKEND.lower()
+    else:
+        eff_backend = LLM_BACKEND.lower()
+
     model = model or CHAT_MODEL
     opts = dict(options) if options is not None else {}
     opts.setdefault("num_ctx", 4096)
@@ -246,7 +332,7 @@ def _ollama_stream(messages, model, options=None, temperature=None):
 
 
 def _openai_stream(messages, model, temperature=None):
-    from openai import OpenAI
+    from research_assistant import config
 
     base_url = OPENAI_BASE_URL
     api_key = OPENAI_API_KEY
@@ -254,8 +340,9 @@ def _openai_stream(messages, model, temperature=None):
         base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
         api_key = GEMINI_API_KEY
 
-    client = OpenAI(base_url=base_url, api_key=api_key)
-    kwargs = {"model": model, "messages": messages, "stream": True}
+    timeout_val = float(getattr(config, "LLM_REQUEST_TIMEOUT", 60.0))
+    client = _get_openai_client(base_url=base_url, api_key=api_key, timeout=timeout_val)
+    kwargs = {"model": model, "messages": messages, "stream": True, "timeout": timeout_val}
     if temperature is not None:
         kwargs["temperature"] = temperature
     stream = client.chat.completions.create(**kwargs)
@@ -294,10 +381,11 @@ class _OpenAIEmbeddings:
     """OpenAI-compatible /embeddings endpoint as a LangChain Embeddings."""
 
     def __init__(self, model):
-        from openai import OpenAI
+        from research_assistant import config
 
         self._model = model
-        self._client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
+        timeout_val = float(getattr(config, "LLM_REQUEST_TIMEOUT", 60.0))
+        self._client = _get_openai_client(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY, timeout=timeout_val)
 
     def embed_documents(self, texts):
         resp = self._client.embeddings.create(model=self._model, input=list(texts))
@@ -363,7 +451,9 @@ class _GemmaEmbeddings:
             json={"model": self._model, "input": inputs, "truncate": True},
             timeout=600,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            error_msg = resp.text.strip()
+            raise RuntimeError(f"Ollama /api/embed error {resp.status_code}: {error_msg}")
         return resp.json()
 
     def embed_documents(self, texts):

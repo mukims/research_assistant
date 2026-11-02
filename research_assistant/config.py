@@ -81,17 +81,19 @@ LLM_BACKEND     = LLM_BACKEND.lower()
 # When Gemini is used, default to the official Google OpenAI-compatible endpoint
 # and gemini-3.5-flash-lite, but keep EMBED_BACKEND="ollama" by default so existing
 # 25k chunks in ChromaDB work without re-indexing.
+LLM_REQUEST_TIMEOUT = _env_int("LLM_REQUEST_TIMEOUT", 60)
+
 if (LLM_BACKEND == "openai" or GEMINI_API_KEY) and GEMINI_API_KEY:
     _default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
     _default_llm_model = "gemini-3.5-flash-lite"
     _default_embed_backend = "ollama"
-    if os.environ.get("CITATION_LLM_MODEL") in (None, "", "gemma4:e2b"):
+    if os.environ.get("CITATION_LLM_MODEL") in (None, "", "gemma4:e2b", "gemma4:e2b-mlx"):
         os.environ["CITATION_LLM_MODEL"] = _default_llm_model
-    if os.environ.get("CITATION_CHAT_MODEL") in (None, "", "gemma4:e2b"):
+    if os.environ.get("CITATION_CHAT_MODEL") in (None, "", "gemma4:e2b", "gemma4:e2b-mlx"):
         os.environ["CITATION_CHAT_MODEL"] = _default_llm_model
 else:
     _default_base_url = "https://router.huggingface.co/v1"
-    _default_llm_model = "gemma4:e2b"
+    _default_llm_model = "gemma4:e2b-mlx"
     _default_embed_backend = LLM_BACKEND
 
 EMBED_BACKEND   = os.environ.get("CITATION_EMBED_BACKEND", _default_embed_backend).lower()
@@ -107,7 +109,7 @@ HF_TOKEN        = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
 LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", _default_llm_model)
 CHAT_MODEL      = os.environ.get("CITATION_CHAT_MODEL", _default_llm_model)
 OLLAMA_CHAT_MODELS = (
-    "gemma4:e2b",
+    "gemma4:e2b-mlx",
     "llama3.2:latest",
     "mistral:latest",
     "qwen2.5:latest",
@@ -225,6 +227,8 @@ EXCLUDED_FROM_EVIDENCE   = frozenset({"figure_image", "figure_description"})
 # Per-document summary written to SUMMARY_COLLECTION_NAME at ingest time — the
 # stage-1 "is this paper even relevant" index. One model call per paper.
 SUMMARY_MODEL            = os.environ.get("CITATION_SUMMARY_MODEL", "") or None  # None → LLM_MODEL
+SUMMARY_FALLBACK_MODEL   = os.environ.get("CITATION_SUMMARY_FALLBACK_MODEL", "gemma4:e2b-mlx")
+SUMMARY_FALLBACK_BACKEND = os.environ.get("CITATION_SUMMARY_FALLBACK_BACKEND", "ollama")
 SUMMARY_MAX_CHARS        = _env_int("CITATION_SUMMARY_MAX_CHARS", 8000)
 
 # ─── Agent 5 — Batch Citer ───────────────────────────────────────────────────
@@ -240,15 +244,15 @@ JUDGEMENT_MODEL       = os.environ.get("CITATION_JUDGEMENT_MODEL") or _default_j
 # The judgement prompt is a rubric, not a generation task, and its regression
 # cases assert exact verdicts — sampling makes both meaningless.
 JUDGEMENT_TEMPERATURE = 0.0
-# Chunks judged per cited source. 1 = judge the single best-matching chunk.
-JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 1)
+# Chunks judged per cited source. 3 = judge top 3 matching chunks.
+JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 3)
 # Evidence escalation. The top JUDGEMENT_TOP_K hit(s), each with
 # JUDGEMENT_NEIGHBOUR_WINDOW adjacent chunks, are judged first. If that
 # verdict reports it did not see enough (sufficiency != sufficient, or
 # Unclear / Does not support), the top JUDGEMENT_ESCALATE_TOP_K hits are
 # judged once more. 0 disables the second look. The assembled evidence is
 # capped so prompt (~5.4k tokens) + evidence stays inside num_ctx below.
-JUDGEMENT_ESCALATE_TOP_K     = _env_int("CITATION_JUDGEMENT_ESCALATE_TOP_K", 3)
+JUDGEMENT_ESCALATE_TOP_K     = _env_int("CITATION_JUDGEMENT_ESCALATE_TOP_K", 6)
 JUDGEMENT_NEIGHBOUR_WINDOW   = _env_int("CITATION_JUDGEMENT_NEIGHBOUR_WINDOW", 1)
 JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS", 6000)
 # The V1.6 rubric is ~5,400 tokens and a full evidence block adds ~1,500 more,
@@ -258,12 +262,23 @@ JUDGEMENT_EVIDENCE_MAX_CHARS = _env_int("CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS",
 # 12288 leaves room for the rubric, full evidence and a context block; a test
 # pins the invariant. Ignored by the openai backend.
 JUDGEMENT_OLLAMA_OPTIONS = {"num_ctx": _env_int("CITATION_JUDGEMENT_NUM_CTX", 12288)}
-# Claims judged per seed-paper audit. The cap bounds cost; it is not meant to
-# choose which citations matter, and at 20 it was doing the choosing: on
-# arxiv_2108.10114v3, 48 citations had their reference PDF in the corpus and
-# 20 were judged. 50 covers a typical paper's fetchable citations outright,
-# and prioritise_claims still orders the spend for anything larger.
-CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 50)
+# Claims judged per seed-paper audit. The cap bounds cost and runtime;
+# set to 0 (or a negative value) for unlimited claims so audits never cut off.
+# 100 covers comprehensive seed audits; prioritise_claims orders the spend.
+CITATION_AUDIT_MAX_CLAIMS = _env_int("CITATION_AUDIT_MAX_CLAIMS", 100)
+# Maximum citation claims per sentence evaluated in seed audit before cluster_skipped.
+# Set to 0 to disable per-sentence capping and audit all citations by default.
+CITATION_AUDIT_MAX_PAIRS_PER_SENTENCE = _env_int("CITATION_AUDIT_MAX_PAIRS_PER_SENTENCE", 0)
+
+# Paragraph missing references ratio threshold for deferral (e.g. 0.90 for 90%).
+# Paragraphs where > this fraction of references are missing are deferred; otherwise,
+# available citations are evaluated directly ("worked out").
+CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD = float(os.environ.get("CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD", "0.90"))
+
+# Second-pass adjudication evaluation: automatically re-evaluate citations
+# that result in "Unclear / insufficient evidence" or "Low" confidence.
+CITATION_JUDGEMENT_SECOND_PASS = _env_bool("CITATION_JUDGEMENT_SECOND_PASS", True)
+
 # The citer accepts a candidate source only if the auditor's judge would
 # accept the citation: Supports (or Partially supports, flagged) with a
 # verbatim supporting span. On since 2026-09-18: precision 18→21%, end_to_end
