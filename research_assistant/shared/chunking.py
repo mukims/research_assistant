@@ -231,7 +231,10 @@ def chunk_document(doc: Document, target: int, hard_max: int,
         emit_text(sec.paragraphs, sec.kind, sec.heading)
 
     for fig in doc.figures:
-        text = f"{fig.label}: {fig.caption}" if fig.caption else fig.label
+        caption_body = fig.caption or ""
+        if fig.kind == "table" and getattr(fig, "table_markdown", ""):
+            caption_body = f"{caption_body}\n\n{fig.table_markdown}".strip()
+        text = f"{fig.label}: {caption_body}" if caption_body else fig.label
         if not text.strip():
             continue
         chunks.append(Chunk(text, "caption", "caption", fig.label, fig.page, fig.page, len(chunks),

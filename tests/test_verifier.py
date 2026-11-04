@@ -897,3 +897,17 @@ class TestStripCitationsTidy(unittest.TestCase):
             "Graphene conducts well.",
         )
 
+    def test_citep_and_citet_strip_and_report_unmapped_explanation(self):
+        self.assertEqual(
+            strip_citations("Water boils \\citep{w} and \\citet[p.~3]{x}."),
+            "Water boils and.",
+        )
+        pairs = citation_pairs(
+            ["Water boils \\citep{w} and \\citet[p.~3]{cite_1}."],
+            {"cite_1": "Smith 2020"},
+        )
+        self.assertEqual(
+            [(p["cite_key"], p["outcome"]) for p in pairs],
+            [("cite_1", None), ("w", "orphaned")],
+        )
+

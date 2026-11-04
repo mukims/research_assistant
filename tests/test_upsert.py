@@ -17,7 +17,7 @@ import research_assistant.shared.ingestion as ing
 
 
 class FakeCollection:
-    """Just enough ChromaDB to exercise the id allocation and dedup logic."""
+    """Just enough store to exercise the id allocation and dedup logic."""
 
     def __init__(self):
         self.ids, self.documents, self.metadatas, self.vectors = [], [], [], []
@@ -33,12 +33,23 @@ class FakeCollection:
             self.documents.append(doc)
             self.metadatas.append(meta)
 
-    def get(self, include=None, limit=None, offset=0, **kw):
-        end = len(self.ids) if limit is None else offset + limit
+    def get(self, where=None, include=None, limit=None, offset=0, **kw):
+        docs, metas, ids = self.documents, self.metadatas, self.ids
+        if where and "document" in where:
+            target = where["document"]
+            if isinstance(target, dict) and "$in" in target:
+                allowed = set(target["$in"])
+            else:
+                allowed = {target}
+            filtered = [(i, d, m) for i, d, m in zip(ids, docs, metas) if m.get("document") in allowed]
+            ids = [f[0] for f in filtered]
+            docs = [f[1] for f in filtered]
+            metas = [f[2] for f in filtered]
+        end = len(ids) if limit is None else offset + limit
         return {
-            "ids": self.ids[offset:end],
-            "documents": self.documents[offset:end],
-            "metadatas": self.metadatas[offset:end],
+            "ids": ids[offset:end],
+            "documents": docs[offset:end],
+            "metadatas": metas[offset:end],
         }
 
     def chunks_for(self, document):
@@ -53,13 +64,11 @@ class UpsertTestCase(unittest.TestCase):
     def setUp(self):
         self.collection = FakeCollection()
 
-        chroma = types.ModuleType("chromadb")
-        chroma.PersistentClient = lambda path: types.SimpleNamespace(
+        self.mock_client = types.SimpleNamespace(
             get_or_create_collection=lambda name, metadata=None: self.collection,
             get_collection=lambda name: self.collection,
         )
-
-        patcher = patch.dict(sys.modules, {"chromadb": chroma})
+        patcher = patch("research_assistant.shared.ingestion.open_store", return_value=self.mock_client)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -221,19 +230,13 @@ class TestPrechunkedEntries(UpsertTestCase):
 
     def test_a_new_collection_records_its_embedder(self):
         recorded = {}
-        chroma = sys.modules["chromadb"]
-        original = chroma.PersistentClient
+        orig_goc = self.mock_client.get_or_create_collection
 
-        def client(path):
-            real = original(path)
-            inner = real.get_or_create_collection
+        def goc(name, metadata=None):
+            recorded[name] = metadata
+            return orig_goc(name, metadata)
 
-            def goc(name, metadata=None):
-                recorded[name] = metadata
-                return inner(name, metadata=metadata)
-            real.get_or_create_collection = goc
-            return real
-        with patch.object(chroma, "PersistentClient", client):
+        with patch.object(self.mock_client, "get_or_create_collection", side_effect=goc):
             ing.upsert_corpus([self._chunk("a.pdf", "body text " * 5)])
         from research_assistant.config import EMBED_MODEL
         self.assertEqual(recorded[ing.COLLECTION_NAME]["embedder"], EMBED_MODEL)

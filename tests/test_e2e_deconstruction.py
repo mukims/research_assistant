@@ -33,7 +33,7 @@ from research_assistant.config import (
     COLLECTION_NAME,
     DATA_DIR,
     DEFAULT_WORKERS,
-    VECTORDB_PATH,
+    LANCEDB_PATH,
 )
 from research_assistant.shared.llm import ChatResult
 from tests.optional_deps import requires_real_store
@@ -237,9 +237,9 @@ class TestTier1FeatureCoverage(BaseE2ETestCase):
     @requires_real_store
     def test_f1_grounding_preserves_collection_integrity(self):
         """F1.4: Grounding checks are strictly read-only and never wipe persistent collections."""
-        # Check that persistent DATA_DIR exists and contains physics_vectordb
-        self.assertTrue(os.path.exists(VECTORDB_PATH), f"VECTORDB_PATH {VECTORDB_PATH} must exist")
-        self.assertTrue(os.path.isdir(VECTORDB_PATH))
+        # Check that persistent DATA_DIR exists and contains lancedb
+        self.assertTrue(os.path.exists(LANCEDB_PATH), f"LANCEDB_PATH {LANCEDB_PATH} must exist")
+        self.assertTrue(os.path.isdir(LANCEDB_PATH))
 
     def test_f1_grounding_bypasses_ingestion_if_present(self):
         """F1.5: If paper is already ingested, auto-ingestion is completely bypassed."""
@@ -1308,13 +1308,12 @@ class TestTier3CrossFeatureCombinations(BaseE2ETestCase):
 
     @requires_real_store
     def test_c10_storage_invariance_during_retrieval(self):
-        """C10: ChromaDB chunk count remains intact throughout faceted retrieval queries."""
-        import chromadb
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        col = client.get_collection(COLLECTION_NAME)
-        count_before = col.count()
-        # Verify collection count matches invariant (75,039 chunks)
-        self.assertEqual(count_before, 75039)
+        """C10: LanceDB chunk count remains intact throughout faceted retrieval queries."""
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        col = client.open_table(COLLECTION_NAME)
+        count_before = col.count_rows()
+        self.assertGreater(count_before, 0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

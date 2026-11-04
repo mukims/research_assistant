@@ -102,6 +102,42 @@ class TestTexToText(unittest.TestCase):
     def test_comment_only_line_does_not_split_a_paragraph(self):
         self.assertEqual(tex_to_text("One\n% hidden\ntwo."), "One\ntwo.")
 
+    def test_inline_math_commands_survive_command_stripping(self):
+        src = (
+            "Near the Dirac point, $E(k) = \\hbar v_F |k|$ holds at $T \\neq 0$, "
+            "with splitting \\(\\Delta E \\approx \\pm 0.5\\)."
+        )
+        self.assertEqual(
+            tex_to_text(src),
+            "Near the Dirac point, $E(k) = \\hbar v_F |k|$ holds at $T \\neq 0$, "
+            "with splitting \\(\\Delta E \\approx \\pm 0.5\\).",
+        )
+
+    def test_display_math_brackets_and_double_dollars_removed(self):
+        src = "Before.\n\\[ E = \\hbar \\omega \\]\nMiddle.\n$$ H = T + V $$\nAfter."
+        out = tex_to_text(src)
+        self.assertNotIn("\\omega", out)
+        self.assertNotIn("H = T", out)
+        self.assertEqual(out.split(), ["Before.", "Middle.", "After."])
+
+    def test_labels_bibliography_and_footnotes_removed(self):
+        src = (
+            "\\section{Introduction}\\label{sec:intro}\n"
+            "Graphene is a semimetal\\footnote{Measured at 4 K via \\emph{four-probe}.}.\n"
+            "\\bibliographystyle{apsrev4-2}\n\\bibliography{refs}"
+        )
+        self.assertEqual(tex_to_text(src), "Introduction\n\nGraphene is a semimetal.")
+
+    def test_cross_references_texttt_and_ties_cleaned(self):
+        src = (
+            "As shown in Fig.~\\ref{fig:band} and Eq.~\\eqref{eq:1}, "
+            "prior work~\\cite{smith2020} used \\texttt{grobid}."
+        )
+        self.assertEqual(
+            tex_to_text(src),
+            "As shown in Fig. fig:band and Eq. (eq:1), prior work \\cite{smith2020} used grobid.",
+        )
+
 
 class TestReadTexDraft(unittest.TestCase):
     def test_tex_extension_is_converted(self):

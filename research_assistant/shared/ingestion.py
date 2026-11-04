@@ -41,10 +41,8 @@ warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 
 from research_assistant.config import (
     DATA_DIR,
-    VECTORDB_PATH,
     COLLECTION_NAME,
     SUMMARY_COLLECTION_NAME,
-    BM25_INDEX_PATH,
     INDEX_VERSION,
     CHUNK_MIN_LENGTH,
     EMBED_BATCH_SIZE,
@@ -119,7 +117,7 @@ def _ingest_lock():
 
 # Entries arrive already chunked from ingest_v2; these pass straight to the store.
 # "figure_image" carries a precomputed image embedding (see ingest_v2).
-PRECHUNKED_TYPES = ("text_chunk", "caption", "figure_image")
+PRECHUNKED_TYPES = ("text_chunk", "caption", "figure_image", "formula")
 
 
 def process_pdf(
@@ -542,70 +540,29 @@ def pdf_key(pdf_path: str) -> str:
 
 
 def rebuild_bm25():
-    """Rebuild the BM25 index from the entire ChromaDB collection."""
+    """Refresh the LanceDB full-text search (Tantivy FTS) index."""
     if pipeline_status.is_cancel_requested():
         logger.info("rebuild_bm25 skipped because cancellation was requested")
         return
 
-    from rank_bm25 import BM25Okapi
-
     t0 = time.perf_counter()
-    logger.info("Rebuilding BM25 index…")
+    logger.info("Refreshing LanceDB Tantivy FTS index…")
     pipeline_status.update_progress(
-        current_item_name="BM25 Index",
-        detail="Rebuilding BM25 keyword index…",
+        current_item_name="FTS Index",
+        detail="Refreshing Tantivy full-text search index…",
     )
-    pipeline_status.add_event("📚 Rebuilding BM25 index…")
+    pipeline_status.add_event("📚 Refreshing Tantivy FTS index…")
     store_client = open_store()
     collection = store_client.get_collection(name=COLLECTION_NAME)
 
-    if getattr(collection, "is_lancedb", False):
-        logger.info("LanceDB active; refreshing Tantivy FTS index…")
-        collection.create_fts_index("text")
+    if hasattr(collection, "create_fts_index"):
+        collection.create_fts_index("text", replace=True)
         pipeline_status.add_event("📚 Refreshed LanceDB Tantivy FTS index")
-        return
-    paired, limit, offset = [], 5000, 0
-    while True:
-        batch = collection.get(include=["documents", "metadatas"], limit=limit, offset=offset)
-        if not batch or not batch["ids"]:
-            break
-        for doc, meta, cid in zip(batch["documents"], batch["metadatas"] or [], batch["ids"]):
-            try:
-                idx = int(cid.split("_")[1])
-            except (ValueError, IndexError):
-                continue
-            # The paper title rides along with every chunk (citation_source),
-            # so a query that names the paper keyword-matches its chunks.
-            title = (meta or {}).get("citation_source") or ""
-            paired.append((idx, doc, title))
-        offset += limit
 
-    paired.sort(key=lambda x: x[0])
-    bm25 = BM25Okapi([tokenize(f"{title} {text}") for _, text, title in paired])
-
-    # Atomic: load_search_resources() unpickles this on every query, so a
-    # partial write is not a degraded index but an exception on the next
-    # search, recoverable only by re-ingesting. The header records which
-    # tokenizer built it so search tokenises queries the same way.
-    payload = {
-        "tokenizer": TOKENIZER_VERSION,
-        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "bm25": bm25,
-    }
-    with atomic_write(BM25_INDEX_PATH, binary=True) as f:
-        pickle.dump(payload, f)
-    # The cached (collection, bm25, texts, metadatas) in this process is now
-    # stale; the mtime key would catch it, but say so explicitly.
     from research_assistant.shared.db import clear_search_cache
     clear_search_cache()
     elapsed = time.perf_counter() - t0
-    pipeline_status.add_event(f"✅ BM25 index rebuilt ({len(paired)} chunks)")
-    pipeline_status.update_progress(
-        current_item_name="",
-        detail=f"BM25 index rebuilt ({len(paired)} chunks)",
-    )
-    logger.info("✓ BM25 index rebuilt (%d documents, tokenizer %s) in %.1fs.",
-                len(paired), TOKENIZER_VERSION, elapsed)
+    logger.info("✓ Tantivy FTS index refreshed in %.1fs.", elapsed)
 
 
 
@@ -886,9 +843,7 @@ def _ingest_pdfs_locked(
             logger.info("%sIngestion stopped early by user request.", log_prefix)
             return result
 
-        # Rebuilding is only worthwhile when the collection actually changed, but
-        # the index must also exist for search to work at all.
-        if rebuild_index and (result["inserted"] or not os.path.exists(BM25_INDEX_PATH)):
+        if rebuild_index and result["inserted"]:
             rebuild_bm25()
 
         try:

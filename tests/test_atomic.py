@@ -132,46 +132,5 @@ class TestSeedManifest(AtomicTestCase):
         self.assertEqual(agent0._load_seeds(), {"graphene": {"key": "arxiv:1"}})
 
 
-class TestBm25Rebuild(AtomicTestCase):
-    """A truncated BM25 pickle takes down every search path at once.
-
-    load_search_resources() unpickles it on every query, so a partial write is
-    not a degraded index — it is an exception on the next search, and the only
-    documented recovery is re-ingesting the corpus.
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.index = os.path.join(self.tmp.name, "bm25.pkl")
-        patcher = patch.object(ing, "BM25_INDEX_PATH", self.index)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_rebuild_leaves_the_old_index_loadable_when_it_fails(self):
-        # The stored index is only ever data this pipeline pickled itself.
-        with open(self.index, "wb") as fh:
-            pickle.dump("previous index", fh)
-
-        class Unpicklable:
-            def __reduce__(self):
-                raise RuntimeError("disk full mid-dump")
-
-        chroma = types.ModuleType("chromadb")
-        chroma.PersistentClient = lambda path: types.SimpleNamespace(
-            get_collection=lambda name: types.SimpleNamespace(
-                get=lambda **kw: {"ids": [], "documents": []}
-            )
-        )
-        bm25_mod = types.ModuleType("rank_bm25")
-        bm25_mod.BM25Okapi = lambda corpus: Unpicklable()
-
-        with patch.dict(sys.modules, {"chromadb": chroma, "rank_bm25": bm25_mod}):
-            with self.assertRaises(RuntimeError):
-                ing.rebuild_bm25()
-
-        with open(self.index, "rb") as fh:
-            self.assertEqual(pickle.load(fh), "previous index")
-
-
 if __name__ == "__main__":
     unittest.main()

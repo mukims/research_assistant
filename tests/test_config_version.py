@@ -19,7 +19,6 @@ print(json.dumps({
     "v": c.INDEX_VERSION,
     "chunks": c.COLLECTION_NAME,
     "summaries": c.SUMMARY_COLLECTION_NAME,
-    "bm25": c.BM25_INDEX_PATH.rsplit("/", 1)[-1],
     "manifest": c.INGESTED_MANIFEST_PATH.rsplit("/", 1)[-1],
     "target": c.CHUNK_TARGET_CHARS,
     "max": c.CHUNK_MAX_CHARS,
@@ -51,16 +50,7 @@ class TestIndexVersionNames(unittest.TestCase):
         self.assertEqual(got["v"], 3)
         self.assertEqual(got["chunks"], "physics_papers_v3")
         self.assertEqual(got["summaries"], "physics_summaries_v3")
-        self.assertEqual(got["bm25"], "bm25_index_v3.pkl")
         self.assertEqual(got["manifest"], "ingested_v3.json")
-
-    def test_v1_still_opens_the_unsuffixed_names(self):
-        got = _probe(CITATION_INDEX_VERSION="1")
-        self.assertEqual(got["v"], 1)
-        self.assertEqual(got["chunks"], "physics_papers")
-        self.assertEqual(got["summaries"], "physics_summaries")
-        self.assertEqual(got["bm25"], "bm25_index.pkl")
-        self.assertEqual(got["manifest"], "ingested.json")
 
     def test_default_embedder_takes_images_on_ollama_only(self):
         got = _probe()
@@ -75,7 +65,6 @@ class TestIndexVersionNames(unittest.TestCase):
         self.assertEqual(got["v"], 2)
         self.assertEqual(got["chunks"], "physics_papers_v2")
         self.assertEqual(got["summaries"], "physics_summaries_v2")
-        self.assertEqual(got["bm25"], "bm25_index_v2.pkl")
         self.assertEqual(got["manifest"], "ingested_v2.json")
 
     def test_chunk_sizes_have_spec_defaults_and_are_overridable(self):

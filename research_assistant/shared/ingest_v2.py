@@ -28,7 +28,7 @@ from research_assistant.shared.log import get_logger
 
 logger = get_logger("ingest_v2")
 
-EXTRACTION_MODES_V2 = ("grobid", "pymupdf", "ocr")
+EXTRACTION_MODES_V2 = ("docling", "grobid", "pymupdf", "ocr")
 
 
 def _pdf_key(pdf_path: str) -> str:
@@ -58,10 +58,23 @@ def process_pdf_v2(
     images_dir: str | None = None,
     enable_ocr: bool | None = None,
     ocr_engine: str | None = None,
+    extractor: str | None = None,
 ) -> list[dict]:
     images_dir = images_dir or IMAGES_DIR
     key = _pdf_key(pdf_path)
-    doc = extract(pdf_path, key=key, enable_ocr=enable_ocr, ocr_engine=ocr_engine)
+
+    doc = None
+    if extractor in ("docling", None) and os.path.isfile(pdf_path):
+        try:
+            from research_assistant.shared.docling_extract import extract_docling
+            doc = extract_docling(pdf_path, key=key, images_dir=images_dir, enable_ocr=enable_ocr)
+        except Exception as exc:
+            logger.warning("Docling extraction failed for %s (%s) — falling back to legacy extract", os.path.basename(pdf_path), exc)
+            doc = None
+
+    if doc is None:
+        doc = extract(pdf_path, key=key, enable_ocr=enable_ocr, ocr_engine=ocr_engine)
+
     title = (doc.title if doc.title and doc.title != key else None) or citation_string or key
     chunks = chunk_document(doc, CHUNK_TARGET_CHARS, CHUNK_MAX_CHARS,
                             min_chars=CHUNK_MIN_CHARS, min_alpha=CHUNK_MIN_ALPHA)
@@ -87,17 +100,28 @@ def process_pdf_v2(
                             "meta": meta})
             continue
 
+        if c.type == "formula":
+            entries.append({**base, "type": "formula", "content": c.text,
+                            "embed_text": _header(title, "Formula") + c.text,
+                            "meta": meta})
+            continue
+
         # caption chunk — always; crop — cheap, always attempted
         fig = figures.get(c.figure_id)
         image_path = ""
         if fig is not None:
-            name = crop_name(key, fig, fig_index)
-            fig_index += 1
-            try:
-                if crop_figure(pdf_path, fig, os.path.join(images_dir, name), FIGURE_CROP_DPI):
-                    image_path = name
-            except Exception as exc:                # noqa: BLE001
-                logger.warning("Crop failed for %s %s: %s", key, fig.label, exc)
+            if getattr(fig, "image_path", ""):
+                image_path = fig.image_path
+            elif getattr(doc, "extraction", "").startswith("docling"):
+                image_path = ""
+            elif fig.kind != "table" and fig.bbox is not None:
+                name = crop_name(key, fig, fig_index)
+                fig_index += 1
+                try:
+                    if crop_figure(pdf_path, fig, os.path.join(images_dir, name), FIGURE_CROP_DPI):
+                        image_path = name
+                except Exception as exc:                # noqa: BLE001
+                    logger.warning("Crop failed for %s %s: %s", key, fig.label, exc)
 
         cap_meta = {**meta, "figure_id": c.figure_id, "figure_kind": c.figure_kind,
                     "figure_label": c.figure_label, "image_path": image_path}
@@ -105,7 +129,7 @@ def process_pdf_v2(
                      "embed_text": _header(title, c.figure_label) + c.text, "meta": cap_meta}
         entries.append(cap_entry)
 
-        if EMBED_IMAGES and fig is not None and image_path:
+        if EMBED_IMAGES and fig is not None and image_path and fig.kind != "table":
             try:
                 if embedder is None:
                     from research_assistant.shared.llm import get_embeddings

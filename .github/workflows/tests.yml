@@ -41,7 +41,7 @@ jobs:
         # not package modules). C1 (a `from research_assistant import orchestrate`
         # inside app.py, where orchestrate.py is a root-level script) lived in
         # exactly that gap. langgraph and streamlit back these imports; both are
-        # in requirements-test.txt. Modules needing the ML stack (chromadb, torch,
+        # in requirements-test.txt. Modules needing the ML stack (torch, docling,
         # langchain embeddings) import it inside the functions that use it, so CI
         # deliberately does not install it.
         env:

@@ -50,6 +50,7 @@ class Figure:
     page: int
     bbox: tuple | None              # (x0, y0, x1, y1) in PDF points, or None
     refs: list = field(default_factory=list)   # body sentences that cite it
+    image_path: str = ""
     table_markdown: str = ""
 
 

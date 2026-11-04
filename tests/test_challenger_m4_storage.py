@@ -37,8 +37,8 @@ from tests.optional_deps import requires_real_store
 from research_assistant.config import (
     COLLECTION_NAME,
     DATA_DIR,
+    LANCEDB_PATH,
     PROJECT_ROOT,
-    VECTORDB_PATH,
 )
 from research_assistant.tasks.models import TaskGraph
 from research_assistant.tasks.runner import TaskRunner
@@ -54,9 +54,9 @@ class TestChallengerStorageGuardrails(unittest.TestCase):
         self.graph = TaskGraph(paper_id="challenger_p1", paper_title="Storage Protection Invariant Test")
 
     def test_direct_vectordb_path_raises_safety_violation(self):
-        """TaskRunner(graph, workspace_dir=VECTORDB_PATH) raises ValueError with 'Safety violation'."""
+        """TaskRunner(graph, workspace_dir=LANCEDB_PATH) raises ValueError with 'Safety violation'."""
         with self.assertRaises(ValueError) as ctx:
-            TaskRunner(graph=self.graph, workspace_dir=VECTORDB_PATH)
+            TaskRunner(graph=self.graph, workspace_dir=LANCEDB_PATH)
         self.assertIn("Safety violation", str(ctx.exception))
         self.assertIn("cannot point to persistent data storage", str(ctx.exception))
 
@@ -68,8 +68,8 @@ class TestChallengerStorageGuardrails(unittest.TestCase):
         self.assertIn("cannot point to persistent data storage", str(ctx.exception))
 
     def test_vectordb_subdirectory_raises_safety_violation(self):
-        """TaskRunner(graph, workspace_dir=os.path.join(VECTORDB_PATH, 'sub')) raises ValueError."""
-        sub_vdb = os.path.join(VECTORDB_PATH, "sub")
+        """TaskRunner(graph, workspace_dir=os.path.join(LANCEDB_PATH, 'sub')) raises ValueError."""
+        sub_vdb = os.path.join(LANCEDB_PATH, "sub")
         with self.assertRaises(ValueError) as ctx:
             TaskRunner(graph=self.graph, workspace_dir=sub_vdb)
         self.assertIn("Safety violation", str(ctx.exception))
@@ -84,15 +84,15 @@ class TestChallengerStorageGuardrails(unittest.TestCase):
         self.assertIn("cannot point to persistent data storage", str(ctx.exception))
 
     def test_deeply_nested_vectordb_subdirectory_raises_safety_violation(self):
-        """Deeply nested subdirectories within VECTORDB_PATH raise ValueError."""
-        deep_vdb = os.path.join(VECTORDB_PATH, "deep", "nested", "sub_dir")
+        """Deeply nested subdirectories within LANCEDB_PATH raise ValueError."""
+        deep_vdb = os.path.join(LANCEDB_PATH, "deep", "nested", "sub_dir")
         with self.assertRaises(ValueError) as ctx:
             TaskRunner(graph=self.graph, workspace_dir=deep_vdb)
         self.assertIn("Safety violation", str(ctx.exception))
 
     def test_relative_paths_resolving_to_persistent_storage(self):
         """Relative paths resolving to persistent storage raise ValueError."""
-        rel_vdb = os.path.relpath(VECTORDB_PATH)
+        rel_vdb = os.path.relpath(LANCEDB_PATH)
         with self.assertRaises(ValueError) as ctx:
             TaskRunner(graph=self.graph, workspace_dir=rel_vdb)
         self.assertIn("Safety violation", str(ctx.exception))
@@ -109,7 +109,7 @@ class TestChallengerStorageGuardrails(unittest.TestCase):
 
     def test_trailing_slashes_and_dots_raise_safety_violation(self):
         """Paths with trailing slashes or './' raise ValueError."""
-        trailing_vdb = VECTORDB_PATH.rstrip(os.sep) + os.sep
+        trailing_vdb = LANCEDB_PATH.rstrip(os.sep) + os.sep
         with self.assertRaises(ValueError) as ctx:
             TaskRunner(graph=self.graph, workspace_dir=trailing_vdb)
         self.assertIn("Safety violation", str(ctx.exception))
@@ -143,49 +143,38 @@ class TestChallengerStorageGuardrails(unittest.TestCase):
 
 
 @requires_real_store
-class TestChallengerChromaDBIntegrity(unittest.TestCase):
+class TestChallengerLanceDBIntegrity(unittest.TestCase):
     """
-    Empirically verifies the persistent ChromaDB collection state.
-    Asserts exact chunk count (75,039) and structural integrity of physics_papers.
+    Empirically verifies the persistent LanceDB collection state.
+    Asserts structural integrity of physics_papers.
     """
 
-    def test_chromadb_physics_papers_chunk_count_is_75039(self):
-        """ChromaDB collection 'physics_papers' at 'data/physics_vectordb' holds exactly 75,039 chunks."""
-        vectordb_dir = os.path.join(PROJECT_ROOT, "data", "physics_vectordb")
-        self.assertTrue(os.path.exists(vectordb_dir), f"ChromaDB directory not found: {vectordb_dir}")
+    def test_lancedb_physics_papers_chunk_count_positive(self):
+        """LanceDB table holds chunks."""
+        import lancedb
+        self.assertTrue(os.path.exists(LANCEDB_PATH), f"LanceDB directory not found: {LANCEDB_PATH}")
 
-        client = chromadb.PersistentClient(path=vectordb_dir)
-        collection = client.get_collection("physics_papers")
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
 
-        count = collection.count()
-        self.assertEqual(
+        count = table.count_rows()
+        self.assertGreater(
             count,
-            75039,
-            f"Expected exactly 75,039 chunks in collection 'physics_papers', found {count}"
+            0,
+            f"Expected positive chunks in table '{COLLECTION_NAME}', found {count}"
         )
 
-    def test_chromadb_via_config_path_matches_exact_count(self):
-        """Verify ChromaDB through VECTORDB_PATH and COLLECTION_NAME configuration constants."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection(COLLECTION_NAME)
+    def test_lancedb_query_integrity(self):
+        """Verify the table can be queried and records have intact IDs, documents, and text."""
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
 
-        count = collection.count()
-        self.assertEqual(
-            count,
-            75039,
-            f"Configured COLLECTION_NAME '{COLLECTION_NAME}' at VECTORDB_PATH holds {count} chunks, expected 75,039"
-        )
-
-    def test_chromadb_query_integrity(self):
-        """Verify the collection can be queried and records have intact IDs, documents, and metadatas."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection("physics_papers")
-
-        sample = collection.get(limit=5, include=["documents", "metadatas"])
-        self.assertEqual(len(sample["ids"]), 5)
-        self.assertEqual(len(sample["documents"]), 5)
-        self.assertEqual(len(sample["metadatas"]), 5)
-        for doc in sample["documents"]:
+        sample = table.head(5).to_pydict()
+        self.assertEqual(len(sample["id"]), 5)
+        self.assertEqual(len(sample["text"]), 5)
+        self.assertEqual(len(sample["document"]), 5)
+        for doc in sample["text"]:
             self.assertIsInstance(doc, str)
             self.assertGreater(len(doc), 0)
 

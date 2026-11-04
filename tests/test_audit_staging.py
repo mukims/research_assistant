@@ -66,6 +66,24 @@ class TestStageForAction(unittest.TestCase):
             self.assertEqual(fh.read(), PDF + b"% one\n")
         self.assertEqual(os.path.dirname(staged[0]["path"]), self.raw)
 
+    def test_audit_tab_does_not_import_tasks_workspace(self):
+        """Citation auditor and library uploads must not eagerly materialize Labs
+        task-planner workspaces (research_assistant.tasks)."""
+        import ast
+        import inspect
+        from research_assistant.ui import audit_tab
+
+        tree = ast.parse(inspect.getsource(audit_tab))
+        task_imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("research_assistant.tasks"):
+                task_imports.append(node.module)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("research_assistant.tasks"):
+                        task_imports.append(alias.name)
+        self.assertEqual(task_imports, [])
+
 
 if __name__ == "__main__":
     unittest.main()

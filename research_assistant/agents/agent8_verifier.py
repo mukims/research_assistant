@@ -68,7 +68,7 @@ logger = get_logger("agent8")
 
 # " \cite{x}." must become "." and not " .", and the gap the removal leaves
 # behind must collapse — the claim is handed to a model as prose.
-_CITE_RE = re.compile(r"\\cite\{[^}]*\}")
+_CITE_RE = re.compile(r"\\cite[pt]?(?:\[[^\]]*\])?\{[^}]*\}")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([.,;:!?])")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 
@@ -610,6 +610,8 @@ def _write_markdown(path, report) -> None:
             lines.append(f"Key `{entry['cite_key']}`"
                          + (f" → {entry['citation_source']}" if entry["citation_source"] else "")
                          + "\n")
+            if entry.get("reliability_explanation"):
+                lines.append(f"*{entry['reliability_explanation']}*\n")
             # retrieval_failed and call_failed carry an exception type; naming
             # it is the difference between "fix the prompt" and "the endpoint
             # was down".

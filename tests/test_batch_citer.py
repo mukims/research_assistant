@@ -44,6 +44,10 @@ class TestCiteKeyExtraction(unittest.TestCase):
         """A malformed \\cite{} contributes no key rather than an empty one."""
         self.assertEqual(_cite_keys("A claim \\cite{}."), set())
 
+    def test_citep_and_citet_with_optional_arg_extracted(self):
+        text = "Water boils \\citep{w} and \\citet[p.~3]{x, y}."
+        self.assertEqual(_cite_keys(text), {"w", "x", "y"})
+
 
 class TestCitationNeedParsing(unittest.TestCase):
     """Verdicts must bind to the sentence the model numbered, not to line order.
@@ -847,6 +851,57 @@ class TestRunBatchCiterPassesContextAndQuery(unittest.TestCase):
     def test_the_contextualized_query_reaches_the_seam_when_on(self):
         seen = self._run(contextualize=True)
         self.assertEqual(seen[1][1]["query"], "Q: This approach scales linearly.")
+
+
+class TestPreexistingDraftCitations(unittest.TestCase):
+    """Sentences that already carry author \\cite / \\citep / \\citet keys in an
+    uploaded .tex draft must not be double-cited or blamed on the LLM as invented."""
+
+    def test_already_cited_sentence_is_skipped_without_invented_key_warning(self):
+        draft = (
+            "Prior work established monolayer exfoliation \\citep{novoselov2004}. "
+            "Graphene exhibits ballistic transport at low temperature."
+        )
+        hit = {
+            "text": "Ballistic transport observed in graphene at cryogenic temperatures.",
+            "chunk_index": 1,
+            "rrf_score": 0.1,
+            "metadata": {"citation_source": "Doe 2020", "document": "doe.pdf"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "draft.txt")
+            out = os.path.join(tmpdir, "cited.txt")
+            with open(src, "w", encoding="utf-8") as fh:
+                fh.write(draft)
+            with patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_JUDGE", False), \
+                 patch("research_assistant.agents.agent5_batch_citer.CITATION_CITER_CONTEXTUALIZE", False), \
+                 patch("research_assistant.agents.agent5_batch_citer.load_search_resources", return_value=(None, None, [], [])), \
+                 patch("research_assistant.agents.agent5_batch_citer.hybrid_search", return_value=[hit]), \
+                 patch(
+                     "research_assistant.agents.agent5_batch_citer.chat",
+                     side_effect=[
+                         _reply("1. YES"),
+                         _reply("CITED: Graphene exhibits ballistic transport at low temperature \\cite{cite_1}.\nREASON: Supported."),
+                     ],
+                 ) as chat_mock, \
+                 self.assertLogs("agent5", level="INFO") as logs:
+                run_batch_citer(src, out)
+
+            with open(out, encoding="utf-8") as fh:
+                written = fh.read()
+            with open(out.replace(".txt", "_report.md"), encoding="utf-8") as fh:
+                report = fh.read()
+
+        # Only the uncited second sentence was sent to the citation-need batch check.
+        self.assertEqual(chat_mock.call_count, 2)
+        self.assertNotIn("novoselov2004", str(chat_mock.call_args_list[0]))
+        self.assertEqual(
+            written,
+            "Prior work established monolayer exfoliation \\citep{novoselov2004}. "
+            "Graphene exhibits ballistic transport at low temperature \\cite{cite_1}.",
+        )
+        self.assertIn("already cited in draft", report)
+        self.assertFalse(any("invented" in line for line in logs.output), logs.output)
 
 
 if __name__ == "__main__":

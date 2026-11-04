@@ -36,8 +36,6 @@ os.makedirs(config.DATA_DIR, exist_ok=True)
 if not _check_auth():
     st.stop()
 
-render_preflight_banner()
-
 # ─── UI Styling ─────────────────────────────────────────────────────────────
 
 st.markdown(
@@ -111,6 +109,8 @@ with st.sidebar:
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
+
+render_preflight_banner()
 
 st.title("🤖 Marvin the Citebot")
 st.caption(

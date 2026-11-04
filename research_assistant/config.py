@@ -188,34 +188,22 @@ CHAT_TEMPERATURE            = float(os.environ.get("CITATION_CHAT_TEMPERATURE", 
 # embedded with embeddinggemma-2 (current). Indexes 1 and 2 are read-only
 # history: nothing in this package writes to them any more.
 INDEX_VERSION = _env_int("CITATION_INDEX_VERSION", 3)
-_INDEX_SUFFIX = "" if INDEX_VERSION == 1 else f"_v{INDEX_VERSION}"
+_INDEX_SUFFIX = f"_v{INDEX_VERSION}"
 
-# ─── Vector & Columnar Database ──────────────────────────────────────────────
-VECTORDB_PATH    = os.path.join(DATA_DIR, "physics_vectordb")
+# ─── Vector & Columnar Database (LanceDB Native) ───────────────────────────
+LANCEDB_PATH     = os.environ.get("CITATION_LANCEDB_PATH", os.path.join(DATA_DIR, "lancedb"))
 COLLECTION_NAME  = f"physics_papers{_INDEX_SUFFIX}"       # detail chunks (stage-2 retrieval)
 SUMMARY_COLLECTION_NAME = f"physics_summaries{_INDEX_SUFFIX}"   # one summary per document (stage 1)
-BM25_INDEX_PATH  = os.path.join(DATA_DIR, f"bm25_index{_INDEX_SUFFIX}.pkl")
-LANCEDB_PATH     = os.environ.get("CITATION_LANCEDB_PATH", os.path.join(DATA_DIR, "lancedb"))
-LANCE_TABLE_NAME = f"physics_papers{_INDEX_SUFFIX}"
-LANCE_SUMMARY_TABLE_NAME = f"physics_summaries{_INDEX_SUFFIX}"
+LANCE_TABLE_NAME = COLLECTION_NAME
+LANCE_SUMMARY_TABLE_NAME = SUMMARY_COLLECTION_NAME
 QUARANTINE_TABLE_NAME    = f"quarantine_chunks{_INDEX_SUFFIX}"
-USE_LANCEDB      = _env_bool("CITATION_USE_LANCEDB", True)
 
-
-def chroma_server_from(environ) -> str:
-    """The Chroma server that owns VECTORDB_PATH, or "" to open the files directly.
-
-    The local store is not safe across processes: each keeps its own copy of the vector
-    index and saves it whole, so a process holding an older copy overwrites another's
-    writes. On 2026-10-21 that lost 17,201 vectors. A server is the one owner; the app and
-    scripts connect over HTTP. A scratch CITATION_DATA_DIR (trials, tests) never reaches
-    the real store through it, so it opens its own files unless a server is named."""
-    if "CITATION_CHROMA_SERVER" in environ:
-        return environ["CITATION_CHROMA_SERVER"]
-    return "" if "CITATION_DATA_DIR" in environ else "http://localhost:8000"
-
-
-CHROMA_SERVER    = chroma_server_from(os.environ)
+# ─── Docling Document Conversion Settings ────────────────────────────────────
+DOCLING_IMAGE_SCALE         = float(os.environ.get("CITATION_DOCLING_IMAGE_SCALE", "2.0"))
+DOCLING_MIN_FIG_PX          = _env_int("CITATION_DOCLING_MIN_FIG_PX", 60)
+DOCLING_FIGURE_PADDING      = float(os.environ.get("CITATION_DOCLING_FIGURE_PADDING", "14.0"))
+DOCLING_CACHE_DIR           = os.path.join(DATA_DIR, "docling_cache")
+DOCLING_DO_TABLE_STRUCTURE  = _env_bool("CITATION_DOCLING_TABLE_STRUCTURE", True)
 
 # ─── Directories ──────────────────────────────────────────────────────────────
 RAW_DIR          = os.path.join(DATA_DIR, "raw")
@@ -239,7 +227,10 @@ FAILED_DOWNLOADS_PATH    = os.path.join(DATA_DIR, "failed_downloads.json")
 # by the query string. Same crash-safe rewrite-after-each-write pattern as
 # downloaded.json.
 SEED_PAPERS_PATH         = os.path.join(DATA_DIR, "seed_papers.json")
-INGESTED_MANIFEST_PATH   = os.path.join(DATA_DIR, f"ingested{_INDEX_SUFFIX}.json")
+INGESTED_MANIFEST_PATH   = os.environ.get(
+    "CITATION_INGESTED_MANIFEST_PATH",
+    os.path.join(DATA_DIR, f"ingested{_INDEX_SUFFIX}.json"),
+)
 PIPELINE_STATUS_PATH     = os.path.join(DATA_DIR, "pipeline_status.json")
 INGEST_LOCK_PATH         = os.path.join(DATA_DIR, "ingest.lock")
 

@@ -132,13 +132,6 @@ def render_audit_tab():
             st.warning("Please upload one or more PDF files (or a .zip) to begin.", icon="⚠️")
         else:
             staged, mode = _stage_for_action(uploaded_files, action)
-            if staged and mode != "error":
-                for item in staged:
-                    try:
-                        from research_assistant.tasks.workspace import materialize_paper_upload
-                        materialize_paper_upload(item["path"], filename=os.path.basename(item["path"]))
-                    except Exception as exc:
-                        logger.debug("Could not materialize workspace for staged paper: %s", exc)
             if not staged:
                 st.error(
                     "No valid PDF documents found in the uploaded files. Check that files contain valid PDF headers (%PDF-).",

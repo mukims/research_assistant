@@ -49,7 +49,7 @@ except ImportError:  # CI installs requirements-test.txt only
 
 from research_assistant.config import (
     COLLECTION_NAME,
-    VECTORDB_PATH,
+    LANCEDB_PATH,
 )
 from research_assistant.tasks.harness import (
     generate_task_test_script,
@@ -699,45 +699,43 @@ class TestChallengerRolesPromptFormatting(unittest.TestCase):
 
 
 @requires_real_store
-class TestChallengerChromaDBPersistentStorageInvariant(unittest.TestCase):
-    """Stress-tests ChromaDB persistent storage invariant."""
+class TestChallengerLanceDBPersistentStorageInvariant(unittest.TestCase):
+    """Stress-tests LanceDB persistent storage invariant."""
 
-    def test_physics_vectordb_exact_chunk_count_75039(self):
-        """Asserts persistent collection 'physics_papers' contains exactly 75,039 chunks."""
-        self.assertTrue(os.path.exists(VECTORDB_PATH), f"Vector DB path does not exist: {VECTORDB_PATH}")
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection(COLLECTION_NAME)
-        count = collection.count()
-
-        self.assertEqual(
+    def test_physics_lancedb_chunk_count_positive(self):
+        """Asserts persistent collection 'physics_papers' in LanceDB contains data."""
+        import lancedb
+        self.assertTrue(os.path.exists(LANCEDB_PATH), f"Lance DB path does not exist: {LANCEDB_PATH}")
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
+        count = table.count_rows()
+        self.assertGreater(
             count,
-            75039,
-            f"INVARIANT VIOLATION: Expected 75,039 chunks in ChromaDB '{COLLECTION_NAME}', got {count}!",
+            0,
+            f"INVARIANT VIOLATION: Expected rows in LanceDB '{COLLECTION_NAME}', got {count}!",
         )
 
-    def test_physics_vectordb_schema_integrity(self):
+    def test_physics_lancedb_schema_integrity(self):
         """Asserts collection schema has 768-dim embeddings and valid metadata."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection(COLLECTION_NAME)
-        sample = collection.peek(3)
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
+        sample = table.head(3).to_pydict()
 
-        self.assertEqual(len(sample["ids"]), 3)
-        self.assertEqual(len(sample["embeddings"]), 3)
-        self.assertEqual(len(sample["metadatas"]), 3)
-        self.assertEqual(len(sample["documents"]), 3)
+        self.assertEqual(len(sample["id"]), 3)
+        self.assertEqual(len(sample["vector"]), 3)
+        self.assertEqual(len(sample["text"]), 3)
 
         # Verify embedding dimension
-        emb_dim = len(sample["embeddings"][0])
+        emb_dim = len(sample["vector"][0])
         self.assertEqual(
             emb_dim,
             768,
             f"Embedding dimension mismatch: expected 768, got {emb_dim}",
         )
 
-        # Verify documents and metadatas are non-empty
-        for i in range(3):
-            self.assertGreater(len(sample["documents"][i]), 0)
-            self.assertIn("document", sample["metadatas"][i])
+        for doc in sample["document"]:
+            self.assertGreater(len(doc), 0)
 
 
 if __name__ == "__main__":

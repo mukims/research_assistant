@@ -49,9 +49,6 @@ os.environ["OLLAMA_HOST"] = "http://127.0.0.1:9"
 os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:9/v1"
 os.environ["GROBID_SERVER"] = "http://127.0.0.1:9"
 
-os.environ.setdefault("CITATION_CHROMA_SERVER", "")
-# The legacy seam tests target the Chroma path; LanceDB has its own dedicated coverage.
-os.environ.setdefault("CITATION_USE_LANCEDB", "0")
 # The fixture world (tests/transfer_fixtures.py) is laid out for 3 cards per query
 # and 3 techniques per bottleneck; the live defaults are 5.
 os.environ.setdefault("CITATION_TRANSFER_CARDS_PER_QUERY", "3")
@@ -107,22 +104,6 @@ def _block_network(request, monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _blocked)
 
 
-def _release_chroma_clients():
-    """Drop chromadb's process-wide client cache, so no client still holds a wiped store.
-
-    Chroma keeps one system per path; emptying the directory under it makes the next test's
-    writes fail with "attempt to write a readonly database".
-    """
-    chromadb = sys.modules.get("chromadb")
-    if chromadb is None:
-        return
-    try:
-        from chromadb.api.shared_system_client import SharedSystemClient
-        SharedSystemClient.clear_system_cache()
-    except (ImportError, AttributeError):
-        pass  # a chromadb without the shared-client cache has nothing to release
-
-
 def _clear_in_process_caches():
     """Reset module-level caches, only for modules a test has already imported."""
     mods = sys.modules
@@ -149,7 +130,6 @@ def _clear_in_process_caches():
 @pytest.fixture(autouse=True)
 def _reset_shared_state():
     yield
-    _release_chroma_clients()
     if TEST_DATA_DIR is not None:
         _wipe_contents(TEST_DATA_DIR)
     _wipe_contents(os.environ["CITATION_WORKSPACE_DIR"])

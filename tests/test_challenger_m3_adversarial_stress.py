@@ -269,8 +269,6 @@ class TestDbCacheKeyInvalidation(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp(prefix="test_cache_key_")
         self.orig_lancedb_path = db.LANCEDB_PATH
         self.orig_col_name = db.COLLECTION_NAME
-        self.orig_use_lance = db.USE_LANCEDB
-        db.USE_LANCEDB = True
         self.lancedb_dir = os.path.join(self.tmp_dir, "lancedb")
         db.LANCEDB_PATH = self.lancedb_dir
         db.COLLECTION_NAME = "physics_papers_v3"
@@ -278,7 +276,6 @@ class TestDbCacheKeyInvalidation(unittest.TestCase):
     def tearDown(self):
         db.LANCEDB_PATH = self.orig_lancedb_path
         db.COLLECTION_NAME = self.orig_col_name
-        db.USE_LANCEDB = self.orig_use_lance
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_cache_key_invalidation_lifecycle(self):

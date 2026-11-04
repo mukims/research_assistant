@@ -37,7 +37,7 @@ def get_paper_workspace_dir(paper_id: str, base_dir: Optional[str] = None) -> st
     workspace_base = base_dir or os.environ.get("CITATION_WORKSPACE_DIR") or os.path.join(config.PROJECT_ROOT, "workspace_runs")
 
     abs_data = os.path.abspath(getattr(config, "DATA_DIR", os.path.join(config.PROJECT_ROOT, "data")))
-    abs_vdb = os.path.abspath(getattr(config, "VECTORDB_PATH", os.path.join(abs_data, "physics_vectordb")))
+    abs_vdb = os.path.abspath(getattr(config, "LANCEDB_PATH", os.path.join(abs_data, "lancedb")))
     abs_ws = os.path.abspath(workspace_base)
 
     if (

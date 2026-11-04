@@ -106,8 +106,7 @@ class TestIngestThenSearch(_TmpDirCase):
         db.clear_search_cache()
         self.addCleanup(db.clear_search_cache)
         embedder = _KeywordEmbedder()
-        with patch.object(db, "USE_LANCEDB", True), \
-             patch.object(db, "LANCEDB_PATH", self.tmp), \
+        with patch.object(db, "LANCEDB_PATH", self.tmp), \
              patch.object(lance_store, "LANCEDB_PATH", self.tmp), \
              patch("research_assistant.shared.llm.get_embeddings", return_value=embedder), \
              patch("research_assistant.shared.search._get_embeddings", return_value=embedder):
@@ -124,6 +123,31 @@ class TestIngestThenSearch(_TmpDirCase):
         self.assertTrue(hits)
         self.assertEqual(hits[0]["metadata"]["document"], "a.pdf")
         self.assertIn("alpha", hits[0]["text"])
+
+    def test_same_width_different_embedder_is_refused_on_ingest_and_search(self):
+        """Two 3-d (or two 768-d) embedders pass the vector-width check; LanceDB
+        schema metadata must still catch the model mismatch so incompatible
+        vector spaces are never silently mixed."""
+        db.clear_search_cache()
+        self.addCleanup(db.clear_search_cache)
+        embedder = _KeywordEmbedder()
+        with patch.object(db, "LANCEDB_PATH", self.tmp), \
+             patch.object(lance_store, "LANCEDB_PATH", self.tmp), \
+             patch.object(db, "EMBED_MODEL", "nomic-embed-text"), \
+             patch("research_assistant.shared.llm.get_embeddings", return_value=embedder):
+            ing.upsert_corpus([self._entry("a.pdf", "alpha particles scatter")])
+
+        reopened = LanceStoreClient(self.tmp).get_collection(db.COLLECTION_NAME)
+        self.assertEqual(reopened.metadata.get("embedder"), "nomic-embed-text")
+
+        with patch.object(db, "LANCEDB_PATH", self.tmp), \
+             patch.object(lance_store, "LANCEDB_PATH", self.tmp), \
+             patch.object(db, "EMBED_MODEL", "embeddinggemma-2"), \
+             patch("research_assistant.shared.llm.get_embeddings", return_value=embedder):
+            with self.assertRaisesRegex(RuntimeError, "CITATION_EMBED_MODEL=nomic-embed-text"):
+                ing.upsert_corpus([self._entry("b.pdf", "beta decay")])
+            with self.assertRaisesRegex(RuntimeError, "CITATION_EMBED_MODEL=nomic-embed-text"):
+                db.load_search_resources()
 
 
 class TestEmbedderRecord(unittest.TestCase):

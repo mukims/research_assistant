@@ -54,11 +54,12 @@ class TestRunChecks(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def _run(self, http_get=None, grobid_alive=lambda: True, open_store=lambda: object()):
+    def _run(self, http_get=None, grobid_alive=lambda: True, open_store=lambda: object(), **kwargs):
         return run_checks(
             http_get=http_get or _http_with("gemma4:e2b", "embeddinggemma-2:latest"),
             grobid_alive=grobid_alive,
             open_store=open_store,
+            **kwargs,
         )
 
     def test_all_green(self):
@@ -213,6 +214,29 @@ class TestRunChecks(unittest.TestCase):
         with self.assertRaises(Exception):
             check.ok = False
 
+    def test_session_overrides_check_the_selected_backend_and_chat_model(self):
+        # Startup config defaults to Ollama + gemma4:e2b (which IS pulled), but the
+        # session picked an unpulled model `qwen2.5:14b`: preflight must check the pick.
+        checks = _by_name(
+            self._run(
+                llm_backend="ollama",
+                chat_model="qwen2.5:14b",
+            )
+        )
+        self.assertFalse(checks["Chat model"].ok)
+        self.assertEqual(checks["Chat model"].fix, "ollama pull qwen2.5:14b")
+
+        # Switching the session to hosted `openai` without an API key checks the API key
+        # rather than reporting Ollama chat as healthy.
+        hosted = _by_name(
+            self._run(
+                llm_backend="openai",
+                chat_model="gemini-3.5-flash",
+            )
+        )
+        self.assertFalse(hosted["Model backend"].ok)
+        self.assertNotIn("Chat model", hosted)
+
 
 @unittest.skipUnless(HAVE_STREAMLIT, "needs streamlit")
 class TestPreflightInThePage(unittest.TestCase):
@@ -230,6 +254,22 @@ class TestPreflightInThePage(unittest.TestCase):
         self.assertIn("- **Model backend**: Start Ollama (ollama serve) or set GEMINI_API_KEY in .env", banner[0])
         self.assertNotIn("GROBID", banner[0])  # non-blocking checks stay out of the banner
         self.assertIn("Setup checks", page["sidebar_expanders"])
+
+    def test_switching_sidebar_model_updates_preflight_on_the_same_rerun(self):
+        page = run_page(
+            after="""
+            sel = at.sidebar.selectbox(key="sidebar_chat_model_selector")
+            gemini_opt = next(o for o in sel.options if "Gemini:" in o)
+            sel.select(gemini_opt).run()
+            out["errors"] = [e.value for e in at.error]
+            """
+        )
+        self.assertEqual(page["exceptions"], [])
+        banner = [e for e in page["errors"] if e.startswith("Marvin can't run yet:")]
+        self.assertEqual(len(banner), 1)
+        # Once switched to hosted chat, embeddings still need Ollama, so the banner
+        # now names the Embedding model check alongside the missing API key.
+        self.assertIn("- **Embedding model**:", banner[0])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,6 @@ from typing import Iterable
 from research_assistant.config import (
     COLLECTION_NAME,
     INGESTED_MANIFEST_PATH,
-    VECTORDB_PATH,
 )
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger

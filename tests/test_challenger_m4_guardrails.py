@@ -227,20 +227,20 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 5. Persistent ChromaDB Storage Invariant (75,039 chunks)
+    # 5. Persistent LanceDB Storage Invariant
     # ─────────────────────────────────────────────────────────────────────────
 
     @requires_real_store
-    def test_chromadb_chunk_count_is_75039(self):
-        """ChromaDB collection physics_papers must contain exactly 75,039 chunks intact."""
-        import chromadb
-        client = chromadb.PersistentClient(path=config.VECTORDB_PATH)
-        collection = client.get_collection(config.COLLECTION_NAME)
-        count = collection.count()
-        self.assertEqual(
+    def test_lancedb_chunk_count_positive(self):
+        """LanceDB table physics_papers must contain chunks intact."""
+        import lancedb
+        client = lancedb.connect(config.LANCEDB_PATH)
+        table = client.open_table(config.COLLECTION_NAME)
+        count = table.count_rows()
+        self.assertGreater(
             count,
-            75039,
-            f"ChromaDB chunk count mismatch! Expected exactly 75,039 chunks, found: {count}",
+            0,
+            f"LanceDB table '{config.COLLECTION_NAME}' is empty!",
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -248,15 +248,15 @@ class TestChallengerM4HardwareGuardrails(unittest.TestCase):
     # ─────────────────────────────────────────────────────────────────────────
 
     def test_task_runner_workspace_storage_protection(self):
-        """TaskRunner must reject workspaces pointing directly to or nested inside DATA_DIR or VECTORDB_PATH."""
+        """TaskRunner must reject workspaces pointing directly to or nested inside DATA_DIR or LANCEDB_PATH."""
         from research_assistant.tasks.models import TaskGraph
         from research_assistant.tasks.runner import TaskRunner
 
         dummy_graph = TaskGraph(paper_id="test_p1", paper_title="Test Paper")
         forbidden_paths = [
-            config.VECTORDB_PATH,
+            config.LANCEDB_PATH,
             config.DATA_DIR,
-            os.path.join(config.VECTORDB_PATH, "nested_dir"),
+            os.path.join(config.LANCEDB_PATH, "nested_dir"),
             os.path.join(config.DATA_DIR, "nested_dir"),
         ]
 

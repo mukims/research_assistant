@@ -70,7 +70,19 @@ def escape_tantivy_query(query: str) -> str:
     return re.sub(r'([\\\[\]:()^/\-"])', r"\\\1", query)
 
 
-def get_papers_schema(dim: int = 768) -> "pa.Schema":
+def _schema_metadata_from(metadata: Optional[dict]) -> Optional[dict[bytes, bytes]]:
+    """Encode embedder provenance from collection *metadata* onto a PyArrow schema."""
+    if not metadata:
+        return None
+    encoded: dict[bytes, bytes] = {}
+    for key in ("embedder", "embedder_build"):
+        val = metadata.get(key)
+        if val:
+            encoded[key.encode("utf-8")] = str(val).encode("utf-8")
+    return encoded or None
+
+
+def get_papers_schema(dim: int = 768, schema_metadata: Optional[dict[bytes, bytes]] = None) -> "pa.Schema":
     """Schema for the main research papers chunk table."""
     return pa.schema([
         pa.field("chunk_id", pa.string()),
@@ -87,10 +99,10 @@ def get_papers_schema(dim: int = 768) -> "pa.Schema":
         pa.field("content_hash", pa.string()),
         pa.field("vector", pa.list_(pa.float32(), dim)),
         pa.field("metadata_json", pa.string()),
-    ])
+    ], metadata=schema_metadata)
 
 
-def get_summaries_schema(dim: int = 768) -> "pa.Schema":
+def get_summaries_schema(dim: int = 768, schema_metadata: Optional[dict[bytes, bytes]] = None) -> "pa.Schema":
     """Schema for document-level summaries (stage-1 retrieval)."""
     return pa.schema([
         pa.field("summary_id", pa.string()),
@@ -99,7 +111,7 @@ def get_summaries_schema(dim: int = 768) -> "pa.Schema":
         pa.field("summary", pa.string()),
         pa.field("vector", pa.list_(pa.float32(), dim)),
         pa.field("metadata_json", pa.string()),
-    ])
+    ], metadata=schema_metadata)
 
 
 def get_quarantine_schema() -> "pa.Schema":
@@ -149,6 +161,14 @@ class LanceTableAdapter:
         self.is_lancedb = True
         self.is_summary = is_summary
         self.metadata = {"hnsw:space": "cosine", "backend": "lancedb"}
+        schema_meta = getattr(getattr(table, "schema", None), "metadata", None)
+        if isinstance(schema_meta, dict):
+            for key in ("embedder", "embedder_build"):
+                raw_val = schema_meta.get(key.encode("utf-8"))
+                if isinstance(raw_val, (bytes, bytearray)) and raw_val:
+                    self.metadata[key] = bytes(raw_val).decode("utf-8")
+                elif isinstance(raw_val, str) and raw_val:
+                    self.metadata[key] = raw_val
 
     def count(self) -> int:
         try:
@@ -159,7 +179,7 @@ class LanceTableAdapter:
     def __len__(self) -> int:
         return self.count()
 
-    def create_fts_index(self, column: str = "text"):
+    def create_fts_index(self, column: str = "text", replace: bool = True):
         """Create or replace Tantivy FTS index on target text columns.
         Indexes citation_source alongside text and summary.
         """
@@ -171,7 +191,7 @@ class LanceTableAdapter:
             for col in target_cols:
                 if not schema_names or col in schema_names:
                     try:
-                        self.table.create_index(col, config=lancedb.index.FTS(), replace=True)
+                        self.table.create_index(col, config=lancedb.index.FTS(), replace=replace)
                         logger.info("Created Tantivy FTS index on table %s (column=%s)", self.name, col)
                     except Exception as e:
                         logger.warning("FTS index creation warning for %s col %s: %s", self.name, col, e)
@@ -755,7 +775,12 @@ class LanceStoreClient:
                 f"Cannot create table {name}: metadata must carry 'embedding_dim' "
                 "(see shared.db.embedder_record)."
             )
-        schema = get_summaries_schema(dim) if is_summary else get_papers_schema(dim)
+        schema_meta = _schema_metadata_from(metadata)
+        schema = (
+            get_summaries_schema(dim, schema_metadata=schema_meta)
+            if is_summary
+            else get_papers_schema(dim, schema_metadata=schema_meta)
+        )
         return LanceTableAdapter(self.db.create_table(name, schema=schema), is_summary=is_summary)
 
     def get_collection(self, name: str) -> LanceTableAdapter:

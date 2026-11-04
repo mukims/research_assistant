@@ -21,7 +21,7 @@ import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from research_assistant.config import DATA_DIR, LLM_MODEL, TASK_OLLAMA_OPTIONS, VECTORDB_PATH
+from research_assistant.config import DATA_DIR, LLM_MODEL, TASK_OLLAMA_OPTIONS, LANCEDB_PATH
 from research_assistant.shared.log import get_logger
 from research_assistant.tasks.harness import generate_task_test_script, run_task_test_script
 from research_assistant.tasks.models import (
@@ -276,8 +276,8 @@ class TaskRunner:
         self.backend = backend
         self.on_task_update = on_task_update
 
-        # Storage Invariant Guardrail: Never point workspace to persistent DATA_DIR or VECTORDB_PATH
-        abs_vdb = os.path.abspath(VECTORDB_PATH)
+        # Storage Invariant Guardrail: Never point workspace to persistent DATA_DIR or LANCEDB_PATH
+        abs_vdb = os.path.abspath(LANCEDB_PATH)
         abs_data = os.path.abspath(DATA_DIR)
         abs_ws = os.path.abspath(self.workspace_dir)
         if (

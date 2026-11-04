@@ -239,11 +239,11 @@ def sentence_context(sentences: list[str], idx: int) -> str:
 
 # ─── Citation key extraction & punctuation restoration ───────────────────────
 
-_CITE_RE = re.compile(r"\\cite\{([^}]*)\}")
+_CITE_RE = re.compile(r"\\cite[pt]?(?:\[[^\]]*\])?\{([^}]*)\}")
 
-# One or more \cite{...} groups at the very end of a sentence, with the
-# whitespace before them.
-_TRAILING_CITES_RE = re.compile(r"(?:\s*\\cite\{[^}]*\})+\s*$")
+# One or more \cite / \citep / \citet groups at the very end of a sentence,
+# with the whitespace before them.
+_TRAILING_CITES_RE = re.compile(r"(?:\s*\\cite[pt]?(?:\[[^\]]*\])?\{[^}]*\})+\s*$")
 _TERMINAL = ".!?"
 
 

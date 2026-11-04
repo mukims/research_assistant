@@ -18,6 +18,7 @@ from research_assistant.config import (
     CITATION_CHECK_BATCH_SIZE,
     CITATION_CITER_CONTEXTUALIZE,
     CITATION_CITER_JUDGE,
+    EXCLUDED_FROM_EVIDENCE,
     JUDGEMENT_EVIDENCE_MAX_CHARS,
     JUDGEMENT_NEIGHBOUR_WINDOW,
 )
@@ -194,7 +195,9 @@ def cite_sentence(sentence, resources, key_registry, *, context=None, query=None
     """
     collection, bm25, texts, metadatas = resources
     query = query or sentence
-    raw_results = hybrid_search(query, collection, bm25, texts, metadatas, top_k=6, exclude_docs=exclude_docs)
+    raw_results = hybrid_search(
+        query, collection, bm25, texts, metadatas, top_k=6, exclude_docs=exclude_docs, exclude_types=EXCLUDED_FROM_EVIDENCE
+    )
     results = rerank_candidates(query, raw_results, top_k=3)
     if not results:
         return CiteResult(original=sentence, cited_text=sentence, query=query,
@@ -487,7 +490,12 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
     logger.info("Split draft into %d sentences in %d paragraph(s).", len(sentences), len(set(paragraph_ids)))
 
     # ── Batch citation-need check ────────────────────────────────────────
-    eligible_indices = [i for i, s in enumerate(sentences) if len(s.split()) >= 4]
+    preexisting_keys = _cite_keys(draft_text)
+    already_cited = {i for i, s in enumerate(sentences) if _cite_keys(s)}
+    eligible_indices = [
+        i for i, s in enumerate(sentences)
+        if len(s.split()) >= 4 and i not in already_cited
+    ]
     eligible_sentences = [sentences[i] for i in eligible_indices]
 
     needs_cite = [False] * len(sentences)
@@ -533,7 +541,12 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         entry = {"original": sentence, "cited": False}
 
         if not needs_cite[i]:
-            reason = "too short" if len(sentence.split()) < 4 else "no citation needed"
+            if i in already_cited:
+                reason = "already cited in draft"
+            elif len(sentence.split()) < 4:
+                reason = "too short"
+            else:
+                reason = "no citation needed"
             logger.info(" -> %s, skipping.", reason)
             entry["skip_reason"] = reason
             return sentence, entry
@@ -637,7 +650,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         source: key for source, key in key_registry.items() if key in used_keys
     }
 
-    unknown = used_keys - set(key_registry.values())
+    unknown = used_keys - set(key_registry.values()) - preexisting_keys
     if unknown:
         logger.warning(
             "Draft cites %d key(s) that were never offered as context — the model "

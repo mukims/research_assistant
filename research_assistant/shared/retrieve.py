@@ -18,7 +18,6 @@ import time
 
 from research_assistant.config import (
     EXCLUDED_FROM_EVIDENCE,
-    VECTORDB_PATH,
     SUMMARY_COLLECTION_NAME,
     DOC_SELECT_K,
     DOC_GATE,

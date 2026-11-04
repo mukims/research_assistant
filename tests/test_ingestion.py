@@ -77,10 +77,6 @@ class IngestPdfsCase(ManifestBackedTestCase):
         def fake_rebuild():
             self.rebuilds += 1
 
-        # A BM25 path that does not exist, so the "index missing" branch is
-        # exercised only where a test intends it.
-        self.bm25_path = os.path.join(self.tmp.name, "bm25.pkl")
-
         # mark_document_ingested no longer exists — ingest_pdfs() now marks
         # via manifest.add_many() directly, against the temp manifest this
         # base class already isolates. Tests assert on manifest_mod.load().
@@ -93,10 +89,6 @@ class IngestPdfsCase(ManifestBackedTestCase):
             patcher = patch.object(ing, target, repl)
             patcher.start()
             self.addCleanup(patcher.stop)
-
-        patcher = patch.object(ing, "BM25_INDEX_PATH", self.bm25_path)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
 
 class TestSkipAndMark(IngestPdfsCase):
@@ -191,22 +183,12 @@ class TestIndexRebuild(IngestPdfsCase):
 
     def test_no_rebuild_when_nothing_was_inserted(self):
         """An all-duplicate batch leaves the collection unchanged."""
-        open(self.bm25_path, "wb").close()   # index already exists
         pdf = _touch(self.tmp.name, "dup.pdf")
         self.inserted = 0
 
         ing.ingest_pdfs([pdf])
 
         self.assertEqual(self.rebuilds, 0)
-
-    def test_rebuild_when_index_is_missing_even_if_nothing_inserted(self):
-        """Search needs the index to exist at all, duplicates notwithstanding."""
-        pdf = _touch(self.tmp.name, "dup.pdf")
-        self.inserted = 0
-
-        ing.ingest_pdfs([pdf])
-
-        self.assertEqual(self.rebuilds, 1)
 
     def test_rebuild_can_be_deferred_by_the_caller(self):
         pdf = _touch(self.tmp.name, "p.pdf")
@@ -266,7 +248,7 @@ class TestIngestReportsExtractionModes(IngestPdfsCase):
         with patch.object(ing, "process_pdf", fake_process):
             result = ing.ingest_pdfs([good, scan], rebuild_index=False)
 
-        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 1, "ocr": 0})
+        self.assertEqual(result["extraction"], {"docling": 0, "grobid": 1, "pymupdf": 1, "ocr": 0})
 
     def test_every_page_of_one_document_counts_once(self):
         """The tally is per document, not per corpus entry."""
@@ -282,7 +264,7 @@ class TestIngestReportsExtractionModes(IngestPdfsCase):
         with patch.object(ing, "process_pdf", fake_process):
             result = ing.ingest_pdfs([pdf], rebuild_index=False)
 
-        self.assertEqual(result["extraction"], {"grobid": 0, "pymupdf": 1, "ocr": 0})
+        self.assertEqual(result["extraction"], {"docling": 0, "grobid": 0, "pymupdf": 1, "ocr": 0})
 
 
 class TestRequireGrobid(IngestPdfsCase):
@@ -315,7 +297,7 @@ class TestRequireGrobid(IngestPdfsCase):
         self.assertEqual(result["fell_back"], ["b.pdf"])
         self.assertEqual([os.path.basename(p) for p in result["failed"]], ["b.pdf"])
         self.assertEqual(sorted(manifest_mod.load()), ["a.pdf", "c.pdf"])
-        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 0, "ocr": 0})
+        self.assertEqual(result["extraction"], {"docling": 0, "grobid": 2, "pymupdf": 0, "ocr": 0})
 
     def test_a_second_run_retries_only_what_fell_back(self):
         self._setup()
@@ -331,7 +313,7 @@ class TestRequireGrobid(IngestPdfsCase):
         seen = self._setup()
         result = ing.ingest_pdfs(list(self.pdfs.values()), rebuild_index=False)
         self.assertEqual({e["document"] for e in seen["corpus"]}, {"a.pdf", "b.pdf", "c.pdf"})
-        self.assertEqual(result["extraction"], {"grobid": 2, "pymupdf": 1, "ocr": 0})
+        self.assertEqual(result["extraction"], {"docling": 0, "grobid": 2, "pymupdf": 1, "ocr": 0})
         self.assertNotIn("fell_back", result)
 
 
@@ -409,7 +391,7 @@ class TestProcessPdfIsTheV2Processor(ManifestBackedTestCase):
         with patch("research_assistant.shared.ingest_v2.process_pdf_v2", side_effect=self._entries), \
              patch.object(ing, "upsert_corpus", return_value=2), patch.object(ing, "rebuild_bm25"):
             result = ing.ingest_pdfs({pdf: "A"})
-        self.assertEqual(result["extraction"], {"grobid": 1, "pymupdf": 0, "ocr": 0})
+        self.assertEqual(result["extraction"], {"docling": 0, "grobid": 1, "pymupdf": 0, "ocr": 0})
         self.assertEqual(result["figure_images"], 1)
         self.assertNotIn("described", result)
 

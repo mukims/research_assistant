@@ -1,6 +1,6 @@
 import argparse
 
-from research_assistant.config import DEFAULT_TOP_K
+from research_assistant.config import DEFAULT_TOP_K, EXCLUDED_FROM_EVIDENCE
 from research_assistant.prompts import CITATION_SUGGESTION_SYSTEM, CITATION_SUGGESTION_USER
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.db import load_search_resources
@@ -40,7 +40,9 @@ def suggest_citation(text, top_k=DEFAULT_TOP_K, search_resources=None, verify: b
     collection, bm25, texts, metadatas = search_resources or load_search_resources()
 
     logger.info("Searching DB for relevant context for query: '%s'", text)
-    results = hybrid_search(text, collection, bm25, texts, metadatas, top_k=top_k)
+    results = hybrid_search(
+        text, collection, bm25, texts, metadatas, top_k=top_k, exclude_types=EXCLUDED_FROM_EVIDENCE
+    )
     if not results:
         logger.info("No related passages found in the database.")
         return None

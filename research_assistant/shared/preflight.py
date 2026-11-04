@@ -98,13 +98,24 @@ def _grobid_check(grobid_alive) -> Check:
     return Check("GROBID", alive, detail, "" if alive else _GROBID_FIX, blocking=False)
 
 
-def run_checks(http_get=requests.get, grobid_alive=None, open_store=None) -> list:
+def run_checks(
+    http_get=requests.get,
+    grobid_alive=None,
+    open_store=None,
+    *,
+    llm_backend: str | None = None,
+    chat_model: str | None = None,
+) -> list:
     """Every setup check, in the order the sidebar lists them.
 
+    *llm_backend* and *chat_model* override the startup defaults from ``config`` so
+    the UI checks the model this session actually selected in the sidebar.
     The model checks are Ollama-only and are left out, not failed, when the backend is
     unreachable: the Model backend line already says so and the model list is unknown."""
     checks = []
-    uses_ollama_chat = config.LLM_BACKEND != "openai"
+    active_backend = (llm_backend or config.LLM_BACKEND).lower()
+    active_chat_model = chat_model or config.CHAT_MODEL
+    uses_ollama_chat = active_backend != "openai"
     uses_ollama_embed = config.EMBED_BACKEND == "ollama"
 
     tags = None
@@ -121,7 +132,7 @@ def run_checks(http_get=requests.get, grobid_alive=None, open_store=None) -> lis
         )
 
     if tags is not None and uses_ollama_chat:
-        checks.append(_model_check("Chat model", config.CHAT_MODEL, tags))
+        checks.append(_model_check("Chat model", active_chat_model, tags))
     if uses_ollama_embed:
         if tags is not None:
             checks.append(_model_check("Embedding model", config.EMBED_MODEL, tags))

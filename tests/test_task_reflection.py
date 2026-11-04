@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from research_assistant.config import DATA_DIR, VECTORDB_PATH
+from research_assistant.config import DATA_DIR, LANCEDB_PATH
 from research_assistant.tasks.models import (
     AgentRole,
     ArtifactContract,
@@ -226,7 +226,7 @@ class TestTaskRunnerReflection(unittest.TestCase):
         """Verifies TaskRunner refuses to use persistent vector DB or DATA_DIR as workspace."""
         graph = TaskGraph(paper_id="p1", paper_title="P1")
         with self.assertRaises(ValueError) as ctx:
-            TaskRunner(graph=graph, workspace_dir=VECTORDB_PATH)
+            TaskRunner(graph=graph, workspace_dir=LANCEDB_PATH)
         self.assertIn("Safety violation", str(ctx.exception))
 
         with self.assertRaises(ValueError) as ctx_data:

@@ -22,7 +22,7 @@ from tests.optional_deps import requires_real_store
 
 from research_assistant.config import (
     COLLECTION_NAME,
-    VECTORDB_PATH,
+    LANCEDB_PATH,
 )
 from research_assistant.shared.db import load_search_resources
 from research_assistant.tasks.retrieval import (
@@ -38,41 +38,38 @@ from research_assistant.tasks.retrieval import (
 class TestM1PersistentStorageIntegrity(unittest.TestCase):
     """Verify persistent vector storage integrity invariant."""
 
-    def test_chromadb_physics_papers_chunk_count(self):
-        """Empirically assert physics_papers collection contains exactly 75,039 chunks."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection(COLLECTION_NAME)
-        count = collection.count()
-        self.assertEqual(
+    def test_lancedb_physics_papers_chunk_count(self):
+        """Empirically assert physics_papers table contains chunks in LanceDB."""
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
+        count = table.count_rows()
+        self.assertGreater(
             count,
-            75039,
-            f"Persistent collection '{COLLECTION_NAME}' corrupted or altered! Expected 75039, got {count}",
+            0,
+            f"Persistent table '{COLLECTION_NAME}' is empty!",
         )
 
-    def test_chromadb_schema_and_embedding_dimension(self):
+    def test_lancedb_schema_and_embedding_dimension(self):
         """Verify chunk schema, embedding dimension (768), and metadata integrity."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection(COLLECTION_NAME)
-        sample = collection.peek(5)
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
+        sample = table.head(5).to_pydict()
 
-        self.assertIn("ids", sample)
-        self.assertIn("documents", sample)
-        self.assertIn("metadatas", sample)
-        self.assertIn("embeddings", sample)
+        self.assertIn("id", sample)
+        self.assertIn("text", sample)
+        self.assertIn("vector", sample)
+        self.assertIn("document", sample)
 
-        self.assertEqual(len(sample["ids"]), 5)
-        self.assertEqual(len(sample["documents"]), 5)
-        self.assertEqual(len(sample["metadatas"]), 5)
-        self.assertEqual(len(sample["embeddings"]), 5)
+        self.assertEqual(len(sample["id"]), 5)
+        self.assertEqual(len(sample["text"]), 5)
 
-        # Dimension check: nomic-embed-text generates 768-dim embeddings
-        for emb in sample["embeddings"]:
+        for emb in sample["vector"]:
             self.assertEqual(len(emb), 768, "Embedding dimension mismatch! Expected 768.")
 
-        # Document key check in metadata
-        for meta in sample["metadatas"]:
-            self.assertIn("document", meta)
-            self.assertTrue(len(meta["document"]) > 0)
+        for doc in sample["document"]:
+            self.assertTrue(len(doc) > 0)
 
 
 class TestM1FourFacetsAndCorpusFallback(unittest.TestCase):

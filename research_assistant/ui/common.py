@@ -49,8 +49,11 @@ def get_cached_search_resources(mtime: float):
 
 
 def _get_resources_mtime() -> float:
-    if os.path.exists(config.BM25_INDEX_PATH):
-        return os.path.getmtime(config.BM25_INDEX_PATH)
+    table_dir = os.path.join(config.LANCEDB_PATH, f"{config.COLLECTION_NAME}.lance")
+    if os.path.exists(table_dir):
+        return os.path.getmtime(table_dir)
+    if os.path.exists(config.LANCEDB_PATH):
+        return os.path.getmtime(config.LANCEDB_PATH)
     return 0.0
 
 

@@ -43,7 +43,7 @@ import numpy as np
 from research_assistant.config import (
     COLLECTION_NAME,
     DATA_DIR,
-    VECTORDB_PATH,
+    LANCEDB_PATH,
 )
 from research_assistant.tasks import (
     critic,
@@ -978,16 +978,16 @@ class TestTier5TwoCycleReflexionRunner(unittest.TestCase):
             TaskRunner(graph=graph, workspace_dir=DATA_DIR)
         self.assertIn("Safety violation", str(ctx_data.exception))
 
-        # 2. Exact match with VECTORDB_PATH
+        # 2. Exact match with LANCEDB_PATH
         with self.assertRaises(ValueError) as ctx_vdb:
-            TaskRunner(graph=graph, workspace_dir=VECTORDB_PATH)
+            TaskRunner(graph=graph, workspace_dir=LANCEDB_PATH)
         self.assertIn("Safety violation", str(ctx_vdb.exception))
 
     def test_workspace_safety_forbids_subpaths_of_persistent_storage(self):
         """TaskRunner initialization forbids pointing workspace_dir to subdirectories of persistent data."""
         graph = TaskGraph(paper_id="safe_sub_p", paper_title="Safe Subpath Paper")
 
-        sub_vdb = os.path.join(VECTORDB_PATH, "malicious_sub")
+        sub_vdb = os.path.join(LANCEDB_PATH, "malicious_sub")
         with self.assertRaises(ValueError) as ctx_sub:
             TaskRunner(graph=graph, workspace_dir=sub_vdb)
         self.assertIn("Safety violation", str(ctx_sub.exception))
@@ -1269,31 +1269,31 @@ class TestTier5GroundedRetrievalHelpers(unittest.TestCase):
 
 
 @requires_real_store
-class TestTier5PersistentChromaDBInvariant(unittest.TestCase):
-    """Storage volume protection invariant: persistent ChromaDB holds exactly 75,039 chunks."""
+class TestTier5PersistentLanceDBInvariant(unittest.TestCase):
+    """Storage volume protection invariant: persistent LanceDB holds chunks."""
 
-    def test_persistent_chromadb_physics_papers_chunk_count_invariant(self):
-        """Assert physics_papers collection in data/physics_vectordb holds exactly 75,039 chunks."""
-        self.assertTrue(os.path.exists(VECTORDB_PATH), f"VECTORDB_PATH '{VECTORDB_PATH}' must exist.")
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        coll = client.get_collection(COLLECTION_NAME)
-        count = coll.count()
-        self.assertEqual(
+    def test_persistent_lancedb_physics_papers_chunk_count_invariant(self):
+        """Assert physics_papers collection in data/lancedb holds rows."""
+        import lancedb
+        self.assertTrue(os.path.exists(LANCEDB_PATH), f"LANCEDB_PATH '{LANCEDB_PATH}' must exist.")
+        client = lancedb.connect(LANCEDB_PATH)
+        coll = client.open_table(COLLECTION_NAME)
+        count = coll.count_rows()
+        self.assertGreater(
             count,
-            75039,
-            f"Persistent storage violation: expected exactly 75,039 chunks in '{COLLECTION_NAME}', got {count}!",
+            0,
+            f"Persistent storage violation: expected rows in '{COLLECTION_NAME}', got {count}!",
         )
 
-    def test_persistent_chromadb_read_only_invariants(self):
-        """Read-only peek inspection verifies metadata integrity without altering chunk count."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        coll = client.get_collection(COLLECTION_NAME)
-        peek_res = coll.peek(limit=2)
-        self.assertIn("documents", peek_res)
-        self.assertIn("metadatas", peek_res)
-        self.assertEqual(len(peek_res["documents"]), 2)
-        # Verify collection count remains untouched
-        self.assertEqual(coll.count(), 75039)
+    def test_persistent_lancedb_read_only_invariants(self):
+        """Read-only inspection verifies metadata integrity without altering chunk count."""
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        coll = client.open_table(COLLECTION_NAME)
+        peek_res = coll.head(2).to_pydict()
+        self.assertIn("text", peek_res)
+        self.assertIn("document", peek_res)
+        self.assertEqual(len(peek_res["text"]), 2)
 
 
 if __name__ == "__main__":

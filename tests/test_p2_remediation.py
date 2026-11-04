@@ -152,8 +152,7 @@ class TestFeature15LanceDBRemediation(unittest.TestCase):
         versions_dir = os.path.join(col_lance_dir, "_versions")
         os.makedirs(versions_dir, exist_ok=True)
 
-        with patch.object(db, "LANCEDB_PATH", lancedb_dir), \
-             patch.object(db, "USE_LANCEDB", True):
+        with patch.object(db, "LANCEDB_PATH", lancedb_dir):
 
             key1 = db._cache_key()
 

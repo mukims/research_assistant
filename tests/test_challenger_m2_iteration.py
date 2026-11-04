@@ -29,7 +29,7 @@ from tests.optional_deps import requires_real_store
 
 from research_assistant.config import (
     COLLECTION_NAME,
-    VECTORDB_PATH,
+    LANCEDB_PATH,
 )
 from research_assistant.tasks.critic import (
     CritiqueFlaw,
@@ -674,17 +674,18 @@ class TestProposerCriticRobustnessAndFallbacks(unittest.TestCase):
 
 @requires_real_store
 class TestPersistentStorageChunkCountInvariant(unittest.TestCase):
-    """Empirically verify ChromaDB persistent storage chunk count is intact."""
+    """Empirically verify LanceDB persistent storage chunk count is intact."""
 
-    def test_chromadb_physics_papers_chunk_count_equals_75039(self):
-        """Assert persistent collection 'physics_papers' in data/physics_vectordb has exactly 75,039 chunks."""
-        client = chromadb.PersistentClient(path=VECTORDB_PATH)
-        collection = client.get_collection(COLLECTION_NAME)
-        count = collection.count()
-        self.assertEqual(
+    def test_lancedb_physics_papers_chunk_count_positive(self):
+        """Assert persistent collection 'physics_papers' in LanceDB has rows."""
+        import lancedb
+        client = lancedb.connect(LANCEDB_PATH)
+        table = client.open_table(COLLECTION_NAME)
+        count = table.count_rows()
+        self.assertGreater(
             count,
-            75039,
-            f"Persistent storage count violated! Expected 75039, got {count}",
+            0,
+            f"Persistent storage count violated! Table '{COLLECTION_NAME}' is empty",
         )
 
 

@@ -18,12 +18,8 @@ except ImportError:
     lancedb = None
 
 from research_assistant.config import (
-    VECTORDB_PATH,
     COLLECTION_NAME,
-    BM25_INDEX_PATH,
     EMBED_MODEL,
-    CHROMA_SERVER,
-    USE_LANCEDB,
     LANCEDB_PATH,
     LANCE_TABLE_NAME,
     LANCE_SUMMARY_TABLE_NAME,
@@ -48,9 +44,7 @@ def open_lance_store(path=None):
 
 def is_lance_ready() -> bool:
     """Check if LanceDB is enabled and has the main table initialized."""
-    if not USE_LANCEDB or lancedb is None:
-        return False
-    if not os.path.exists(LANCEDB_PATH):
+    if lancedb is None or not os.path.exists(LANCEDB_PATH):
         return False
     try:
         from research_assistant.shared.lance_store import get_lance_connection, list_table_names
@@ -136,10 +130,6 @@ class LanceBM25Proxy:
 
 
 def _cache_key():
-    try:
-        mtime = os.path.getmtime(BM25_INDEX_PATH)
-    except OSError:
-        mtime = None
     lance_mtime = None
     if os.path.exists(LANCEDB_PATH):
         try:
@@ -164,43 +154,21 @@ def _cache_key():
             lance_mtime = max(candidates) if candidates else None
         except OSError:
             pass
-    return (USE_LANCEDB, LANCEDB_PATH, VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH, mtime, lance_mtime)
+    return (LANCEDB_PATH, COLLECTION_NAME, EMBED_MODEL, lance_mtime)
 
 
 class StoreUnavailable(RuntimeError):
-    """The Chroma server that owns the store is not answering."""
+    """The store is not available or could not be opened."""
 
 
 def open_store():
-    """The client for the store (LanceDB if enabled and available, ChromaDB as fallback). Every process goes through here.
-
-    With config.CHROMA_SERVER set, the server owns VECTORDB_PATH and this connects to it
-    (see config.chroma_server_from for why); otherwise the files are opened directly,
-    which is only safe when no other process has them open."""
-    if USE_LANCEDB and lancedb is not None:
-        try:
-            return open_lance_store()
-        except Exception as exc:
-            logger.warning(
-                "LanceDB preferred but open_lance_store failed: %s; falling back to Chroma",
-                exc,
-            )
-
-    import chromadb
-    from urllib.parse import urlparse
-
-    if not CHROMA_SERVER:
-        return chromadb.PersistentClient(path=VECTORDB_PATH)
-    url = urlparse(CHROMA_SERVER)
-    client = chromadb.HttpClient(host=url.hostname, port=url.port or 8000, ssl=url.scheme == "https")
+    """The client for the LanceDB store. Every process goes through here."""
+    if lancedb is None:
+        raise StoreUnavailable("lancedb package is required but not installed.")
     try:
-        client.heartbeat()
-    except Exception as exc:  # noqa: BLE001 — any failure means no usable server
-        raise StoreUnavailable(
-            f"The Chroma server at {CHROMA_SERVER} is not answering ({exc}). Start it with: "
-            f"chroma run --path {VECTORDB_PATH} --port {url.port or 8000}"
-        ) from exc
-    return client
+        return open_lance_store()
+    except Exception as exc:
+        raise StoreUnavailable(f"Failed to open LanceDB store at {LANCEDB_PATH}: {exc}") from exc
 
 
 def embedder_record(embeddings) -> dict:
@@ -234,17 +202,18 @@ def check_embedder(collection) -> None:
     collection is created and compared here whenever one is opened. A collection
     that predates the record (index v1, v2) is not checked.
     """
-    if getattr(collection, "is_lancedb", False):
+    meta = getattr(collection, "metadata", None)
+    if not isinstance(meta, dict):
         return
-    stored = (getattr(collection, "metadata", None) or {}).get("embedder")
-    if stored and stored != EMBED_MODEL:
+    stored = meta.get("embedder")
+    if isinstance(stored, str) and stored and stored != EMBED_MODEL:
         raise RuntimeError(
             f"Collection {collection.name!r} was built with the embedder {stored!r} but "
             f"CITATION_EMBED_MODEL is {EMBED_MODEL!r}. Set CITATION_EMBED_MODEL={stored} to "
             "read it, or build a new index version for the new embedder."
         )
-    stored_build = (getattr(collection, "metadata", None) or {}).get("embedder_build")
-    if stored_build:
+    stored_build = meta.get("embedder_build")
+    if isinstance(stored_build, str) and stored_build:
         current = _current_build()
         if current and current != stored_build:
             logger.warning(
@@ -259,113 +228,25 @@ def clear_search_cache() -> None:
 
 
 def load_search_resources():
-    """Cached: see _load_search_resources_uncached() for what is loaded."""
+    """Load and cache LanceDB search table and proxies."""
     key = _cache_key()
     if key not in _cache:
         _cache.clear()
-        if is_lance_ready():
-            try:
-                client = open_lance_store()
-                table = client.get_collection(LANCE_TABLE_NAME)
-                _cache[key] = (
-                    table,
-                    LanceBM25Proxy(),
-                    LanceSequenceProxy(table, "text"),
-                    LanceSequenceProxy(table, "metadata"),
-                )
-                return _cache[key]
-            except Exception as e:
-                logger.warning("Failed to open LanceDB store (%s), falling back to ChromaDB.", e)
-        _cache[key] = _load_search_resources_uncached()
+        client = open_store()
+        try:
+            table = client.get_collection(LANCE_TABLE_NAME)
+        except Exception as e:
+            logger.error("Collection '%s' not found in LanceDB at '%s': %s", LANCE_TABLE_NAME, LANCEDB_PATH, e)
+            raise RuntimeError(f"Database not initialized. Please ingest papers first: {e}") from e
+        
+        check_embedder(table)
+        _cache[key] = (
+            table,
+            LanceBM25Proxy(),
+            LanceSequenceProxy(table, "text"),
+            LanceSequenceProxy(table, "metadata"),
+        )
     return _cache[key]
-
-
-def _load_search_resources_uncached():
-    """
-    Connect to ChromaDB, fetch all chunks in index order, and load the
-    BM25 pickle.
-
-
-    Returns:
-        tuple: (collection, bm25, texts, metadatas)
-    """
-    # Imported here rather than at module scope: chromadb pulls in a large
-    # dependency tree, and agents that only need this module's pure helpers
-    # (or their tests) should not have to install it.
-    import chromadb
-
-    logger.info("Connecting to ChromaDB at %s…", VECTORDB_PATH)
-    chroma_client = open_store()
-
-    try:
-        collection = chroma_client.get_collection(name=COLLECTION_NAME)
-    except Exception:
-        logger.error(
-            "Collection '%s' not found in ChromaDB at '%s'.\n"
-            "  → You need to run Agent 3 (python agent3_ingestor.py) first to\n"
-            "    ingest papers and create the vector database.",
-            COLLECTION_NAME,
-            VECTORDB_PATH,
-        )
-        raise RuntimeError("Database not initialized. Please ingest papers first.")
-    check_embedder(collection)
-
-    # Paginate all chunks from the collection
-    paired_data = []
-    limit, offset = 5000, 0
-    while True:
-        batch = collection.get(
-            include=["documents", "metadatas"], limit=limit, offset=offset
-        )
-        if not batch["ids"]:
-            break
-        for doc, meta, chunk_id in zip(
-            batch["documents"], batch["metadatas"], batch["ids"]
-        ):
-            try:
-                idx = int(chunk_id.split("_")[1])
-                paired_data.append((idx, doc, meta))
-            except (ValueError, IndexError):
-                logger.warning("Skipping chunk with unexpected ID format: %s", chunk_id)
-        offset += limit
-
-    paired_data.sort(key=lambda x: x[0])
-    texts = [item[1] for item in paired_data]
-    metadatas = [item[2] for item in paired_data]
-
-    logger.info("Loaded %d chunks from ChromaDB.", len(texts))
-
-    if not os.path.exists(BM25_INDEX_PATH):
-        logger.error(
-            "BM25 index not found at '%s'.\n"
-            "  → Run Agent 3 (python agent3_ingestor.py) to build it.",
-            BM25_INDEX_PATH,
-        )
-        raise RuntimeError("BM25 index not found. Please ingest papers first.")
-
-    logger.info("Loading BM25 index from %s…", BM25_INDEX_PATH)
-    with open(BM25_INDEX_PATH, "rb") as f:
-        payload = pickle.load(f)
-
-    # Two on-disk shapes: a bare BM25Okapi (built before the tokenizer was
-    # versioned, with `\w+`) and a dict carrying the tokenizer tag. The tag is
-    # copied onto the object so hybrid_search can pick the matching query
-    # tokenizer without a second return value.
-    if isinstance(payload, dict) and "bm25" in payload:
-        bm25 = payload["bm25"]
-        version = payload.get("tokenizer", "v1")
-    else:
-        bm25 = payload
-        version = "v1"
-    bm25.tokenizer_version = version
-    if version not in ("v1", TOKENIZER_VERSION):
-        logger.warning(
-            "BM25 index was built with tokenizer %s but this code knows %s — "
-            "keyword recall may be degraded; re-run ingestion to rebuild it.",
-            version, TOKENIZER_VERSION,
-        )
-
-    return collection, bm25, texts, metadatas
 
 
 def get_max_chunk_index(collection) -> int:

@@ -36,7 +36,7 @@ NOT_ASSESSED_EXPLANATIONS = {
     "malformed_claim": "Not assessed — the extracted sentence is a fragment and could not be judged.",
     "unresolved_ref": "Not assessed — the citation could not be matched to a bibliography entry.",
     # Agent 8 (draft verification) outcomes.
-    "orphaned": "Not assessed — the citation key in the draft is not in the citation mapping.",
+    "orphaned": "Not assessed — the citation key in the draft is not in the citation mapping (for example, a pre-existing LaTeX citation without a bibliography mapping).",
     "unresolved": "Not assessed — the cited source has no chunks in the corpus.",
     "not_downloaded": "Not assessed — the cited paper is not in the corpus.",
     "deferred_paywalled": "Not assessed — deferred because more than 90% of references in this paragraph are missing.",
