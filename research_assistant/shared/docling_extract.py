@@ -138,10 +138,10 @@ def get_ocr_converter():
 
     if sys.platform == "darwin":
         ocr_opts = OcrMacOptions(
-            lang=["en-US"], recognition="accurate", force_full_page_ocr=True
+            lang=["en-US"], recognition="accurate", force_full_page_ocr=False
         )
     else:
-        ocr_opts = EasyOcrOptions(lang=["en"], force_full_page_ocr=True)
+        ocr_opts = EasyOcrOptions(lang=["en"], force_full_page_ocr=False)
 
     opts = PdfPipelineOptions(
         do_ocr=True,
@@ -173,8 +173,11 @@ def extract_docling(
 
     Returns a canonical research_assistant Document instance.
     """
-    if enable_ocr is not None and enable_ocr:
-        force_ocr = True
+    disable_ocr = os.environ.get("DOCLING_DISABLE_OCR", "0").lower() in ("1", "true", "yes")
+    if disable_ocr:
+        force_ocr = False
+    elif enable_ocr is not None:
+        force_ocr = bool(enable_ocr)
     key = key or os.path.basename(pdf_path).strip().replace(" ", "_").lower()
     images_dir = images_dir or config.IMAGES_DIR
     os.makedirs(images_dir, exist_ok=True)
@@ -198,7 +201,7 @@ def extract_docling(
             doc = None
 
     if doc is None:
-        do_ocr = force_ocr if force_ocr is not None else needs_ocr(pdf_path)
+        do_ocr = False if disable_ocr else (force_ocr if force_ocr is not None else needs_ocr(pdf_path))
         converter = get_ocr_converter() if do_ocr else get_digital_converter()
         extraction_mode = "docling_ocr" if do_ocr else "docling"
 
@@ -207,20 +210,28 @@ def extract_docling(
             conv_res = converter.convert(pdf_path)
             doc = conv_res.document
         except Exception as exc:
-            if not do_ocr:
+            if not do_ocr and not disable_ocr:
                 logger.warning("Digital Docling conversion failed for %s (%s) — retrying with OCR.", key, exc)
                 conv_res = get_ocr_converter().convert(pdf_path)
                 doc = conv_res.document
                 extraction_mode = "docling_ocr"
+            elif do_ocr:
+                logger.warning("OCR Docling conversion failed for %s (%s) — falling back to digital converter.", key, exc)
+                conv_res = get_digital_converter().convert(pdf_path)
+                doc = conv_res.document
+                extraction_mode = "docling"
             else:
                 raise
 
-        # Fallback check: if digital conversion returned zero texts, retry with OCR
-        if not do_ocr and len(doc.texts) == 0:
+        # Fallback check: if digital conversion returned zero texts, retry with OCR if not disabled
+        if not do_ocr and not disable_ocr and len(doc.texts) == 0:
             logger.info("Digital Docling produced 0 texts for %s — retrying with OCR…", key)
-            conv_res = get_ocr_converter().convert(pdf_path)
-            doc = conv_res.document
-            extraction_mode = "docling_ocr"
+            try:
+                conv_res = get_ocr_converter().convert(pdf_path)
+                doc = conv_res.document
+                extraction_mode = "docling_ocr"
+            except Exception as exc:
+                logger.warning("OCR fallback conversion failed for %s: %s", key, exc)
 
         # Cache converted Docling document JSON for fast subsequent runs
         try:

@@ -307,7 +307,11 @@ def main():
     parser.add_argument("--keys", type=str, default=None, help="Comma-separated list of PDF keys to process")
     parser.add_argument("--skip-summaries", action="store_true", help="Skip pre-seeding summaries")
     parser.add_argument("--skip-abstracts", action="store_true", help="Skip ingesting abstract_only records")
+    parser.add_argument("--no-ocr", action="store_true", help="Disable OCR to prevent memory spikes on scanned PDFs")
     args = parser.parse_args()
+
+    if args.no_ocr:
+        os.environ["DOCLING_DISABLE_OCR"] = "1"
 
     if args.dry_run:
         from research_assistant import config
