@@ -11,6 +11,7 @@ venv/
 # All runtime state lives under data/ — see config.DATA_DIR
 data/
 workspace_runs/
+_archive*/
 
 # Layout-detection checkpoint (symlinked, ~830MB)
 model_final.pth

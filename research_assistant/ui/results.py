@@ -128,13 +128,17 @@ def _render_seed_and_downloads(query, final):
             ]
             if scoped_refs:
                 extracted_refs = scoped_refs
+        elif not has_seed:
+            extracted_refs = []
 
         target_keys = {source_key(r) for r in extracted_refs if isinstance(r, dict) and source_key(r)} if extracted_refs else set()
 
         all_downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
         all_failed = _manifest(config.FAILED_DOWNLOADS_PATH)
-        if not all_failed and has_fetch_failures:
+        if has_fetch_failures:
             all_failed = {f"fail_{i}": f for i, f in enumerate(final["fetch_failures"])}
+        if not has_seed and "downloaded" in final:
+            all_downloaded = {f"dl_{i}": d for i, d in enumerate(final["downloaded"])}
 
         if target_keys:
             downloaded = [rec for k, rec in all_downloaded.items() if k in target_keys]
