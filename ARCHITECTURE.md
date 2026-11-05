@@ -1045,3 +1045,46 @@ Across the codebase remediation, several critical algorithmic and architectural 
    - Eliminated unauthorized fallback from local Ollama to cloud endpoints upon errors, strictly maintaining local data privacy.
    - Implemented Pydantic-grounded JSON schema enforcement, client connection pooling (`_CLIENT_CACHE`), and mandatory 60s request timeouts.
 
+---
+
+## 17. Docling Multi-Modal Extraction, Deduplication, and Production Cutover (Phase 5–7 Rebuild)
+
+To resolve systemic extraction limitations inherent in GROBID (e.g., loss of complex vector graphics, dropped mathematical derivations, missed multi-panel subplots, and crude coordinate heuristics), Marvin migrated the primary document parsing pipeline to **Docling** with fallback to PyMuPDF.
+
+### 17.1 Architecture & Capabilities (`shared/docling_extract.py`)
+1. **Layout-Aware Multi-Modal Parsing**:
+   - Converts digital PDFs into structured document ASTs (`DoclingDocument`), preserving headings, body sections, mathematical formulas, and tabular structures.
+   - Converts tabular elements directly into clean Markdown tables (`Figure.table_markdown`), ensuring structured numerical data is queryable via text chunks.
+   - Extracts mathematical equations into LaTeX syntax (`entries.append({"type": "formula", ...})`).
+2. **High-Precision Figure Cropping**:
+   - Eliminates caption-box contamination: crops only the visual canvas coordinates of vector plots and photographic figures into `data/images/`, leaving caption text in structured chunk metadata.
+   - Subpanel merging: groups adjacent or touching multi-panel subplots (`Figure 1a`, `Figure 1b`) on the same page into unified figure crops.
+   - Decorative artifact and full-page rejection: filters out page border headers, decorative lines, and sub-60px visual artifacts ($W < 60\text{ px}$ or $H < 60\text{ px}$), as well as false-positive full-page crops (>80% page dimensions without captions).
+3. **Scanned Document Handling & Memory Optimization**:
+   - Integrated `needs_ocr()` pre-flight detection (`data/ocr_preflight.json`).
+   - Defaults to local EasyOCR with `--no-ocr` and `force_full_page_ocr=False` guards to prevent high-resolution image tensor memory spikes and kernel OOM kills.
+4. **PyMuPDF Fallback Guard (`shared/ingest_v2.py`)**:
+   - When Docling yields an empty document tree (e.g. single-page synthetic notes or short non-hierarchical abstracts), `process_pdf_v2` automatically falls back to PyMuPDF text extraction, ensuring 100% chunk retention across edge cases.
+
+### 17.2 Corpus Deduplication & Canonical Manifest (`data/corpus_dedupe.json`)
+Before rebuilding the corpus, an automated deduplication analysis scanned all PDFs on disk:
+- Grouped duplicate files by SHA-256 content hashes and title canonicalization.
+- Established canonical `kept` document identifiers (1,552 unique PDFs) and mapped historical variations to `aliases`.
+- Quarantined 140 corrupt, truncated, or unresolvable files in `data/quarantine/`, guaranteeing that only clean, canonical literature enters the vector index.
+- Combined 1,552 verified PDFs with 167 abstract-only records to establish the immutable 1,719 canonical document baseline.
+
+### 17.3 Zero-Day MVCC Storage Compaction
+LanceDB uses an append-only Multi-Version Concurrency Control (MVCC) architecture. In large batch ingestion runs, frequent commits generate hundreds of intermediate fragment files (previously causing database bloat up to 11+ GB).
+- Integrated periodic and post-rebuild zero-day compaction: `tbl.optimize(cleanup_older_than=timedelta(seconds=0))`.
+- Merges all Apache Arrow data files and permanently prunes orphaned historical versions, reducing total LanceDB disk usage to **783 MB** for all 125,000+ chunks and 1,719 summaries.
+
+### 17.4 Production Cutover & 1:1:1 Consistency Verification
+The cutover from staging (`data/lancedb_docling/`, `data/images_docling/`, `data/ingested_docling.json`) to production (`data/lancedb/`, `data/images/`, `data/ingested_v3.json`) was executed atomically with pre-cutover backups archived to `_archive_20261102/data_pre_docling/`.
+
+The production corpus satisfies strict 1:1:1 invariant consistency:
+- **Manifest (`data/ingested_v3.json`)**: exactly 1,719 entries.
+- **Papers Table (`physics_papers_v3`)**: exactly 1,719 distinct documents across 125,084 chunks.
+- **Summaries Table (`physics_summaries_v3`)**: exactly 1,719 distinct documents.
+- **Figure Images (`data/images/`)**: 14,668 clean figure crops with 0 small figures ($< 60\text{ px}$).
+- **Quarantine / Aliases**: 0 quarantined documents and 0 unresolved alias keys in the database.
+

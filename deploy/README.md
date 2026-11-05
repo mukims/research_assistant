@@ -100,3 +100,20 @@ prints the digest; pull the same build on any machine that will query this index
 
 `tests/test_deploy_scripts.py` also runs `migrate_setup.sh` under stubs (a copy in a throwaway project root).
 
+## Rebuilding the Corpus with Docling & LanceDB
+
+To rebuild or refresh the corpus into LanceDB with multi-modal Docling extraction, clean figure crops, and zero-day MVCC table compaction:
+
+```bash
+# Optional dry run to check candidate counts and OCR preflight
+python scripts/rebuild_corpus_docling.py --dry-run
+
+# Run full extraction and ingestion into LanceDB (with --no-ocr to prevent memory spikes)
+python scripts/rebuild_corpus_docling.py --batch-size 10 --no-ocr
+```
+
+- **Resumes automatically**: Uses `data/ingested_docling.json` (or `data/ingested_v3.json`) to skip already-ingested papers.
+- **Deduplication**: Reconciles files against `data/corpus_dedupe.json`, ignoring quarantined and alias duplicates.
+- **Compaction**: Automatically executes zero-day table compaction (`cleanup_older_than=timedelta(seconds=0)`) every 10 batches and upon completion, keeping LanceDB disk usage under ~800 MB.
+- **Tantivy FTS**: Refreshes full-text search indexes on `text` and `citation_source` upon completion.
+

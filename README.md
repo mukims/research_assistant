@@ -63,7 +63,7 @@ experimental, so treat what they produce as leads, not findings.
 | **Cite a draft** | a `.txt`, `.md` or `.tex` draft, uploaded or pasted (a `.tex` file is read as its body text, existing `\cite` keys kept; the cited draft comes back as text with `\cite` keys, not a compilable `.tex`) | the cited draft, a key → source map for BibTeX, a sentence-by-sentence report, and a verdict on every citation: *supports*, *partially*, *contradicts*, *does not support*, or *unclear* |
 | **Research idea** | a research idea, an uploaded seed PDF, or a seed link (arXiv or direct URL) | a corpus built from the literature, starter prompt exploration, a synthesis of what's already been done (deep Map-Reduce notes or fast single-pass), an audit of the seed paper, Markdown/BibTeX export, and an instant handoff button to brainstorm the findings in Research Chat |
 | **Research chat** | questions | streamed answers grounded in the corpus, with the sources he used |
-| **Corpus library** | a folder of PDFs, a ZIP archive, or a list of DOIs/arXiv IDs/URLs | batch ingestion directly into ChromaDB/LanceDB and BM25 index with parallel workers, OCR for scanned papers, deduplication, and an interactive corpus inspector |
+| **Corpus library** | a folder of PDFs, a ZIP archive, or a list of DOIs/arXiv IDs/URLs | batch ingestion directly into LanceDB (or ChromaDB) and Tantivy/BM25 index with parallel workers, OCR for scanned papers, deduplication, and an interactive corpus inspector |
 | **Labs: Agent task planner** (experimental) | a paper — a PDF from your library, an upload, GROBID TEI XML, or plain-text methods notes | a dependency graph of replication tasks, grouped into parallel waves and assigned to six agent roles; a Mermaid flowchart, a Markdown plan and Antigravity agent specs to download; and a replication scorecard if you run it (a dry run, or autonomously, with the model writing each task's deliverables) |
 | **Labs: Technique transfer** (experimental) | a problem description or question from your scientific field | a cross-disciplinary technique transfer proposal: bottlenecks restated without field-specific jargon, matching technique cards from other disciplines, role-by-role mappings, refutable predictions, an adversarial critic debate, prior-art checks (arXiv, OpenAlex), and verifiable reward scoring |
 | **How to use** | nothing | [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide |
@@ -83,8 +83,8 @@ research idea ─┐
 PDF / ZIP ─────┼─► Agent 0  find a seed paper           arXiv → OpenAlex → Semantic Scholar
 Folder / URLs ─┤   Agent 1  raid its reference list     GROBID, regex fallback when it's down
 Scanned notes ─┘   Agent 2  fetch open-access PDFs      Unpaywall → Europe PMC → arXiv
-                   Agent 3  read, chunk, embed, summarise   ChromaDB + BM25, one summary per paper
-                            │ (with local EasyOCR / VLM for scanned PDFs & notes)
+                   Agent 3  read, chunk, embed, summarise   LanceDB + Tantivy FTS, one summary per paper
+                            │ (Docling multimodal parsing + local EasyOCR / VLM for scans)
             ┌───────────────┼──────────────────────┐
             ▼               ▼                      ▼
         Agent 4         Agent 5 ──► Agent 8     Agent 7
@@ -208,8 +208,7 @@ runs directly from the **Technique transfer** tab in the UI or from the command 
    reward.
 
 ```bash
-deploy/local.sh chroma                                # the store's server, if the app isn't running
-python scripts/build_cards.py                         # once; resumes where it stopped
+python scripts/build_cards.py                         # once; resumes where it stopped (uses LanceDB directly)
 python scripts/transfer.py -q "your problem" --show-cards   # bottlenecks and candidate cards only
 python scripts/transfer.py -q "your problem"                # the full run
 ```
@@ -236,7 +235,7 @@ Results will follow when there are some. He has not been told this is a promise.
 
 Sometimes you already have forty PDFs in a folder, a ZIP archive from a colleague, or a list of DOIs, and you don't want Marvin searching arXiv for papers you're already looking at.
 
-The **Corpus library** tab bypasses discovery and feeds documents straight into ChromaDB/LanceDB and the BM25 index:
+The **Corpus library** tab bypasses discovery and feeds documents straight into LanceDB (or legacy ChromaDB) and the Tantivy/BM25 index:
 - **Multi-File & ZIP Upload**: Drag in dozens of PDFs or drop a `.zip` archive. Marvin validates `%PDF-` magic headers, extracts titles/metadata, and stages them cleanly.
 - **Local Folder Scan**: Point him at any directory on disk (e.g. `/Users/you/papers/`) with recursive scanning to ingest an entire local library at once.
 - **Batch DOIs / URLs / arXiv IDs**: Paste a raw list of identifiers (one per line). Marvin resolves them via Unpaywall, Europe PMC, or arXiv, downloads the open-access PDFs, and embeds them.
@@ -288,7 +287,7 @@ the code:
   names is the right one is still yours to judge.
 
 
-The first of those is being fixed: the current index (v3) is built from GROBID full text with proper chunks and captions, and embeds each figure as an image so a text query can find it — see `PIPELINE.md`. Older indexes stay on disk, read-only.
+The first of those is being fixed: the current index (v3) is built with Docling and GROBID full text with proper layout-aware chunks, table markdown, and captions, and embeds each figure as an image so a text query can find it — see `PIPELINE.md`. Older indexes stay on disk, read-only.
 
 We will give him depth. Those three are where it goes. Until then he is a very
 well-read undergraduate: he has read everything and understood some of it. He
@@ -320,12 +319,12 @@ streamlit run app.py
   answering, then the app, listening on `127.0.0.1` only (a bare `streamlit run app.py`
   listens on every network interface). `status` and `down` do what they say.
   See [deploy/README.md](deploy/README.md).
-- **The vector store has one owner: a Chroma server** on `localhost:8000`, which
-  `deploy/local.sh up` starts. The app and every script connect to it; none opens the files.
-  ChromaDB's local store is not safe across processes — two with it open lost 17,201
-  vectors on 2026-10-21. To run a script without the app, start the server alone with
-  `deploy/local.sh chroma`. `CITATION_CHROMA_SERVER=` (empty) opens the files directly, for
-  a store nothing else has open.
+- **The vector store defaults to LanceDB (`CITATION_USE_LANCEDB=true`)**, storing disk-backed
+  columnar Apache Arrow tables under `data/lancedb/` (`physics_papers_v3` and `physics_summaries_v3`)
+  with embedded Tantivy full-text search. It requires no background server process, supports concurrent
+  readers/writers across processes safely, and compacts intermediate MVCC versions to keep disk usage
+  minimal (~780 MB for 1,719 papers and 125,000+ chunks). Legacy ChromaDB on `localhost:8000` is also
+  supported (`CITATION_USE_LANCEDB=false`).
 - **Models** run locally through [Ollama](https://ollama.com) by default. Set
   `GEMINI_API_KEY` to use Gemini (`gemini-3.5-flash-lite`) for chat, synthesis
   and judging, or `LLM_BACKEND=openai` (with `OPENAI_BASE_URL` /
@@ -388,6 +387,7 @@ or the acknowledgement checkbox in the UI.
 | `research_assistant/agents/` | Agents 0–8, one file each (the pipeline above) |
 | `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, the citation audit |
 | `research_assistant/shared/lance_store.py` | LanceDB storage adapter: zero-copy vector search, Tantivy FTS, cosine metric, prefiltering, and file compaction |
+| `research_assistant/shared/docling_extract.py` | Docling multi-modal parser: layout detection, vector figure cropping, Markdown tables, and OCR routing |
 | `research_assistant/shared/ocr.py` | Optical Character Recognition layer: EasyOCR (MPS/GPU) and Vision LLM |
 | `research_assistant/shared/batch_uploader.py` | staging, directory scanning, ZIP extraction, and online URL/DOI fetching |
 | `research_assistant/ui/corpus_tab.py` | Corpus library tab: batch file/folder ingestion and corpus inspector |
@@ -396,7 +396,7 @@ or the acknowledgement checkbox in the UI.
 | `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
 | `research_assistant/tasks/` | the Agent task planner (Pipeline 2): `models`, `extractor`, `critic`, `iteration`, `retrieval`, `harness`, `roles`, `runner`, `workspace`, `ui` |
 | `research_assistant/transfer/` | borrowing from other fields: technique cards, bottlenecks, transfers, the critic, scoring and reports |
-| `scripts/` | operator tools: judge and citer evaluation, labelling, index statistics, and the technique-transfer commands (`build_cards.py`, `transfer.py`, `evaluate_transfer.py`, `build_case_corpus.py`, `review_cards.py`) |
+| `scripts/` | operator tools: Docling rebuild (`rebuild_corpus_docling.py`), evaluation, labelling, and technique-transfer commands |
 | `notebooks/` | `pipeline.ipynb`, a test bench that runs Agents 0–8 on one paper |
 | `deploy/` | `local.sh`, which starts GROBID and the app on this machine only |
 | `tests/` | the test suite |

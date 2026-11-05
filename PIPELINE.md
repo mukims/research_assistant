@@ -39,7 +39,7 @@ and the app on `127.0.0.1`. See [deploy/README.md](deploy/README.md).
 | **Agent 0 — Discoverer** | [agent0_discoverer.py](research_assistant/agents/agent0_discoverer.py) | Takes a free-text research idea and searches relevance-ranked indexes in turn — arXiv, then OpenAlex, then Semantic Scholar — downloading the first result whose PDF actually fetches (paywalled publisher links are skipped, not fatal). Saves it into `data/raw/` under a `source_key`-derived name and records the query → paper in `seed_papers.json`. If nothing downloads, `--url` / `discover_from_url()` takes an arXiv or direct-PDF link instead, and `--seed-file` / `discover_from_file()` seeds from a PDF you already have — validating the magic bytes, reading a title / DOI / arXiv id out of it, and filing it under the same `source_key` scheme (falling back to a content hash). With that path the research query is optional: left blank, it is inferred from the paper's title or filename. From here the rest of the pipeline runs unchanged. |
 | **Agent 1 — Extractor** | [agent1_extractor.py](research_assistant/agents/agent1_extractor.py) | Sends every PDF in `data/raw/` to a GROBID server and parses the TEI output into each paper's own metadata plus its full reference list (title, authors, year, DOI, raw string), scoring each consolidated DOI against the printed reference so grey-literature mismatches can be flagged. **When GROBID is unreachable — or returns no reference list for a particular paper — it falls back** to pattern-matching a numbered reference list (`[1]`, `1.`, `(1)`) out of that PDF's `pdftotext` output instead. The fallback is weaker (a raw string per reference, no DOIs, no authors/year), but it keeps the pipeline moving instead of dead-ending on a single external Java service. The path taken — `grobid`, `regex`, or `none` — is recorded per PDF, and a per-run count sits under `"extraction"` in `extracted_citations.json`. |
 | **Agent 2 — Fetcher** | [agent2_fetcher.py](research_assistant/agents/agent2_fetcher.py) | Collapses the references to distinct sources, resolves a DOI per source (trusting Agent 1 when it was confident, otherwise asking Crossref), and tries to download an open-access PDF from Unpaywall → Europe PMC → arXiv. Writes `downloaded.json` / `failed_downloads.json` atomically after every paper, so a crashed run resumes where it stopped. A recorded failure is skipped next run only when it was definitive (paywalled, not indexed, 404); a transient one (dropped connection, rate limit, 5xx, truncated body) is retried. |
-| **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: GROBID full text split into sentence-window chunks, embedded into ChromaDB; a rebuild of the BM25 index; **one LLM summary per paper** into a separate `physics_summaries_v3` collection; and, for every figure and table, a caption chunk plus the cropped image itself embedded by embeddinggemma-2. No model describes the image. Tracks what is ingested in `data/ingested_v3.json` so re-runs are cheap. The result reports summaries that failed and figure images embedded. |
+| **Agent 3 — Ingestor** | [agent3_ingestor.py](research_assistant/agents/agent3_ingestor.py) | For each downloaded PDF: Docling/GROBID full text split into sentence-window chunks, embedded into LanceDB (or ChromaDB); a rebuild of the Tantivy/BM25 index; **one LLM summary per paper** into a separate `physics_summaries_v3` collection; and, for every figure and table, a caption chunk plus the cropped image itself embedded by embeddinggemma-2. No model describes the image. Tracks what is ingested in `data/ingested_v3.json` so re-runs are cheap. The result reports summaries that failed and figure images embedded. |
 | **Two-stage retrieval** | [shared/retrieve.py](research_assistant/shared/retrieve.py) | Stage 1: rank papers by summary similarity → LLM gate ("relevant prior work? Y/N") → shortlist. Stage 2: hybrid chunk search restricted to the shortlist. `research_answer()` then reads every shortlisted paper — its own restricted search and, in `map_reduce` mode, its own notes — and synthesises what is established, where the papers differ, and the gap, citing by checkable keys. |
 | **Agent 4 — Assistant** | [agent4_assistant.py](research_assistant/agents/agent4_assistant.py) | Given a single sentence of draft text, runs hybrid search over the corpus and asks the LLM to rewrite the sentence with the correct `\cite{key}` inserted, plus an explanation of why that source supports the claim. |
 
@@ -162,9 +162,10 @@ research_assistant/                the checkout root
 │   └── shared/
 │       ├── llm.py              backend-agnostic chat / chat_stream / embeddings (timeouts, JSON schemas, client pool)
 │       ├── lance_store.py      LanceDB adapter: zero-copy cosine search, Tantivy FTS, prefiltering, compaction
+│       ├── docling_extract.py  Docling multi-modal parser: layout detection, vector figure cropping, Markdown tables, OCR routing
 │       ├── ingestion.py        process → upsert → mark → index
 │       ├── tokenize.py         NFKC normalisation, English Snowball stemming, stopword removal
-│       ├── extract.py          PDF → Document: GROBID full-text TEI with PyMuPDF fallback
+│       ├── extract.py          PDF → Document: Docling/GROBID full-text TEI with PyMuPDF fallback
 │       ├── chunking.py         sentence windows packed within sections (preserves math/quantitative text)
 │       ├── figures.py          figure crops: the cropping and the naming; the image embedding lives in ingest_v2
 │       ├── ingest_v2.py        PDF → corpus entries: extract, chunk, caption, crop, embed the image
@@ -185,6 +186,8 @@ research_assistant/                the checkout root
 │       └── db.py  log.py  retry.py
 │
 ├── scripts/                        operator CLIs (run as PYTHONPATH=. python scripts/<name>.py)
+│   ├── rebuild_corpus_docling.py   rebuild corpus into LanceDB with Docling extraction, figure crops, and zero-day compaction
+│   ├── dedupe_corpus_pdfs.py       content-hash deduplication, alias mapping, and quarantine manifest generation
 │   ├── evaluate_judge.py           judge / verifier evaluation on the held-out set; --compare two runs
 │   ├── evaluate_citer.py           citer evaluation against the seed papers' own citations
 │   ├── evaluate_transfer.py        transfer evaluation and retrodiction benchmark runner
@@ -209,7 +212,8 @@ research_assistant/                the checkout root
     ├── transfer/                   technique cards (cards/), runs, and evaluation results
     ├── jobs/                       server-side job status ledgers (<job_id>/status.json)
     ├── logs/
-    ├── physics_vectordb/           persistent ChromaDB store
+    ├── corpus_dedupe.json          deduplication manifest: canonical kept IDs, alias mappings, and quarantine list
+    ├── physics_vectordb/           legacy ChromaDB store (read-only fallback)
     ├── seed_papers.json  extracted_citations.json  downloaded.json  failed_downloads.json
     ├── ingested.json  bm25_index.pkl          the v1 index (read-only history; CITATION_INDEX_VERSION=1)
     ├── ingested_v2.json  bm25_index_v2.pkl    the v2 index, nomic (read-only history; CITATION_INDEX_VERSION=2)
@@ -270,9 +274,11 @@ such as `/data` on a read-only or ephemeral host.
   **silently**: references then carry no DOIs, authors or years, and Agent 2
   fetches noticeably less. Check the GROBID indicator before concluding the
   pipeline is performing badly.
-- **Figures need GROBID.** Its coordinates are where figure crops come from. If
-  GROBID is down, a paper falls back to PyMuPDF text and gets no figures; the
-  run reports how many papers fell back.
+- **Figure Extraction**: In the modern Docling extraction pipeline (`shared/docling_extract.py`),
+  vector figures and visual plots are extracted directly with clean boundaries (no caption-box overlap),
+  touching subpanels are merged, and decorative artifacts ($< 60\text{ px}$) are filtered.
+  Under the legacy extraction path, figure coordinates rely on GROBID; if GROBID is down, legacy
+  extraction falls back to PyMuPDF text and gets no figures.
 
 ## Usage
 

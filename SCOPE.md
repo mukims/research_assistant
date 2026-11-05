@@ -47,7 +47,7 @@ local launcher ([deploy/README.md](deploy/README.md)).
 | Citer: "does this sentence need a citation" | ~55% recall, ~85% specificity | Scored against the seed papers' own citations |
 | Citer: picks a reference the authors cited | 18–22% target precision, 12–14% end to end | Author citations are a floor, not the truth: a correct paper the authors did not cite counts as wrong. Compare runs; do not read these as accuracy. See §9.1 of [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Reference fetching | 557 downloaded against 890 failed, about 39% | Of the failures, roughly 540 are paywalled, ~120 are open access with no direct PDF URL, ~70 are publisher 403s |
-| Corpus (index v2, nomic) | ~44k chunks, 735 paper summaries | One maintainer's corpus. Index v3 (embeddinggemma-2, with figure images) replaces it once the migration has run |
+| Corpus (index v3, embeddinggemma-2 + LanceDB) | 125,084 chunks, 1,719 paper summaries, 14,668 figure crops | 100% migrated with Docling multi-modal extraction, LanceDB zero-copy storage, and zero-day MVCC compaction (783 MB) |
 | Task planner | 150 unit tests passing (100% passing across critic, extractor, runner, reflection, retrieval, models, and workspace) | Measures syntactic DAG acyclicity, 6-phase completeness, artifact contract schemas, CPU thread safety, reflection recovery, and automatic bundle generation |
 
 The test suite has about 1,600 test functions in 81 files, and CI runs it on

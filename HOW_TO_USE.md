@@ -74,7 +74,7 @@ Two buttons sit under the upload form. The button you press decides what happens
 * **Add papers to library (one or more PDFs, or a ZIP archive)**:
   1. Drag and drop one or several PDFs, or a `.zip` archive containing papers.
   2. Click **Add papers to library**.
-  3. *What happens:* Direct batch ingestion with no citation audit. All papers are parsed, chunked, embedded, and added to the ChromaDB vector database and BM25 index in a single locked pass.
+  3. *What happens:* Direct batch ingestion with no citation audit. All papers are parsed, chunked, embedded, and added to the LanceDB vector database (or legacy ChromaDB) and Tantivy/BM25 index in a single locked pass.
 
 ---
 
@@ -196,7 +196,7 @@ Use Tab 3 to explore a new research topic or hypothesis from scratch without upl
 4. **Click "Explore Research Idea"**:
    - **Agent 0** searches arXiv, OpenAlex, and Semantic Scholar for candidate literature and downloads the seed paper.
    - **Agents 1 & 2** extract the seed's references and fetch open-access connected literature.
-   - **Agent 3** chunks, embeds, and indexes all papers into ChromaDB and the BM25 keyword index.
+   - **Agent 3** chunks, embeds, and indexes all papers into LanceDB (or ChromaDB) and the Tantivy/BM25 index.
    - **Synthesis Engine** reads shortlisted papers and formulates a structured 3-part related-work synthesis.
 
 #### Tab 3 Deliverables:
@@ -494,6 +494,6 @@ streamlit run app.py
 | `CITATION_LANCEDB_PATH`| `data/lancedb` | Path to persistent LanceDB tables (`physics_papers_v3`, `physics_summaries_v3`). |
 | `LLM_REQUEST_TIMEOUT` | `60` | Request timeout in seconds for LLM client calls. |
 | `CITATION_EMBED_MODEL`| `embeddinggemma-2` | Embedding model for text and figure images. An index records which one built it and refuses a different one. A value pinned in `.env` or `data/.env` overrides this default. |
-| `CITATION_INDEX_VERSION` | `3` | Which index to read and write. `3` is the current one (GROBID full text, sentence-window chunks, figure images, embeddinggemma-2). `1` and `2` are older, read-only indexes and need `CITATION_EMBED_MODEL=nomic-embed-text`. |
+| `CITATION_INDEX_VERSION` | `3` | Which index to read and write. `3` is the current one (Docling/GROBID full text, sentence-window chunks, figure images, embeddinggemma-2). `1` and `2` are older, read-only indexes and need `CITATION_EMBED_MODEL=nomic-embed-text`. |
 | `CITATION_CHAT_WINDOW_TOKENS` | `32768` (cloud) / `4096` (Ollama) | Maximum token budget Agent 7 uses for conversation fitting before memory folding. |
 | `CITATION_DATA_DIR` | `data/` | Path to persistent storage volume containing LanceDB, ChromaDB, pulled PDFs, and manifests. |
