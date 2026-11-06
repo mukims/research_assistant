@@ -67,6 +67,7 @@ from research_assistant.shared import manifest
 from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.paper_header import read_header, PaperHeader
+from research_assistant.shared.dedupe_sweep import run_sweep
 from research_assistant.shared.paper_index import (
     PaperEntry,
     PaperIndex,
@@ -620,7 +621,7 @@ def ingest_pdfs(
         is the list of paths that could not be read.
     """
     with _ingest_lock():
-        return _ingest_pdfs_locked(
+        res = _ingest_pdfs_locked(
             pdfs,
             workers,
             skip_ingested,
@@ -630,6 +631,11 @@ def ingest_pdfs(
             enable_ocr=enable_ocr,
             ocr_engine=ocr_engine,
         )
+    try:
+        run_sweep()
+    except Exception as exc:
+        logger.warning("%sEnd-of-ingest dedupe sweep failed: %s", log_prefix, exc)
+    return res
 
 
 def _drop_title_duplicates(

@@ -37,6 +37,7 @@ from research_assistant.config import (
 from research_assistant.schemas import DownloadedPaper
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.paper_index import PaperIndex
+from research_assistant.shared.dedupe_sweep import run_sweep
 from research_assistant.shared.source_key import source_key, normalise_doi, is_authoritative
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for, is_saved_pdf
@@ -596,6 +597,11 @@ def fetch_papers():
                 _checkpoint(downloaded, failed)
 
         _checkpoint(downloaded, failed)
+
+        try:
+            run_sweep()
+        except Exception as exc:
+            logger.warning("End-of-fetch dedupe sweep failed: %s", exc)
 
         if pipeline_status.is_cancel_requested():
             logger.info("Fetch aborted early due to user stop request.")
