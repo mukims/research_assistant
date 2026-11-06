@@ -684,13 +684,13 @@ this (it rewrites the manifest from the store's `document` metadata). Nothing in
 missing from the store, so no entry is lost. Side effect (wanted): ingestion stops re-processing the
 1,595 pre-migration papers if they come through a run again.
 
-- [ ] Stop and ask the owner for "go". The owner stops the Marvin app first.
-- [ ] Copy `data/ingested_v3.json` to `data/ingested_v3.json.bak-2026-11-06` (keep it).
-- [ ] `$PY -c "from research_assistant.shared import manifest; print(manifest.rebuild_from_collection())"`
+- [x] Stop and ask the owner for "go". The owner stops the Marvin app first.
+- [x] Copy `data/ingested_v3.json` to `data/ingested_v3.json.bak-2026-11-06` (keep it).
+- [x] `$PY -c "from research_assistant.shared import manifest; print(manifest.rebuild_from_collection())"`
   → expect 1,781 (± papers ingested since 2026-11-06 15:24).
-- [ ] `$PY -c "from research_assistant.shared.dedupe_sweep import run_sweep; r = run_sweep(); print(r['papers'], len(r['groups']))"`
+- [x] `$PY -c "from research_assistant.shared.dedupe_sweep import run_sweep; r = run_sweep(); print(r['papers'], len(r['groups']))"`
   → papers 1,818; groups below 100 (the placeholder group is gone).
-- [ ] Log both numbers in the Handoff Log, commit the log (`docs(dedupe): record manifest repair`), stop and report.
+- [x] Log both numbers in the Handoff Log, commit the log (`docs(dedupe): record manifest repair`), stop and report.
 
 **Reviewer verdict on R5–R6 (`b6798a6`):** accepted. Both match the spec; reviewer's full suite 2309
 passed, 18 skipped, 1 failed — the known `test_batch_citer.py` ordering race, unrelated. The R6 log
@@ -720,5 +720,6 @@ amend commits.
 2026-11-06 15:21 · Task 7 Step 6 · e81fd21 · backfill completed: 1818 papers indexed, 48 headers unreadable (2.64%), 100 duplicate groups found (doi: 28, arxiv: 26, title_author: 46), avg 1.69s/paper · none
 2026-11-06 16:15 · R5 · a9cb46c · tests/test_ingest_dedupe.py + test_ingestion.py + test_ingest_v2.py + test_p0_remediation.py (69 passed) → all green · none
 2026-11-06 16:21 · R6 · b6798a6 · full suite (2310 passed, 18 skipped) → all green · none
+2026-11-06 18:10 · R7 · (this commit) · manifest rebuilt: 1781 documents; sweep: 1818 papers, 99 duplicate groups (doi: 27, arxiv: 26, title_author: 46) · none
 
 
