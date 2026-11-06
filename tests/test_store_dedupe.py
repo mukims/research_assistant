@@ -427,5 +427,215 @@ class TestDedupeStoreScript(unittest.TestCase):
         self.assertEqual(os.path.getmtime(manifest_path), mtime_before)
 
 
+class TestApplyCleanup(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.manifest_path = os.path.join(self.tmp.name, "manifest.json")
+        self.index_path = os.path.join(self.tmp.name, "index.json")
+        self.quarantine_dir = os.path.join(self.tmp.name, "quarantine")
+        self.patch_manifest = unittest.mock.patch("research_assistant.shared.manifest.MANIFEST_PATH", self.manifest_path)
+        self.patch_manifest.start()
+        self.addCleanup(self.patch_manifest.stop)
+
+    def test_apply_deletes_both_tables_and_updates_manifest_and_index(self):
+        import json
+        from unittest.mock import MagicMock
+        from research_assistant.shared import manifest
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+        from research_assistant.shared.store_dedupe import Group, apply_cleanup
+
+        manifest.add("k.pdf")
+        manifest.add("r.pdf")
+
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="k.pdf", path="/p/k.pdf", title="Title K"))
+        idx.add(PaperEntry(document="r.pdf", path="/p/r.pdf", title="Title R"))
+        idx.save()
+
+        papers = MagicMock()
+        papers.table.version = 10
+        summaries = MagicMock()
+        summaries.table.version = 5
+
+        g = Group(title_key="title", keep="k.pdf", remove=("r.pdf",), reason="pdf+pdf")
+        res = apply_cleanup([g], papers, summaries, self.index_path, self.quarantine_dir)
+
+        papers.delete.assert_called_once_with(where={"document": "r.pdf"})
+        summaries.delete.assert_called_once_with(where={"document": "r.pdf"})
+
+        self.assertNotIn("r.pdf", manifest.load())
+        self.assertIn("k.pdf", manifest.load())
+
+        idx_after = PaperIndex.load(self.index_path)
+        self.assertIsNone(idx_after.get("r.pdf"))
+        self.assertEqual(idx_after.resolve("r.pdf").document, "k.pdf")
+
+        self.assertEqual(res["versions_before"], {"papers": 10, "summaries": 5})
+        self.assertEqual(res["removed"], ["r.pdf"])
+        self.assertEqual(res["errors"], [])
+
+    def test_apply_moves_pdf_to_quarantine_never_deletes_file(self):
+        import os
+        from unittest.mock import MagicMock
+        from research_assistant.shared import manifest
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+        from research_assistant.shared.store_dedupe import Group, apply_cleanup
+
+        manifest.add("r.pdf")
+        pdf_file = os.path.join(self.tmp.name, "r.pdf")
+        with open(pdf_file, "wb") as f:
+            f.write(b"PDF CONTENT FOR QUARANTINE")
+
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="r.pdf", path=pdf_file, title="Title"))
+        idx.save()
+
+        papers = MagicMock()
+        papers.table.version = 1
+        summaries = MagicMock()
+        summaries.table.version = 1
+
+        g = Group(title_key="title", keep="k.pdf", remove=("r.pdf",), reason="pdf+pdf")
+        res = apply_cleanup([g], papers, summaries, self.index_path, self.quarantine_dir)
+
+        self.assertFalse(os.path.exists(pdf_file))
+        self.assertEqual(len(res["moved"]), 1)
+        src, dst = res["moved"][0]
+        self.assertEqual(src, pdf_file)
+        self.assertTrue(os.path.exists(dst))
+        with open(dst, "rb") as f:
+            self.assertEqual(f.read(), b"PDF CONTENT FOR QUARANTINE")
+
+    def test_delete_error_leaves_manifest_and_index_for_that_doc(self):
+        from unittest.mock import MagicMock
+        from research_assistant.shared import manifest
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+        from research_assistant.shared.store_dedupe import Group, apply_cleanup
+
+        manifest.add("fail.pdf")
+        pdf_file = os.path.join(self.tmp.name, "fail.pdf")
+        with open(pdf_file, "wb") as f:
+            f.write(b"NOT TO BE DELETED")
+
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="fail.pdf", path=pdf_file, title="Title"))
+        idx.save()
+
+        papers = MagicMock()
+        papers.table.version = 1
+        papers.delete.side_effect = RuntimeError("LanceDB locked")
+        summaries = MagicMock()
+        summaries.table.version = 1
+
+        g = Group(title_key="title", keep="k.pdf", remove=("fail.pdf",), reason="pdf+pdf")
+        res = apply_cleanup([g], papers, summaries, self.index_path, self.quarantine_dir)
+
+        self.assertEqual(len(res["errors"]), 1)
+        self.assertEqual(res["errors"][0]["document"], "fail.pdf")
+        self.assertIn("fail.pdf", manifest.load())
+        idx_after = PaperIndex.load(self.index_path)
+        self.assertIsNotNone(idx_after.get("fail.pdf"))
+        self.assertTrue(os.path.exists(pdf_file))
+
+    def test_drop_group_removes_index_entry_without_alias(self):
+        from unittest.mock import MagicMock
+        from research_assistant.shared import manifest
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+        from research_assistant.shared.store_dedupe import Group, apply_cleanup
+
+        manifest.add("drop.pdf")
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="drop.pdf", path="/p/drop.pdf", title="To Drop"))
+        idx.save()
+
+        papers = MagicMock()
+        papers.table.version = 1
+        summaries = MagicMock()
+        summaries.table.version = 1
+
+        g = Group(title_key="", keep="", remove=("drop.pdf",), reason="drop")
+        apply_cleanup([g], papers, summaries, self.index_path, self.quarantine_dir)
+
+        self.assertNotIn("drop.pdf", manifest.load())
+        idx_after = PaperIndex.load(self.index_path)
+        self.assertIsNone(idx_after.get("drop.pdf"))
+        self.assertIsNone(idx_after.resolve("drop.pdf"))
+
+    def test_apply_refuses_when_plan_differs(self):
+        import json
+        from unittest.mock import MagicMock, patch
+        from scripts import dedupe_store
+        from research_assistant.shared.paper_index import PaperIndex
+
+        plan_path = os.path.join(self.tmp.name, "plan.json")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "groups": [{"title_key": "old", "keep": "a", "remove": ["b"], "reason": "pdf+pdf"}],
+                "args": {"keep": [], "skip": [], "drop": [], "plan": plan_path},
+            }, f)
+
+        idx = PaperIndex(self.index_path)
+        idx.save()
+
+        mock_store = MagicMock()
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"metadatas": []}
+        mock_store.get_collection.return_value = mock_col
+
+        argv = ["--apply", "--plan", plan_path]
+
+        with patch("research_assistant.shared.db.open_store", return_value=mock_store), \
+             patch("research_assistant.config.PAPER_INDEX_PATH", self.index_path), \
+             patch("research_assistant.config.DOWNLOADED_JSON_PATH", os.path.join(self.tmp.name, "none.json")):
+            ret = dedupe_store.main(argv)
+
+        self.assertNotEqual(ret, 0)
+
+    def test_apply_holds_ingest_lock(self):
+        import json
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock, patch
+        from scripts import dedupe_store
+        from research_assistant.shared.paper_index import PaperIndex
+
+        plan_path = os.path.join(self.tmp.name, "plan.json")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "groups": [],
+                "args": {"keep": [], "skip": [], "drop": [], "plan": plan_path},
+            }, f)
+
+        idx = PaperIndex(self.index_path)
+        idx.save()
+
+        mock_store = MagicMock()
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"metadatas": []}
+        mock_store.get_collection.return_value = mock_col
+
+        lock_acquired = []
+
+        @contextmanager
+        def fake_lock():
+            lock_acquired.append(True)
+            yield
+            lock_acquired.append(False)
+
+        argv = ["--apply", "--plan", plan_path]
+
+        with patch("research_assistant.shared.db.open_store", return_value=mock_store), \
+             patch("research_assistant.config.PAPER_INDEX_PATH", self.index_path), \
+             patch("research_assistant.shared.manifest.rebuild_from_collection", return_value=0), \
+             patch("research_assistant.shared.dedupe_sweep.run_sweep"), \
+             patch("research_assistant.shared.db.clear_search_cache"), \
+             patch("research_assistant.shared.ingestion._ingest_lock", fake_lock), \
+             patch("research_assistant.config.DOWNLOADED_JSON_PATH", os.path.join(self.tmp.name, "none.json")):
+            ret = dedupe_store.main(argv)
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(lock_acquired, [True, False])
+
+
 if __name__ == "__main__":
     unittest.main()

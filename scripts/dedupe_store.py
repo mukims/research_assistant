@@ -16,7 +16,7 @@ from research_assistant import config
 from research_assistant.shared import db
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.paper_index import PaperIndex
-from research_assistant.shared.store_dedupe import plan_cleanup, scan_store
+from research_assistant.shared.store_dedupe import apply_cleanup, plan_cleanup, scan_store
 
 logger = logging.getLogger("dedupe_store")
 
@@ -57,9 +57,6 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
 
-    if args.apply:
-        raise NotImplementedError("Apply mode implemented in Task 4.")
-
     col = db.open_store().get_collection(name=db.COLLECTION_NAME)
     idx = PaperIndex.load(config.PAPER_INDEX_PATH)
 
@@ -81,46 +78,99 @@ def main(argv=None) -> int:
         drop=args.drop or [],
     )
 
-    remove_docs = sum(len(g.remove) for g in groups)
-    remove_pdf_docs = sum(sum(1 for doc in g.remove if doc.endswith(".pdf")) for g in groups)
-    remove_stub_docs = sum(sum(1 for doc in g.remove if not doc.endswith(".pdf")) for g in groups)
-    remove_chunks = sum(
-        sum(doc_map[doc].chunks for doc in g.remove if doc in doc_map)
-        for g in groups
-    )
+    if not args.apply:
+        remove_docs = sum(len(g.remove) for g in groups)
+        remove_pdf_docs = sum(sum(1 for doc in g.remove if doc.endswith(".pdf")) for g in groups)
+        remove_stub_docs = sum(sum(1 for doc in g.remove if not doc.endswith(".pdf")) for g in groups)
+        remove_chunks = sum(
+            sum(doc_map[doc].chunks for doc in g.remove if doc in doc_map)
+            for g in groups
+        )
 
-    totals = {
-        "groups": len(groups),
-        "remove_docs": remove_docs,
-        "remove_pdf_docs": remove_pdf_docs,
-        "remove_stub_docs": remove_stub_docs,
-        "remove_chunks": remove_chunks,
-    }
+        totals = {
+            "groups": len(groups),
+            "remove_docs": remove_docs,
+            "remove_pdf_docs": remove_pdf_docs,
+            "remove_stub_docs": remove_stub_docs,
+            "remove_chunks": remove_chunks,
+        }
 
-    plan_data = {
-        "created": datetime.now(timezone.utc).isoformat(),
-        "groups": [asdict(g) for g in groups],
-        "totals": totals,
-        "args": {
-            "keep": list(args.keep or []),
-            "skip": list(args.skip or []),
-            "drop": list(args.drop or []),
-            "plan": args.plan,
-        },
-    }
+        plan_data = {
+            "created": datetime.now(timezone.utc).isoformat(),
+            "groups": [asdict(g) for g in groups],
+            "totals": totals,
+            "args": {
+                "keep": list(args.keep or []),
+                "skip": list(args.skip or []),
+                "drop": list(args.drop or []),
+                "plan": args.plan,
+            },
+        }
 
-    atomic_write_json(args.plan, plan_data)
+        atomic_write_json(args.plan, plan_data)
 
-    print(
-        f"Totals: {totals['groups']} groups, {totals['remove_docs']} remove docs "
-        f"({totals['remove_pdf_docs']} PDFs, {totals['remove_stub_docs']} stubs), "
-        f"{totals['remove_chunks']} chunks"
-    )
-    for g in groups:
-        removed_str = ", ".join(g.remove)
-        print(f"{g.reason}  {g.keep}  ←  {removed_str}")
+        print(
+            f"Totals: {totals['groups']} groups, {totals['remove_docs']} remove docs "
+            f"({totals['remove_pdf_docs']} PDFs, {totals['remove_stub_docs']} stubs), "
+            f"{totals['remove_chunks']} chunks"
+        )
+        for g in groups:
+            removed_str = ", ".join(g.remove)
+            print(f"{g.reason}  {g.keep}  ←  {removed_str}")
 
-    return 0
+        return 0
+
+    # --apply mode
+    if not os.path.exists(args.plan):
+        print(f"Plan file {args.plan} does not exist. Run dry run first.")
+        return 1
+
+    try:
+        with open(args.plan, "r", encoding="utf-8") as f:
+            plan_data = json.load(f)
+    except Exception as exc:
+        print(f"Could not read plan file {args.plan}: {exc}")
+        return 1
+
+    plan_args = plan_data.get("args", {})
+    if (
+        list(args.keep or []) != list(plan_args.get("keep", []))
+        or list(args.skip or []) != list(plan_args.get("skip", []))
+        or list(args.drop or []) != list(plan_args.get("drop", []))
+    ):
+        print("Plan arguments differ from command line options. Rerun dry run with desired options.")
+        return 1
+
+    current_group_dicts = [asdict(g) for g in groups]
+    if current_group_dicts != plan_data.get("groups"):
+        print("store changed since the dry run — rerun the dry run")
+        return 1
+
+    from research_assistant.shared import ingestion, manifest
+    from research_assistant.shared.dedupe_sweep import run_sweep
+
+    with ingestion._ingest_lock():
+        manifest_before_count = len(manifest.load())
+        summaries_col = db.open_store().get_collection(name=config.SUMMARY_COLLECTION_NAME)
+        quarantine_dir = os.path.join(config.DATA_DIR, "quarantine", "store_dedupe")
+        res = apply_cleanup(groups, col, summaries_col, config.PAPER_INDEX_PATH, quarantine_dir)
+
+        db.clear_search_cache()
+        rebuild_count = manifest.rebuild_from_collection()
+        expected_count = manifest_before_count - len(res["removed"])
+        print(f"Rebuilt manifest count: {rebuild_count} (expected {expected_count})")
+
+        run_sweep()
+
+        now_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+        applied_path = os.path.join(config.DATA_DIR, f"store_dedupe_applied-{now_str}.json")
+        atomic_write_json(applied_path, res)
+
+        if res.get("errors"):
+            print(f"Apply completed with {len(res['errors'])} error(s): {res['errors']}")
+            return 1
+
+        return 0
 
 
 if __name__ == "__main__":

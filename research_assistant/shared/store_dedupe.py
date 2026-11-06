@@ -317,3 +317,84 @@ def scan_store(collection, index, downloaded: dict) -> list[StoreDoc]:
             )
 
     return docs
+
+
+def apply_cleanup(
+    groups: list[Group],
+    papers,
+    summaries,
+    index_path: str,
+    quarantine_dir: str,
+) -> dict:
+    """Apply cleanup by deleting duplicate records from store and quarantine PDFs.
+
+    Order per removed document:
+    1. papers.delete(where={"document": doc}), then summaries.delete(where={"document": doc}).
+    2. Only if both deletes succeeded: manifest.discard_many([doc]). For a PDF, inside
+       with paper_index.edit(index_path) as idx: read entry's path, then idx.retire(doc, keep).
+       Then, if the path exists, move the file into quarantine_dir with a unique name.
+    3. If a delete raises, record the error, leave the manifest and index alone for that document,
+       and continue with the next one.
+    Record papers.table.version and summaries.table.version before the first delete.
+    """
+    import os
+    import shutil
+    from research_assistant.shared import manifest
+    from research_assistant.shared.paper_index import edit
+
+    def _get_version(tbl) -> int:
+        t = getattr(tbl, "table", tbl)
+        v = getattr(t, "version", 0)
+        if callable(v):
+            v = v()
+        return int(v) if v is not None else 0
+
+    versions_before = {
+        "papers": _get_version(papers),
+        "summaries": _get_version(summaries),
+    }
+
+    removed: list[str] = []
+    moved: list[list[str]] = []
+    errors: list[dict[str, str]] = []
+
+    for g in groups:
+        keep = g.keep
+        for doc in g.remove:
+            try:
+                papers.delete(where={"document": doc})
+                summaries.delete(where={"document": doc})
+            except Exception as exc:
+                errors.append({"document": doc, "error": str(exc)})
+                continue
+
+            removed.append(doc)
+            manifest.discard_many([doc])
+
+            if doc.endswith(".pdf"):
+                pdf_path = None
+                with edit(index_path) as idx:
+                    entry = idx.get(doc)
+                    if entry and entry.path:
+                        pdf_path = entry.path
+                    idx.retire(doc, keep)
+
+                if pdf_path and os.path.exists(pdf_path):
+                    os.makedirs(quarantine_dir, exist_ok=True)
+                    base_name = os.path.basename(pdf_path)
+                    dest_path = os.path.join(quarantine_dir, base_name)
+                    if os.path.exists(dest_path):
+                        stem, ext = os.path.splitext(base_name)
+                        counter = 1
+                        while os.path.exists(dest_path):
+                            dest_path = os.path.join(quarantine_dir, f"{stem}_{counter}{ext}")
+                            counter += 1
+                    shutil.move(pdf_path, dest_path)
+                    moved.append([pdf_path, dest_path])
+
+    return {
+        "versions_before": versions_before,
+        "removed": removed,
+        "moved": moved,
+        "errors": errors,
+    }
