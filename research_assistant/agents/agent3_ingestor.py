@@ -113,6 +113,21 @@ def run_ingestor(workers: int = 1, force: bool = False):
 
         # Ingest abstract-only tier fallbacks
         from research_assistant.shared import manifest
+        from research_assistant.shared.store_dedupe import title_key
+        titles_map = {}
+        try:
+            from research_assistant.config import PAPER_INDEX_PATH
+            from research_assistant.shared.db import open_store, COLLECTION_NAME
+            from research_assistant.shared.paper_index import PaperIndex
+            from research_assistant.shared.store_dedupe import ingested_titles
+            col = open_store().get_collection(name=COLLECTION_NAME)
+            idx = PaperIndex.load(PAPER_INDEX_PATH)
+            ingested_set = set(manifest.load().keys())
+            titles_map = ingested_titles(col, idx, ingested_set)
+        except Exception as exc:
+            logger.warning("Could not build ingested titles map for abstract deduplication: %s", exc)
+            titles_map = {}
+
         abstract_corpus = []
         abstract_keys = []
         for key, record in downloaded.items():
@@ -120,6 +135,12 @@ def run_ingestor(workers: int = 1, force: bool = False):
                 doc_key = record.get("key") or key
                 if not force and manifest.contains(doc_key):
                     continue
+                tk = title_key(record.get("title"))
+                if tk and tk in titles_map:
+                    logger.info("Skipping abstract-only %s: same paper as %s", doc_key, titles_map[tk])
+                    continue
+                if tk:
+                    titles_map[tk] = doc_key
                 label = record.get("title") or record.get("raw_reference") or key
                 abstract_corpus.append({
                     "document": doc_key,

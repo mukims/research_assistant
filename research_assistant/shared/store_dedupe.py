@@ -177,3 +177,60 @@ def plan_cleanup(
 
     groups.sort(key=lambda g: (g.title_key, g.keep))
     return groups
+
+
+def ingested_titles(
+    collection,
+    index,
+    ingested: Iterable[str],
+) -> dict[str, str]:
+    """Map title_key -> document for every document in `ingested`.
+
+    PDFs: index title.
+    Stubs: citation_source of collection.get(where={"type": "abstract_only"}, include=["metadatas"]) rows (paged, limit 5000).
+    """
+    ingested_set = set(ingested)
+    mapping: dict[str, str] = {}
+
+    # PDFs from PaperIndex
+    for doc in ingested_set:
+        if doc.endswith(".pdf"):
+            entry = index.get(doc)
+            if entry and entry.title:
+                tk = title_key(entry.title)
+                if tk and tk not in mapping:
+                    mapping[tk] = doc
+
+    # Stubs from collection
+    if collection is not None:
+        limit = 5000
+        offset = 0
+        while True:
+            batch = collection.get(
+                where={"type": "abstract_only"},
+                include=["metadatas"],
+                limit=limit,
+                offset=offset,
+            )
+            metadatas = batch.get("metadatas") if batch else None
+            if not metadatas:
+                break
+            if metadatas and isinstance(metadatas[0], list):
+                metadatas = metadatas[0]
+            if not metadatas:
+                break
+            for meta in metadatas:
+                if not meta:
+                    continue
+                doc = meta.get("document")
+                if doc and doc in ingested_set:
+                    cit = meta.get("citation_source")
+                    if cit:
+                        tk = title_key(cit)
+                        if tk and tk not in mapping:
+                            mapping[tk] = doc
+            if len(metadatas) < limit:
+                break
+            offset += limit
+
+    return mapping

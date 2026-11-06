@@ -337,4 +337,5 @@ only removes versions older than that.
 
 Format: `date time · task · sha · result · discrepancies`.
 
-2026-11-06 20:17 · Task 1 · (this commit) · tests/test_store_dedupe.py + test_paper_index.py (33 passed), full suite (2323 passed, 18 skipped) · none
+2026-11-06 20:17 · Task 1 · 0103397 · tests/test_store_dedupe.py + test_paper_index.py (33 passed), full suite (2323 passed, 18 skipped) · none
+2026-11-06 20:25 · Task 2 · (this commit) · tests/test_agent3_abstract_dedupe.py (5 passed), full suite (2328 passed, 18 skipped) · none
