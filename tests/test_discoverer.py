@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import research_assistant.agents.agent0_discoverer as a0
 from research_assistant.schemas import SeedPaper
+from research_assistant.shared.paper_index import PaperEntry, PaperIndex
 
 
 class TestDownloadAndRecordSeedPaperWiring(unittest.TestCase):
@@ -699,6 +700,68 @@ class TestInspectPdfTitle(unittest.TestCase):
                   for i in range(1, 21)]
         title, _doi, _arxiv = a0._inspect_pdf(self._pdf(lines))
         self.assertEqual(title, "Anderson localization in disordered wires")
+
+
+class TestSeedAlreadyInCorpus(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.corpus_pdf = os.path.join(self.tmp.name, "existing_corpus.pdf")
+        with open(self.corpus_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 corpus seed bytes")
+
+        self.index_path = os.path.join(self.tmp.name, "paper_index.json")
+        self.idx = PaperIndex(self.index_path)
+        self.entry = PaperEntry(
+            document="doi_10.1038_nature05180.pdf",
+            path=self.corpus_pdf,
+            dois=("10.1038/nature05180",),
+        )
+        self.idx.add(self.entry)
+        self.idx.save()
+
+        self.raw_dir = os.path.join(self.tmp.name, "raw")
+        os.makedirs(self.raw_dir, exist_ok=True)
+        self.seed_path = os.path.join(self.tmp.name, "seed_papers.json")
+
+        self.patches = [
+            patch.object(a0, "RAW_DIR", self.raw_dir),
+            patch.object(a0, "SEED_PAPERS_PATH", self.seed_path),
+            patch.object(a0, "PAPER_INDEX_PATH", self.index_path),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_seed_candidate_in_corpus_is_not_downloaded(self):
+        cand = {
+            "doi": "10.1038/nature05180",
+            "pdf_url": "https://example.com/paper.pdf",
+            "title": "Half-metallic graphene nanoribbons",
+        }
+        with patch.object(a0, "download_pdf") as mock_download:
+            ret_cand, key, path = a0.download_seed_cascade([cand], force=False)
+            self.assertEqual(path, self.corpus_pdf)
+            self.assertEqual(ret_cand["download_status"], "in_corpus")
+            mock_download.assert_not_called()
+
+    def test_force_downloads_even_when_in_corpus(self):
+        cand = {
+            "doi": "10.1038/nature05180",
+            "pdf_url": "https://example.com/paper.pdf",
+            "title": "Half-metallic graphene nanoribbons",
+        }
+        with patch.object(a0, "download_pdf", return_value=(True, None)) as mock_download:
+            ret_cand, key, path = a0.download_seed_cascade([cand], force=True)
+            self.assertEqual(mock_download.call_count, 1)
+
+    def test_manual_url_seed_in_corpus_is_not_downloaded(self):
+        with patch.object(a0, "download_pdf") as mock_download:
+            path = a0._download_and_record(
+                "q", "doi:10.1038/nature05180", "https://example.com/paper.pdf", {}, force=False
+            )
+            self.assertEqual(path, self.corpus_pdf)
+            mock_download.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -62,6 +62,7 @@ from research_assistant.config import (
     S2_SEARCH_URL,
     CHAT_OLLAMA_OPTIONS,
     DATA_DIR,
+    PAPER_INDEX_PATH,
 )
 from research_assistant.prompts import (
     DISCOVERY_CONTEXT_SYSTEM,
@@ -77,6 +78,7 @@ from research_assistant.schemas import SeedPaper
 from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for, _is_pdf
+from research_assistant.shared.paper_index import PaperIndex
 import research_assistant.shared.llm as llm
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.source_key import source_key, normalise_doi, _fold_title, _hash
@@ -1195,11 +1197,19 @@ def download_seed_cascade(
     force: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     os.makedirs(RAW_DIR, exist_ok=True)
+    paper_index = PaperIndex.load(PAPER_INDEX_PATH)
 
     for rank_idx, cand in enumerate(ranked_candidates, 1):
         key = source_key(cand)
         if not key:
             continue
+
+        if not force:
+            hit = paper_index.find_by_ids(doi=cand.get("doi"), arxiv_id=cand.get("arxiv_id"))
+            if hit and os.path.isfile(hit.path):
+                logger.info("Candidate #%d [%s] already in corpus: %s", rank_idx, key, hit.path)
+                cand["download_status"] = "in_corpus"
+                return cand, key, hit.path
 
         dest = os.path.join(RAW_DIR, filename_for(key))
 
@@ -1330,25 +1340,38 @@ def _download_and_record(query, key, pdf_url, seeds, force, arxiv_id=None, sourc
     os.makedirs(RAW_DIR, exist_ok=True)
     dest = os.path.join(RAW_DIR, filename_for(key))
 
-    if os.path.exists(dest) and not force:
+    paper_index = PaperIndex.load(PAPER_INDEX_PATH)
+    doi = key[4:] if key.startswith("doi:") else None
+    hit = (
+        paper_index.find_by_ids(doi=doi, arxiv_id=arxiv_id)
+        if (not force and (doi or arxiv_id))
+        else None
+    )
+
+    if hit and os.path.isfile(hit.path):
+        logger.info("PDF already in corpus: %s", hit.path)
+        record_path = hit.path
+    elif os.path.exists(dest) and not force:
         logger.info("PDF already on disk: %s", os.path.basename(dest))
+        record_path = dest
     else:
         ok, reason = download_pdf(pdf_url, dest)
         if not ok:
             logger.error("Could not download %s: %s", pdf_url, reason)
             return None
         logger.info("Saved -> %s", os.path.basename(dest))
+        record_path = dest
 
     seeds[query] = SeedPaper(
         key=key,
         url=pdf_url,
-        path=dest,
+        path=record_path,
         fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         arxiv_id=arxiv_id,
         source=source,
     ).to_dict()
     _save_seeds(seeds)
-    return dest
+    return record_path
 
 
 def discover_from_url(query, url, force=False):
