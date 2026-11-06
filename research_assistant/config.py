@@ -233,6 +233,8 @@ INGESTED_MANIFEST_PATH   = os.environ.get(
 )
 PIPELINE_STATUS_PATH     = os.path.join(DATA_DIR, "pipeline_status.json")
 INGEST_LOCK_PATH         = os.path.join(DATA_DIR, "ingest.lock")
+PAPER_INDEX_PATH         = os.path.join(DATA_DIR, "paper_index.json")
+DEDUPE_REPORT_PATH       = os.path.join(DATA_DIR, "dedupe_report.json")
 
 # ─── Ingestion Tunables ───────────────────────────────────────────────────────
 CHUNK_MIN_LENGTH         = 10       # Discard text chunks shorter than this

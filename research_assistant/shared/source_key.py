@@ -26,6 +26,10 @@ def _fold_title(title):
     return " ".join(folded.split())
 
 
+fold_title = _fold_title
+fold_name = _fold
+
+
 def _hash(prefix, payload, length=16):
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:length]
     return f"{prefix}:{digest}"
