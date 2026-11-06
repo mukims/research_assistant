@@ -612,6 +612,86 @@ saved Docling-only before the run stops; list their documents in the log if that
 
 **Cleared for Task 7 Step 6 once the owner says go.**
 
+## Review Round 3 (reviewer, 2026-11-06, against `main` at `e81fd21`, after the merge)
+
+The branch was merged to `main` and the backfill is done (1,818 papers, 97.4% with title + author;
+all 46 title_author groups verified as real duplicates). Two follow-ups, found by checking the real data.
+Work on a new branch **`fix/dedupe-round3` from `main`**, same rules as before (test first, watch it
+fail, one commit per fix, `fix(dedupe): <what>`, Handoff Log line per fix, no push, no merge).
+
+**Facts the reviewer measured (read-only, 2026-11-06):** the LanceDB store holds **1,781** distinct
+`document`s. The ingest manifest `data/ingested_v3.json` lists only **186**, all of them also in the
+store (manifest-only: 0; store-only: 1,595 — papers from before the migration). Of the 1,818 papers in
+`paper_index.json`, **1,537 are in the store and 281 are not** (on disk, never ingested).
+
+### R5: layer 2 must only count a match that is actually in the store
+
+**Why:** `_drop_title_duplicates` treats any index entry with an existing file as "already in the
+corpus". If that entry is one of the 281 on-disk-but-never-ingested PDFs, the new copy is dropped (and
+deleted if in `pulled_pdfs/`) while neither copy is in the store, so that run's audit has no evidence
+for the paper. (The next run ingests the old copy via the repointed `downloaded.json` record, so
+nothing is lost for good, but it is a one-run gap.)
+
+**Files:** `research_assistant/shared/ingestion.py` (`_drop_title_duplicates`);
+`tests/test_ingest_dedupe.py`.
+
+**Behaviour:** a match counts only when its file exists, it is not the same file, **and
+`manifest.contains(match.document)`** is true. Otherwise the candidate is kept and ingested as today.
+Layer 1 needs no change: a layer-1 hit is recorded in `downloaded.json` (or copied / staged), so the
+same run ingests it.
+
+- [ ] Tests: `test_match_that_was_never_ingested_does_not_drop` — P in the index with an existing file
+  but **not** in the manifest; new PDF in `PULLED_PDFS_DIR` with a matching header → kept, file still
+  exists, no alias, `downloaded.json` unchanged. Update the existing drop tests
+  (`test_title_author_duplicate_in_pulled_pdfs_is_dropped_and_deleted`,
+  `test_duplicate_outside_pulled_pdfs_is_dropped_but_kept_on_disk`,
+  `test_duplicate_is_aliased_and_downloaded_json_repointed`, `test_duplicate_never_reaches_the_store`)
+  to record P's document with `manifest.add(...)` in their setup (the manifest lives under the test
+  `DATA_DIR`; never touch the real one).
+- [ ] Red → implement → green (`tests/test_ingest_dedupe.py tests/test_ingestion.py tests/test_ingest_v2.py tests/test_p0_remediation.py`) → commit `fix(dedupe): only drop a duplicate of a paper that is in the store`.
+
+### R6: ignore template placeholder DOIs
+
+**Why:** Six DOIs in the index are template placeholders copied from paper first pages:
+`10.1007/sxxxxx-yyy-zzzz-1`, `10.1109/xxx.0000.0000000`, `10.1145/nnnnnnn.nnnnnnn`, `10.1145/xxxxxx`,
+`10.1364/ao.xx.xxxxxx`, `10.15607/rss.2024.xx.015`. `10.1145/nnnnnnn.nnnnnnn` alone groups 5 unrelated
+ACM papers in the report. They can't block a real download, but they pollute the report and the index.
+The rule below matches exactly these 6 and none of the other ~1,000 DOIs in the index.
+
+**Files:** `research_assistant/shared/paper_index.py`; `tests/test_paper_index.py`.
+
+**Produces:** `is_placeholder_doi(doi: str | None) -> bool` in `paper_index.py`: true when
+`normalise_doi(doi)` is not None and the part after the first `/` matches `re.search(r"xx|nnnn|yyy|zzzz", suffix)`.
+Applied at three points so old index entries are covered without rewriting the file:
+`PaperIndex.add` stores the entry with placeholder DOIs removed (`dataclasses.replace`);
+`find_by_ids` returns `None` for a placeholder DOI query (an arXiv ID in the same call still counts);
+`duplicate_groups` skips placeholder keys when building DOI groups.
+
+- [ ] Tests: `test_placeholder_dois_are_recognised` — all 6 DOIs above → `True`; `10.1038/nature05180`,
+  `10.1103/physrevx.10.011001`, `10.1145/3586183.3606763`, `None`, `""` → `False`.
+  `test_add_drops_placeholder_dois` — `add(entry with dois=("10.1145/xxxxxx", "10.1038/nature05180"))`
+  → `get(...).dois == ("10.1038/nature05180",)`. `test_find_by_ids_ignores_placeholder_doi`.
+  `test_duplicate_groups_skip_placeholder_doi` — two entries loaded from disk (bypassing `add`) sharing
+  `10.1145/nnnnnnn.nnnnnnn` → no `doi` group.
+- [ ] Red → green (`tests/test_paper_index.py tests/test_dedupe_sweep.py tests/test_build_paper_index.py`) → full suite (the known
+  `test_batch_citer.py` ordering race may fail; log it by name if so) → commit `fix(dedupe): ignore template placeholder DOIs`.
+
+### R7: repair the ingest manifest (real data — only after the owner says go)
+
+**Why:** R5 relies on the manifest, which lists 186 of the 1,781 papers in the store. Without this
+repair layer 2 would almost never fire. `manifest.rebuild_from_collection()` already exists for exactly
+this (it rewrites the manifest from the store's `document` metadata). Nothing in the manifest is
+missing from the store, so no entry is lost. Side effect (wanted): ingestion stops re-processing the
+1,595 pre-migration papers if they come through a run again.
+
+- [ ] Stop and ask the owner for "go". The owner stops the Marvin app first.
+- [ ] Copy `data/ingested_v3.json` to `data/ingested_v3.json.bak-2026-11-06` (keep it).
+- [ ] `$PY -c "from research_assistant.shared import manifest; print(manifest.rebuild_from_collection())"`
+  → expect 1,781 (± papers ingested since 2026-11-06 15:24).
+- [ ] `$PY -c "from research_assistant.shared.dedupe_sweep import run_sweep; r = run_sweep(); print(r['papers'], len(r['groups']))"`
+  → papers 1,818; groups below 100 (the placeholder group is gone).
+- [ ] Log both numbers in the Handoff Log, commit the log (`docs(dedupe): record manifest repair`), stop and report.
+
 ## Handoff Log (append-only)
 
 Append one entry per finished task and for every stop/discrepancy:
