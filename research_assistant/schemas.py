@@ -111,7 +111,7 @@ class DownloadedPaper(_Record):
     """A reference whose full text (or abstract) was retrieved. Agent 2 → Agent 3."""
 
     key: str                              # source_key — the primary identity
-    provider: str                         # unpaywall | europepmc | arxiv | openalex | crossref
+    provider: str                         # unpaywall | europepmc | arxiv | openalex | crossref | local_file
     fetched_at: str
     path: str | None = None
     evidence_tier: str = "full_text"      # full_text | abstract_only

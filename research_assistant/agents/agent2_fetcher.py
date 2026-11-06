@@ -37,7 +37,7 @@ from research_assistant.schemas import DownloadedPaper
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.source_key import source_key, normalise_doi, is_authoritative
 from research_assistant.shared.atomic import atomic_write_json
-from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for
+from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for, is_saved_pdf
 from research_assistant.shared import pipeline_status
 from research_assistant.shared import academic_apis
 
@@ -425,7 +425,13 @@ def fetch_papers():
             try:
                 doi, how = resolve_doi(ref)
 
-                if doi:
+                if is_saved_pdf(dest):
+                    # An earlier run saved this paper but downloaded.json does not
+                    # know it (lost, reset, or older than the files). Adopt the file
+                    # rather than fetching it again; the success path below records it.
+                    saved, provider = True, "local_file"
+                    logger.info("    already on disk -> %s", os.path.basename(dest))
+                elif doi:
                     saved, reason = try_unpaywall(doi, dest)
                     if saved:
                         provider = "unpaywall"

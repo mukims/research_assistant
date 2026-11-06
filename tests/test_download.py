@@ -126,5 +126,38 @@ class TestExistingGuards(DownloadTestCase):
         self.assertEqual(reason, "empty response")
 
 
+class TestIsSavedPdf(unittest.TestCase):
+    """fetch_papers() takes a file already at a paper's path as that paper, but only
+    if it is a PDF. An HTML error page saved under a .pdf name must not pass, or the
+    fetcher would record it as the paper's full text and never try again."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, content):
+        path = os.path.join(self.tmp.name, "paper.pdf")
+        with open(path, "wb") as fh:
+            fh.write(content)
+        return path
+
+    def test_only_a_file_that_starts_like_a_pdf_counts(self):
+        cases = [
+            ("a real pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj", True),
+            ("an html error page", b"<!DOCTYPE html><title>403</title>", False),
+            ("an empty file", b"", False),
+            ("a cut-off header", b"%PD", False),
+        ]
+        for label, content, expected in cases:
+            with self.subTest(case=label):
+                self.assertIs(fetch.is_saved_pdf(self._write(content)), expected)
+
+    def test_a_missing_path_is_not_a_saved_pdf(self):
+        self.assertIs(fetch.is_saved_pdf(os.path.join(self.tmp.name, "nope.pdf")), False)
+
+    def test_a_directory_is_not_a_saved_pdf(self):
+        self.assertIs(fetch.is_saved_pdf(self.tmp.name), False)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -34,6 +34,21 @@ def _is_pdf(first_bytes: bytes) -> bool:
     return first_bytes[:5] == b"%PDF-"
 
 
+def is_saved_pdf(path: str) -> bool:
+    """True when *path* is a file that starts like a PDF.
+
+    How the fetcher recognises a paper an earlier run already saved: the file sits
+    at the path the paper's key names, so only its first bytes are checked. An HTML
+    error page saved under a .pdf name, or an empty file, is not a paper. Anything
+    unreadable counts as not saved, so the fetcher downloads it again.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return _is_pdf(fh.read(5))
+    except OSError:
+        return False
+
+
 def _expected_length(headers) -> int | None:
     """Content-Length, when it can be trusted as the decoded body's size.
 

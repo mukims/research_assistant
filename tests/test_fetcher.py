@@ -23,6 +23,8 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from research_assistant.agents import agent2_fetcher
@@ -534,5 +536,123 @@ class TestAbstractFallback(unittest.TestCase):
             self.assertEqual(record["evidence_tier"], "abstract_only")
             self.assertIn("quantum Hall plateaus under high hydrostatic pressure", record["abstract"])
             self.assertEqual(record["citation_count"], 88)
+
+
+class TestAlreadyOnDisk(unittest.TestCase):
+    """A PDF saved by an earlier run must not be downloaded again.
+
+    fetch_papers() decided "already have it" from downloaded.json alone. When that
+    manifest was missing, reset or older than the files (the working corpus had 26
+    entries beside 1,522 PDFs), every such paper was fetched a second time: wasted
+    Unpaywall, Europe PMC and arXiv calls, and the file at the same path overwritten.
+    A file at the path a paper's key names is now taken as that paper, provided it
+    really is a PDF.
+    """
+
+    KEY = "doi:10.1038/nature05180"
+    REF = {
+        "raw_reference": "Son, Y. et al. Half-metallic graphene nanoribbons. Nature 2006.",
+        "source_file": "seed.pdf",
+        "title": "Half-metallic graphene nanoribbons",
+        "doi": "10.1038/nature05180",
+        "doi_confidence": "high",
+        "xml_id": "b12",
+    }
+    SAVED = b"%PDF-1.4 saved by an earlier run"
+    FRESH = b"%PDF-1.4 downloaded just now"
+
+    def _run(self, on_disk=None, failed=None, network_up=True):
+        """One fetch_papers() pass. *on_disk* is the bytes already at the paper's
+        path (None: no file). Returns what the pass wrote and which providers it hit."""
+        calls = []
+
+        def unpaywall(doi, dest_path):
+            calls.append("unpaywall")
+            if not network_up:
+                return False, "download error: ConnectionError"
+            with open(dest_path, "wb") as fh:
+                fh.write(self.FRESH)
+            return True, None
+
+        def europepmc(doi, ref, dest_path):
+            calls.append("europepmc")
+            return False, "not in Europe PMC"
+
+        def arxiv(ref, dest_path):
+            calls.append("arxiv")
+            return False, "not found on arXiv"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            downloaded_path = os.path.join(tmp, "downloaded.json")
+            failed_path = os.path.join(tmp, "failed.json")
+            pdfs_dir = os.path.join(tmp, "pulled_pdfs")
+            os.makedirs(pdfs_dir)
+            dest = os.path.join(pdfs_dir, filename_for(source_key(self.REF)))
+            if on_disk is not None:
+                with open(dest, "wb") as fh:
+                    fh.write(on_disk)
+            if failed is not None:
+                with open(failed_path, "w") as fh:
+                    json.dump(failed, fh)
+
+            with ExitStack() as stack:
+                for target, value in (
+                    ("DOWNLOADED_JSON_PATH", downloaded_path),
+                    ("FAILED_DOWNLOADS_PATH", failed_path),
+                    ("PULLED_PDFS_DIR", pdfs_dir),
+                ):
+                    stack.enter_context(patch.object(agent2_fetcher, target, value))
+                stack.enter_context(
+                    patch.object(agent2_fetcher, "_load_references", return_value=[self.REF]))
+                stack.enter_context(patch.object(
+                    agent2_fetcher, "resolve_doi", return_value=("10.1038/nature05180", "grobid")))
+                stack.enter_context(patch.object(agent2_fetcher, "try_unpaywall", side_effect=unpaywall))
+                stack.enter_context(patch.object(agent2_fetcher, "try_europepmc", side_effect=europepmc))
+                stack.enter_context(patch.object(agent2_fetcher, "try_arxiv", side_effect=arxiv))
+                stack.enter_context(
+                    patch.object(agent2_fetcher, "fetch_bibliometrics_and_abstract", return_value={}))
+                stack.enter_context(patch.object(agent2_fetcher.time, "sleep", lambda s: None))
+                agent2_fetcher.fetch_papers()
+
+            with open(downloaded_path) as fh:
+                downloaded = json.load(fh)
+            with open(failed_path) as fh:
+                failed_after = json.load(fh)
+            content = None
+            if os.path.exists(dest):
+                with open(dest, "rb") as fh:
+                    content = fh.read()
+
+        return SimpleNamespace(
+            downloaded=downloaded, failed=failed_after, calls=calls, content=content, dest=dest)
+
+    def test_a_pdf_saved_by_an_earlier_run_is_not_downloaded_again(self):
+        run = self._run(on_disk=self.SAVED)
+        self.assertEqual(run.calls, [], "a provider was queried for a paper already on disk")
+        self.assertEqual(run.content, self.SAVED, "the saved file was overwritten")
+
+    def test_a_pdf_saved_by_an_earlier_run_is_recorded_for_later_stages(self):
+        run = self._run(on_disk=self.SAVED)
+        record = run.downloaded[self.KEY]
+        self.assertEqual(record["path"], run.dest)
+        self.assertEqual(record["evidence_tier"], "full_text")
+        self.assertEqual(record["provider"], "local_file")
+        self.assertEqual(record["cited_by"], "seed.pdf")
+
+    def test_a_file_that_is_not_a_pdf_is_downloaded_normally(self):
+        for label, junk in (
+            ("an html error page", b"<html>Access denied</html>"),
+            ("an empty file", b""),
+        ):
+            with self.subTest(file=label):
+                run = self._run(on_disk=junk)
+                self.assertEqual(run.calls, ["unpaywall"])
+                self.assertEqual(run.content, self.FRESH)
+
+    def test_a_saved_pdf_clears_a_transient_failure_even_with_the_network_down(self):
+        failed = {self.KEY: {"key": self.KEY, "reason": "download error: ConnectionError"}}
+        run = self._run(on_disk=self.SAVED, failed=failed, network_up=False)
+        self.assertIn(self.KEY, run.downloaded)
+        self.assertEqual(run.failed, {})
 
 
