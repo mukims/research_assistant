@@ -14,6 +14,7 @@ Provides:
 """
 
 import contextlib
+import json
 import os
 import re
 import pickle
@@ -54,6 +55,8 @@ from research_assistant.config import (
     SUMMARY_MAX_CHARS,
     PULLED_PDFS_DIR,
     RAW_DIR,
+    PAPER_INDEX_PATH,
+    DOWNLOADED_JSON_PATH,
 )
 from research_assistant import config
 from research_assistant.prompts import DOCUMENT_SUMMARY
@@ -63,6 +66,15 @@ from research_assistant.shared.db import check_embedder, embedder_record, get_ma
 from research_assistant.shared import manifest
 from research_assistant.shared.tokenize import tokenize, TOKENIZER_VERSION
 from research_assistant.shared import pipeline_status
+from research_assistant.shared.paper_header import read_header, PaperHeader
+from research_assistant.shared.paper_index import (
+    PaperEntry,
+    PaperIndex,
+    edit,
+    normalise_arxiv,
+    repoint_manifest,
+)
+from research_assistant.shared.source_key import normalise_doi
 
 logger = get_logger("ingestion")
 
@@ -620,6 +632,144 @@ def ingest_pdfs(
         )
 
 
+def _drop_title_duplicates(
+    candidates: dict[str, str],
+    corpus: list[dict],
+    log_prefix: str = "",
+) -> tuple[dict[str, str], list[dict], list[dict], dict[str, PaperHeader]]:
+    """Drop title+author duplicates before store upsert.
+
+    Returns (kept candidates, kept corpus entries, duplicates, headers of kept paths).
+    """
+    kept_candidates: dict[str, str] = {}
+    kept_headers: dict[str, PaperHeader] = {}
+    duplicates: list[dict] = []
+    dropped_documents: set[str] = set()
+
+    with edit(PAPER_INDEX_PATH) as index:
+        for path, label in candidates.items():
+            doc_key = pdf_key(path)
+            header = read_header(path)
+
+            if not header or not header.title or not header.first_authors:
+                kept_candidates[path] = label
+                if header:
+                    kept_headers[path] = header
+                continue
+
+            match = index.find_by_title_author(
+                header.title,
+                header.first_authors,
+                exclude=doc_key,
+            )
+
+            if (
+                match
+                and os.path.isfile(match.path)
+                and os.path.abspath(match.path) != os.path.abspath(path)
+            ):
+                real_path = os.path.realpath(path)
+                real_pulled = os.path.realpath(PULLED_PDFS_DIR)
+                is_in_pulled = (
+                    os.path.commonpath([real_path, real_pulled]) == real_pulled
+                    and real_path != real_pulled
+                )
+                deleted = False
+                if is_in_pulled:
+                    try:
+                        os.unlink(path)
+                        deleted = True
+                    except OSError as exc:
+                        logger.warning("%sFailed to delete duplicate PDF %s: %s", log_prefix, path, exc)
+
+                index.add_alias(doc_key, match.document)
+                repoint_manifest(DOWNLOADED_JSON_PATH, path, match.path)
+
+                dropped_documents.add(doc_key)
+                dup_rec = {
+                    "path": path,
+                    "document": doc_key,
+                    "kept": match.document,
+                    "deleted": deleted,
+                }
+                duplicates.append(dup_rec)
+                logger.info(
+                    "%sDuplicate dropped: %s (matches %s, deleted=%s)",
+                    log_prefix, doc_key, match.document, deleted,
+                )
+                try:
+                    pipeline_status.add_event(
+                        f"🗑️ Dropped duplicate {doc_key} (matches {match.document})"
+                    )
+                except Exception:
+                    pass
+            else:
+                kept_candidates[path] = label
+                kept_headers[path] = header
+
+    kept_corpus = [
+        entry for entry in corpus
+        if entry.get("document") not in dropped_documents
+    ]
+
+    return kept_candidates, kept_corpus, duplicates, kept_headers
+
+
+def _add_ingested_to_paper_index(
+    marked_paths: list[str],
+    kept_headers: dict[str, PaperHeader],
+) -> None:
+    """Add successfully marked paths to paper index."""
+    downloaded_records = {}
+    if os.path.isfile(DOWNLOADED_JSON_PATH):
+        try:
+            with open(DOWNLOADED_JSON_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+                if isinstance(data, dict):
+                    downloaded_records = data
+        except Exception as exc:
+            logger.debug("Failed reading downloaded.json: %s", exc)
+
+    by_basename = {}
+    for rec in downloaded_records.values():
+        if isinstance(rec, dict) and rec.get("path"):
+            by_basename[os.path.basename(rec["path"])] = rec
+
+    with edit(PAPER_INDEX_PATH) as index:
+        for path in marked_paths:
+            doc_key = pdf_key(path)
+            header = kept_headers.get(path)
+            rec = by_basename.get(os.path.basename(path), {})
+
+            dois = set()
+            arxiv_ids = set()
+
+            if header:
+                if header.doi:
+                    dois.add(header.doi)
+                if header.arxiv_id:
+                    arxiv_ids.add(header.arxiv_id)
+
+            if rec.get("doi"):
+                norm_d = normalise_doi(rec["doi"])
+                if norm_d:
+                    dois.add(norm_d)
+            if rec.get("arxiv_id"):
+                norm_a = normalise_arxiv(rec["arxiv_id"])
+                if norm_a:
+                    arxiv_ids.add(norm_a)
+
+            entry = PaperEntry(
+                document=doc_key,
+                path=path,
+                title=header.title if header else None,
+                first_authors=header.first_authors if header else (),
+                dois=tuple(sorted(dois)),
+                arxiv_ids=tuple(sorted(arxiv_ids)),
+            )
+            index.add(entry)
+
+
 def _ingest_pdfs_locked(
     pdfs,
     workers,
@@ -634,7 +784,7 @@ def _ingest_pdfs_locked(
     if not isinstance(pdfs, dict):
         pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
 
-    result = {"processed": 0, "skipped": 0, "inserted": 0, "failed": []}
+    result = {"processed": 0, "skipped": 0, "inserted": 0, "failed": [], "duplicates": []}
     logger.info("%sIndex v%d.", log_prefix, INDEX_VERSION)
 
     candidates = {}
@@ -802,6 +952,12 @@ def _ingest_pdfs_locked(
                 log_prefix, len(by_mode["pymupdf"]), result["processed"],
             )
 
+        kept_candidates, corpus, duplicates, kept_headers = _drop_title_duplicates(
+            candidates, corpus, log_prefix=log_prefix
+        )
+        candidates = kept_candidates
+        result["duplicates"] = duplicates
+
         if corpus:
             last_summary_run.update(attempted=0, made=0, failed=0, error="", failed_docs=[])
             result["inserted"] = upsert_corpus(corpus)
@@ -838,6 +994,7 @@ def _ingest_pdfs_locked(
             ]
         if marked:
             manifest.add_many(pdf_key(path) for path in marked)
+            _add_ingested_to_paper_index(marked, kept_headers)
 
         if pipeline_status.is_cancel_requested():
             logger.info("%sIngestion stopped early by user request.", log_prefix)
