@@ -30,6 +30,7 @@ from unittest.mock import patch
 from research_assistant.agents import agent2_fetcher
 from research_assistant.schemas import DownloadedPaper
 from research_assistant.shared.fetch import filename_for
+from research_assistant.shared.paper_index import PaperEntry, PaperIndex
 from research_assistant.shared.source_key import source_key
 
 
@@ -654,5 +655,113 @@ class TestAlreadyOnDisk(unittest.TestCase):
         run = self._run(on_disk=self.SAVED, failed=failed, network_up=False)
         self.assertIn(self.KEY, run.downloaded)
         self.assertEqual(run.failed, {})
+
+
+class TestDoiAlreadyInCorpus(unittest.TestCase):
+    KEY = "doi:10.1038/nature05180"
+    REF = {
+        "raw_reference": "Son, Y. et al. Half-metallic graphene nanoribbons. Nature 2006.",
+        "source_file": "seed.pdf",
+        "title": "Half-metallic graphene nanoribbons",
+        "doi": "10.1038/nature05180",
+        "doi_confidence": "high",
+        "xml_id": "b12",
+    }
+    PDF_BYTES = b"%PDF-1.4 existing corpus pdf"
+
+    def _run(self, index_entries=(), ref=None, resolve_return=("10.1038/nature05180", "grobid")):
+        calls = []
+
+        def unpaywall(doi, dest_path):
+            calls.append("unpaywall")
+            with open(dest_path, "wb") as fh:
+                fh.write(b"%PDF-1.4 downloaded fresh")
+            return True, None
+
+        def europepmc(doi, ref, dest_path):
+            calls.append("europepmc")
+            return False, "not in Europe PMC"
+
+        def arxiv(ref, dest_path):
+            calls.append("arxiv")
+            return False, "not found on arXiv"
+
+        target_ref = ref or self.REF
+
+        with tempfile.TemporaryDirectory() as tmp:
+            downloaded_path = os.path.join(tmp, "downloaded.json")
+            failed_path = os.path.join(tmp, "failed.json")
+            pdfs_dir = os.path.join(tmp, "pulled_pdfs")
+            os.makedirs(pdfs_dir)
+            index_path = os.path.join(tmp, "paper_index.json")
+            idx = PaperIndex(index_path)
+            for entry in index_entries:
+                idx.add(entry)
+            idx.save()
+
+            with ExitStack() as stack:
+                for target, value in (
+                    ("DOWNLOADED_JSON_PATH", downloaded_path),
+                    ("FAILED_DOWNLOADS_PATH", failed_path),
+                    ("PULLED_PDFS_DIR", pdfs_dir),
+                    ("PAPER_INDEX_PATH", index_path),
+                ):
+                    stack.enter_context(patch.object(agent2_fetcher, target, value))
+                stack.enter_context(
+                    patch.object(agent2_fetcher, "_load_references", return_value=[target_ref]))
+                stack.enter_context(patch.object(
+                    agent2_fetcher, "resolve_doi", return_value=resolve_return))
+                stack.enter_context(patch.object(agent2_fetcher, "try_unpaywall", side_effect=unpaywall))
+                stack.enter_context(patch.object(agent2_fetcher, "try_europepmc", side_effect=europepmc))
+                stack.enter_context(patch.object(agent2_fetcher, "try_arxiv", side_effect=arxiv))
+                stack.enter_context(
+                    patch.object(agent2_fetcher, "fetch_bibliometrics_and_abstract", return_value={}))
+                stack.enter_context(patch.object(agent2_fetcher.time, "sleep", lambda s: None))
+                agent2_fetcher.fetch_papers()
+
+            with open(downloaded_path) as fh:
+                downloaded = json.load(fh)
+
+        return SimpleNamespace(downloaded=downloaded, calls=calls)
+
+    def test_doi_already_in_corpus_is_not_downloaded(self):
+        with tempfile.TemporaryDirectory() as ctmp:
+            existing_path = os.path.join(ctmp, "existing.pdf")
+            with open(existing_path, "wb") as f:
+                f.write(self.PDF_BYTES)
+            entry = PaperEntry(
+                document="doi_10.1038_nature05180.pdf",
+                path=existing_path,
+                dois=("10.1038/nature05180",),
+            )
+            run = self._run(index_entries=[entry])
+            self.assertEqual(run.calls, [])
+            record = run.downloaded[self.KEY]
+            self.assertEqual(record["provider"], "corpus")
+            self.assertEqual(record["path"], existing_path)
+
+    def test_arxiv_id_in_corpus_counts_as_a_match(self):
+        ref = dict(self.REF, doi=None, arxiv_id="2007.12504v1")
+        with tempfile.TemporaryDirectory() as ctmp:
+            existing_path = os.path.join(ctmp, "existing.pdf")
+            with open(existing_path, "wb") as f:
+                f.write(self.PDF_BYTES)
+            entry = PaperEntry(
+                document="arxiv_2007.12504.pdf",
+                path=existing_path,
+                arxiv_ids=("2007.12504",),
+            )
+            run = self._run(ref=ref, resolve_return=(None, None), index_entries=[entry])
+            self.assertEqual(run.calls, [])
+
+    def test_corpus_entry_whose_file_is_gone_is_downloaded_normally(self):
+        missing_path = "/tmp/nonexistent_paper_for_test.pdf"
+        entry = PaperEntry(
+            document="doi_10.1038_nature05180.pdf",
+            path=missing_path,
+            dois=("10.1038/nature05180",),
+        )
+        run = self._run(index_entries=[entry])
+        self.assertEqual(run.calls, ["unpaywall"])
 
 

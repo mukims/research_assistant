@@ -32,9 +32,11 @@ from research_assistant.config import (
     MAX_CITATION_LEN,
     ARXIV_RATE_LIMIT,
     UNPAYWALL_SLEEP,
+    PAPER_INDEX_PATH,
 )
 from research_assistant.schemas import DownloadedPaper
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.paper_index import PaperIndex
 from research_assistant.shared.source_key import source_key, normalise_doi, is_authoritative
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.fetch import HEADERS, download_pdf, filename_for, is_saved_pdf
@@ -390,6 +392,7 @@ def fetch_papers():
     if retrying:
         logger.info("Retrying %d that previously failed for a transient reason.", retrying)
 
+    paper_index = PaperIndex.load(PAPER_INDEX_PATH)
     standalone = not pipeline_status.get_status().get("active")
     with pipeline_status.track_stage(
         "fetch",
@@ -417,6 +420,7 @@ def fetch_papers():
             )
 
             dest = os.path.join(PULLED_PDFS_DIR, filename_for(key))
+            record_path = dest
             reasons = []
             saved = False
             doi = how = None
@@ -424,8 +428,14 @@ def fetch_papers():
 
             try:
                 doi, how = resolve_doi(ref)
+                arxiv_id = ref.get("arxiv_id")
 
-                if is_saved_pdf(dest):
+                corpus_hit = paper_index.find_by_ids(doi=doi, arxiv_id=arxiv_id) if (doi or arxiv_id) else None
+                if corpus_hit and os.path.isfile(corpus_hit.path):
+                    saved, provider = True, "corpus"
+                    record_path = corpus_hit.path
+                    logger.info("    already in corpus -> %s", corpus_hit.path)
+                elif is_saved_pdf(dest):
                     # An earlier run saved this paper but downloaded.json does not
                     # know it (lost, reset, or older than the files). Adopt the file
                     # rather than fetching it again; the success path below records it.
@@ -533,7 +543,7 @@ def fetch_papers():
                         biblio = {}
                     downloaded[key] = DownloadedPaper(
                         key=key,
-                        path=dest,
+                        path=record_path,
                         provider=provider,
                         fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         title=ref.get("title"),
