@@ -12,6 +12,8 @@ from pathlib import Path
 # Ensure package root is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import requests
+
 from research_assistant import config
 from research_assistant.shared.dedupe_sweep import run_sweep
 from research_assistant.shared.ingestion import pdf_key
@@ -19,6 +21,7 @@ from research_assistant.shared.paper_header import read_header
 from research_assistant.shared.paper_index import (
     PaperEntry,
     PaperIndex,
+    edit,
     normalise_arxiv,
     surname_key,
 )
@@ -26,6 +29,16 @@ from research_assistant.shared.source_key import normalise_doi
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("build_paper_index")
+
+
+def grobid_alive(server: str = config.GROBID_SERVER, timeout: float = 10) -> bool:
+    """Probe GROBID /api/isalive."""
+    try:
+        resp = requests.get(f"{server.rstrip('/')}/api/isalive", timeout=timeout)
+        return resp.ok and "true" in resp.text.lower()
+    except Exception as exc:
+        logger.warning("GROBID probe failed: %s", exc)
+        return False
 
 
 def _find_pdfs(directories: list[str]) -> list[str]:
@@ -120,11 +133,17 @@ def build_index(
             "pending": len(pending_pdfs),
         }
 
+    if not grobid_alive():
+        msg = "GROBID is down — rerun to resume"
+        logger.error(msg)
+        return {"error": msg, "indexed": 0}
+
     manifest_meta = _load_manifest_metadata(all_manifests)
 
     indexed_count = 0
     unreadable_headers = 0
     start_time = time.time()
+    batch: list[PaperEntry] = []
 
     for i, pdf_path in enumerate(pending_pdfs, 1):
         doc_key = pdf_key(pdf_path)
@@ -161,7 +180,7 @@ def build_index(
             dois=tuple(sorted(dois)),
             arxiv_ids=tuple(sorted(arxiv_ids)),
         )
-        idx.add(entry)
+        batch.append(entry)
         indexed_count += 1
 
         dt = time.time() - t0
@@ -173,12 +192,30 @@ def build_index(
                 i, len(pending_pdfs), base, dt, rate,
             )
 
-        if indexed_count % 25 == 0:
-            idx.save()
-            logger.info("Checkpoint: saved %d indexed papers to %s", len(idx), target_index)
+        if len(batch) >= 25:
+            if not grobid_alive():
+                with edit(target_index) as fresh:
+                    for e in batch:
+                        fresh.add(e)
+                batch.clear()
+                msg = "GROBID is down — rerun to resume"
+                logger.error(msg)
+                return {"error": msg, "indexed": indexed_count}
 
-    idx.save()
-    logger.info("Saved final index with %d total papers to %s", len(idx), target_index)
+            with edit(target_index) as fresh:
+                for e in batch:
+                    fresh.add(e)
+            batch.clear()
+            logger.info("Checkpoint: saved %d indexed papers to %s", indexed_count, target_index)
+
+    if batch:
+        with edit(target_index) as fresh:
+            for e in batch:
+                fresh.add(e)
+        batch.clear()
+
+    final_idx = PaperIndex.load(target_index)
+    logger.info("Saved final index with %d total papers to %s", len(final_idx), target_index)
 
     sweep_res = run_sweep(index_path=target_index, report_path=target_report)
     groups = sweep_res.get("groups", [])
@@ -191,7 +228,7 @@ def build_index(
         "indexed": indexed_count,
         "unreadable_headers": unreadable_headers,
         "groups": groups,
-        "total_papers": len(idx),
+        "total_papers": len(final_idx),
     }
 
 
@@ -202,11 +239,13 @@ def main():
     parser.add_argument("--extra-manifest", action="append", default=[], dest="extra_manifests", help="Extra manifest paths to scan for DOIs/arXiv IDs.")
     args = parser.parse_args()
 
-    build_index(
+    res = build_index(
         dry_run=args.dry_run,
         limit=args.limit,
         manifest_paths=args.extra_manifests,
     )
+    if isinstance(res, dict) and "error" in res:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

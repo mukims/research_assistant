@@ -24,6 +24,10 @@ class TestBuildPaperIndex(unittest.TestCase):
         self.report_path = os.path.join(self.tmp.name, "dedupe_report.json")
         self.downloaded_path = os.path.join(self.tmp.name, "downloaded.json")
 
+        self.grobid_patch = patch("scripts.build_paper_index.grobid_alive", return_value=True)
+        self.grobid_patch.start()
+        self.addCleanup(self.grobid_patch.stop)
+
     def test_backfill_skips_papers_already_indexed(self):
         from scripts.build_paper_index import build_index
 
@@ -105,6 +109,106 @@ class TestBuildPaperIndex(unittest.TestCase):
         )
 
         self.assertFalse(os.path.exists(self.index_path))
+
+    def test_backfill_keeps_entries_written_meanwhile(self):
+        from scripts.build_paper_index import build_index
+        from research_assistant.shared.paper_index import edit, PaperEntry
+
+        pdf_1 = os.path.join(self.pulled_dir, "p1.pdf")
+        pdf_2 = os.path.join(self.pulled_dir, "p2.pdf")
+        with open(pdf_1, "wb") as f:
+            f.write(b"%PDF-1")
+        with open(pdf_2, "wb") as f:
+            f.write(b"%PDF-2")
+
+        first_call = True
+
+        def fake_read_header(path, convert_if_missing=False):
+            nonlocal first_call
+            if first_call:
+                first_call = False
+                with edit(self.index_path) as idx:
+                    idx.add(PaperEntry(document="extra_X.pdf", path="/some/extra_X.pdf", title="Paper X"))
+            return PaperHeader(title=f"Title {os.path.basename(path)}", first_authors=("Smith",), doi=None, arxiv_id=None)
+
+        with patch("scripts.build_paper_index.read_header", side_effect=fake_read_header):
+            res = build_index(
+                index_path=self.index_path,
+                report_path=self.report_path,
+                pulled_dir=self.pulled_dir,
+                raw_dir=self.raw_dir,
+                manifest_paths=[self.downloaded_path],
+            )
+
+        reloaded = PaperIndex.load(self.index_path)
+        self.assertIsNotNone(reloaded.get("extra_X.pdf"))
+        self.assertIsNotNone(reloaded.get("p1.pdf"))
+        self.assertIsNotNone(reloaded.get("p2.pdf"))
+
+    def test_backfill_refuses_to_start_without_grobid(self):
+        from scripts.build_paper_index import build_index
+
+        pdf_1 = os.path.join(self.pulled_dir, "p1.pdf")
+        with open(pdf_1, "wb") as f:
+            f.write(b"%PDF-1")
+
+        with patch("scripts.build_paper_index.grobid_alive", return_value=False):
+            res = build_index(
+                index_path=self.index_path,
+                report_path=self.report_path,
+                pulled_dir=self.pulled_dir,
+                raw_dir=self.raw_dir,
+                manifest_paths=[self.downloaded_path],
+            )
+            self.assertIn("error", res)
+            self.assertIn("GROBID is down", res["error"])
+            self.assertFalse(os.path.exists(self.index_path))
+
+            # --dry-run still works without GROBID
+            dry_res = build_index(
+                index_path=self.index_path,
+                report_path=self.report_path,
+                pulled_dir=self.pulled_dir,
+                raw_dir=self.raw_dir,
+                manifest_paths=[self.downloaded_path],
+                dry_run=True,
+            )
+            self.assertNotIn("error", dry_res)
+            self.assertEqual(dry_res["total"], 1)
+
+    def test_backfill_stops_cleanly_when_grobid_goes_down(self):
+        from scripts.build_paper_index import build_index
+
+        for i in range(30):
+            pdf_path = os.path.join(self.pulled_dir, f"paper_{i:02d}.pdf")
+            with open(pdf_path, "wb") as f:
+                f.write(b"%PDF-test")
+
+        # Probe returns True initially, then False at checkpoint
+        probe_responses = [True, False]
+
+        def fake_grobid_alive(*args, **kwargs):
+            if probe_responses:
+                return probe_responses.pop(0)
+            return False
+
+        def fake_read_header(path, convert_if_missing=False):
+            return PaperHeader(title=f"Title {os.path.basename(path)}", first_authors=("Smith",), doi=None, arxiv_id=None)
+
+        with patch("scripts.build_paper_index.grobid_alive", side_effect=fake_grobid_alive), \
+             patch("scripts.build_paper_index.read_header", side_effect=fake_read_header):
+            res = build_index(
+                index_path=self.index_path,
+                report_path=self.report_path,
+                pulled_dir=self.pulled_dir,
+                raw_dir=self.raw_dir,
+                manifest_paths=[self.downloaded_path],
+            )
+            self.assertIn("error", res)
+            self.assertEqual(res["indexed"], 25)
+
+        reloaded = PaperIndex.load(self.index_path)
+        self.assertEqual(len(reloaded), 25)
 
 
 if __name__ == "__main__":

@@ -573,17 +573,17 @@ are never re-read.
 
 **Files:** `scripts/build_paper_index.py`; `tests/test_build_paper_index.py`.
 
-- [ ] Tests: `test_backfill_keeps_entries_written_meanwhile` — stub `read_header` so its first call also
+- [x] Tests: `test_backfill_keeps_entries_written_meanwhile` — stub `read_header` so its first call also
   writes an extra entry X to the index file via `edit()`; after `build_index`, the reloaded index has X
   plus every backfilled paper. `test_backfill_refuses_to_start_without_grobid` — GROBID probe stubbed
   `False` → returns `{"error": ...}`, no index file written (`--dry-run` still works without GROBID).
   `test_backfill_stops_cleanly_when_grobid_goes_down` — probe `True` at start, `False` at the first
   checkpoint → papers read so far are saved, the run stops with `{"error": ..., "indexed": n}`.
-- [ ] Implement: collect new entries in a batch and flush every 25 (and at the end) with
+- [x] Implement: collect new entries in a batch and flush every 25 (and at the end) with
   `with edit(target_index) as fresh: for e in batch: fresh.add(e)` instead of `idx.save()`; probe
   `f"{config.GROBID_SERVER}/api/isalive"` (10 s timeout, `"true"` in body) before starting and at each
   flush; on failure flush what was read and stop with a "GROBID is down — rerun to resume" message.
-- [ ] Red → green → then the full suite (expect 2298 + new tests passed, 18 skipped) → commit
+- [x] Red → green → then the full suite (expect 2298 + new tests passed, 18 skipped) → commit
   `fix(dedupe): backfill merges into the live index and stops without GROBID`.
 
 ### Task 7 Step 6 — additions for the real backfill
@@ -617,6 +617,7 @@ amend commits.
 2026-11-06 13:22 · Task 7 fix · 10f6595 · scripts/build_paper_index.py dry-run passed (1818 PDFs) · added package root to sys.path
 2026-11-06 14:12 · R1 · bc62b50 · tests/test_discoverer.py + test_e2e_discovery.py + test_orchestrate_upload.py (120 passed) → all green · none
 2026-11-06 14:15 · R2 · 40a4a9b · tests/test_paper_index.py + test_extractor.py + test_ingest_dedupe.py + test_pipeline_status.py (113 passed) → all green · none
-2026-11-06 14:16 · R3 · pending · tests/test_paper_header.py (21 passed) → all green · none
+2026-11-06 14:16 · R3 · 2c12fa5 · tests/test_paper_header.py (21 passed) → all green · none
+2026-11-06 14:22 · R4 · pending · full suite (2305 passed, 18 skipped) → all green · none
 
 
