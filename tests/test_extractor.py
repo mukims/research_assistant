@@ -580,6 +580,27 @@ class TestOutcomeFiling(RunExtractorTestCase):
         self.assertTrue(os.path.exists(os.path.join(failed_dir, "no_refs.pdf")))
         self.assertFalse(os.path.exists(os.path.join(processed_dir, "no_refs.pdf")))
 
+    def test_filing_a_pdf_repoints_its_index_entry(self):
+        from research_assistant.shared.paper_index import PaperIndex, PaperEntry
+        index_path = os.path.join(self.tmp.name, "paper_index.json")
+        self._patch(ex, "PAPER_INDEX_PATH", index_path)
+
+        pdf = self._touch_pdf("seed.pdf")
+        idx = PaperIndex(index_path)
+        idx.add(PaperEntry(document="seed.pdf", path=pdf, title="Seed Title"))
+        idx.save()
+
+        processed_dir = os.path.join(self.raw_dir, "processed")
+        ex._file_away(pdf, processed_dir, "seed.pdf")
+
+        new_pdf_path = os.path.join(processed_dir, "seed.pdf")
+        self.assertTrue(os.path.exists(new_pdf_path))
+
+        reloaded = PaperIndex.load(index_path)
+        entry = reloaded.get("seed.pdf")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.path, new_pdf_path)
+
 
 if __name__ == "__main__":
     unittest.main()

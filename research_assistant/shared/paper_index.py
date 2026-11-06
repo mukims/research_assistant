@@ -3,7 +3,7 @@
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import logging
 import os
@@ -169,6 +169,15 @@ class PaperIndex:
 
     def add_alias(self, alias: str, document: str) -> None:
         self._aliases[alias] = document
+
+    def repoint_path(self, old_path: str, new_path: str) -> int:
+        norm_old = os.path.abspath(old_path)
+        count = 0
+        for doc, entry in list(self._papers.items()):
+            if entry.path and os.path.abspath(entry.path) == norm_old:
+                self._papers[doc] = replace(entry, path=new_path)
+                count += 1
+        return count
 
     def resolve(self, document_or_alias: str) -> PaperEntry | None:
         curr = document_or_alias

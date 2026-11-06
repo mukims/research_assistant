@@ -652,10 +652,12 @@ def _drop_title_duplicates(
     duplicates: list[dict] = []
     dropped_documents: set[str] = set()
 
+    headers = {path: read_header(path) for path in candidates}
+
     with edit(PAPER_INDEX_PATH) as index:
         for path, label in candidates.items():
             doc_key = pdf_key(path)
-            header = read_header(path)
+            header = headers.get(path)
 
             if not header or not header.title or not header.first_authors:
                 kept_candidates[path] = label

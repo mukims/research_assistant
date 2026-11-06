@@ -537,16 +537,16 @@ tests in `tests/test_paper_index.py`, `tests/test_extractor.py`, `tests/test_ing
 **Produces:** `PaperIndex.repoint_path(old_path: str, new_path: str) -> int` — every entry whose
 `os.path.abspath(path) == os.path.abspath(old_path)` gets `path=new_path` (document unchanged); returns count.
 
-- [ ] Tests: `test_repoint_path_updates_matching_entry_only` (paper_index);
+- [x] Tests: `test_repoint_path_updates_matching_entry_only` (paper_index);
   `test_filing_a_pdf_repoints_its_index_entry` (extractor: index entry at the RAW_DIR path → after
   `_file_away` its path is the file's new location under `processed/`); `PAPER_INDEX_PATH` patched to a temp dir.
-- [ ] Implement: in `_file_away`, capture the destination from `_unique_destination`, and after a
+- [x] Implement: in `_file_away`, capture the destination from `_unique_destination`, and after a
   successful `shutil.move` run `with edit(PAPER_INDEX_PATH) as idx: idx.repoint_path(pdf_path, destination)`
   inside `try/except Exception` (log at warning, never fail extraction).
-- [ ] Because the index lock now has a second user, move the `read_header` calls in
+- [x] Because the index lock now has a second user, move the `read_header` calls in
   `_drop_title_duplicates` **before** `with edit(...)`: read every candidate's header first, then take
   the lock only for matching, aliasing and repointing. Existing `test_ingest_dedupe.py` must stay green.
-- [ ] Red → green (`tests/test_paper_index.py tests/test_extractor.py tests/test_ingest_dedupe.py tests/test_pipeline_status.py`) → commit `fix(dedupe): repoint index entry when Agent 1 files a seed`.
+- [x] Red → green (`tests/test_paper_index.py tests/test_extractor.py tests/test_ingest_dedupe.py tests/test_pipeline_status.py`) → commit `fix(dedupe): repoint index entry when Agent 1 files a seed`.
 
 ### R3: Docling surnames lose accented edge letters
 
@@ -615,6 +615,7 @@ amend commits.
 2026-11-06 13:15 · Task 6 · a356528 · tests/test_dedupe_sweep.py + test_fetcher.py + test_ingestion.py (69 passed) → all green · none
 2026-11-06 13:21 · Task 7 · 2cdf2d1 · full suite (2298 passed, 18 skipped) → all green · none
 2026-11-06 13:22 · Task 7 fix · 10f6595 · scripts/build_paper_index.py dry-run passed (1818 PDFs) · added package root to sys.path
-2026-11-06 14:12 · R1 · pending · tests/test_discoverer.py + test_e2e_discovery.py + test_orchestrate_upload.py (120 passed) → all green · none
+2026-11-06 14:12 · R1 · bc62b50 · tests/test_discoverer.py + test_e2e_discovery.py + test_orchestrate_upload.py (120 passed) → all green · none
+2026-11-06 14:15 · R2 · pending · tests/test_paper_index.py + test_extractor.py + test_ingest_dedupe.py + test_pipeline_status.py (113 passed) → all green · none
 
 

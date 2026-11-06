@@ -257,6 +257,23 @@ class TestPaperIndex(unittest.TestCase):
         self.assertEqual(updated["key1"]["path"], "/new/dir/target.pdf")
         self.assertEqual(updated["key2"]["path"], "/old/dir/other.pdf")
 
+    def test_repoint_path_updates_matching_entry_only(self):
+        idx = PaperIndex(self.index_path)
+        old_path = os.path.join(self.tmp.name, "raw", "target.pdf")
+        other_path = os.path.join(self.tmp.name, "raw", "other.pdf")
+        new_path = os.path.join(self.tmp.name, "processed", "target.pdf")
+
+        e1 = PaperEntry(document="doc1", path=old_path, title="T1")
+        e2 = PaperEntry(document="doc2", path=other_path, title="T2")
+        idx.add(e1)
+        idx.add(e2)
+
+        count = idx.repoint_path(old_path, new_path)
+        self.assertEqual(count, 1)
+        self.assertEqual(idx.get("doc1").path, new_path)
+        self.assertEqual(idx.get("doc1").title, "T1")
+        self.assertEqual(idx.get("doc2").path, other_path)
+
 
 if __name__ == "__main__":
     unittest.main()

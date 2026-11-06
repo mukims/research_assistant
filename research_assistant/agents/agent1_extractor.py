@@ -41,11 +41,13 @@ from research_assistant.config import (
     EXTRACTED_CITATIONS_PATH,
     GROBID_BATCH_CONCURRENCY,
     GROBID_SERVER,
+    PAPER_INDEX_PATH,
     RAW_DIR,
 )
 from research_assistant.schemas import Reference
 from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.paper_index import edit
 from research_assistant.shared import pipeline_status
 
 logger = get_logger("agent1")
@@ -599,13 +601,24 @@ def _file_away(pdf_path: str, directory: str, name: str) -> None:
     discard every other PDF's results along with this one's.
     """
     os.makedirs(directory, exist_ok=True)
+    destination = _unique_destination(directory, name)
     try:
-        shutil.move(pdf_path, _unique_destination(directory, name))
+        shutil.move(pdf_path, destination)
     except (FileNotFoundError, shutil.Error) as exc:
         logger.warning(
             "%s could not be filed under %s (%s) — another run likely moved it "
             "first. Its references were still extracted.",
             name, os.path.basename(directory), exc,
+        )
+        return
+
+    try:
+        with edit(PAPER_INDEX_PATH) as idx:
+            idx.repoint_path(pdf_path, destination)
+    except Exception as exc:
+        logger.warning(
+            "Could not repoint paper index path for %s -> %s: %s",
+            pdf_path, destination, exc,
         )
 
 
