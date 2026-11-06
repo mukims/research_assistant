@@ -741,7 +741,11 @@ class TestSeedAlreadyInCorpus(unittest.TestCase):
         }
         with patch.object(a0, "download_pdf") as mock_download:
             ret_cand, key, path = a0.download_seed_cascade([cand], force=False)
-            self.assertEqual(path, self.corpus_pdf)
+            expected_dest = os.path.join(self.raw_dir, a0.filename_for(key))
+            self.assertEqual(path, expected_dest)
+            self.assertTrue(os.path.exists(expected_dest))
+            with open(expected_dest, "rb") as f:
+                self.assertEqual(f.read(), b"%PDF-1.4 corpus seed bytes")
             self.assertEqual(ret_cand["download_status"], "in_corpus")
             mock_download.assert_not_called()
 
@@ -760,7 +764,23 @@ class TestSeedAlreadyInCorpus(unittest.TestCase):
             path = a0._download_and_record(
                 "q", "doi:10.1038/nature05180", "https://example.com/paper.pdf", {}, force=False
             )
-            self.assertEqual(path, self.corpus_pdf)
+            expected_dest = os.path.join(self.raw_dir, a0.filename_for("doi:10.1038/nature05180"))
+            self.assertEqual(path, expected_dest)
+            self.assertTrue(os.path.exists(expected_dest))
+            with open(expected_dest, "rb") as f:
+                self.assertEqual(f.read(), b"%PDF-1.4 corpus seed bytes")
+            mock_download.assert_not_called()
+
+    def test_corpus_seed_is_visible_to_the_extractor(self):
+        cand = {
+            "doi": "10.1038/nature05180",
+            "pdf_url": "https://example.com/paper.pdf",
+            "title": "Half-metallic graphene nanoribbons",
+        }
+        with patch.object(a0, "download_pdf") as mock_download:
+            ret_cand, key, dest = a0.download_seed_cascade([cand], force=False)
+            import glob
+            self.assertEqual(glob.glob(os.path.join(self.raw_dir, "*.pdf")), [dest])
             mock_download.assert_not_called()
 
 

@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from typing import Any, Callable, Optional
 import uuid
@@ -1204,14 +1205,16 @@ def download_seed_cascade(
         if not key:
             continue
 
+        dest = os.path.join(RAW_DIR, filename_for(key))
+
         if not force:
             hit = paper_index.find_by_ids(doi=cand.get("doi"), arxiv_id=cand.get("arxiv_id"))
             if hit and os.path.isfile(hit.path):
                 logger.info("Candidate #%d [%s] already in corpus: %s", rank_idx, key, hit.path)
+                if not os.path.exists(dest) and os.path.abspath(hit.path) != os.path.abspath(dest):
+                    shutil.copyfile(hit.path, dest)
                 cand["download_status"] = "in_corpus"
-                return cand, key, hit.path
-
-        dest = os.path.join(RAW_DIR, filename_for(key))
+                return cand, key, dest
 
         if os.path.exists(dest) and not force:
             try:
@@ -1350,7 +1353,9 @@ def _download_and_record(query, key, pdf_url, seeds, force, arxiv_id=None, sourc
 
     if hit and os.path.isfile(hit.path):
         logger.info("PDF already in corpus: %s", hit.path)
-        record_path = hit.path
+        if not os.path.exists(dest) and os.path.abspath(hit.path) != os.path.abspath(dest):
+            shutil.copyfile(hit.path, dest)
+        record_path = dest
     elif os.path.exists(dest) and not force:
         logger.info("PDF already on disk: %s", os.path.basename(dest))
         record_path = dest

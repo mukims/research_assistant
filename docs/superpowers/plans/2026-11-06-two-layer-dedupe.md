@@ -494,6 +494,110 @@ from `DOWNLOADED_JSON_PATH` and every `--extra-manifest` (match records on `path
 
 ---
 
+## Review Round 1 (reviewer, 2026-11-06, against `10f6595`)
+
+Tasks 1–7 match the plan and are well tested. Reviewer's full-suite run: 2297 passed, 18 skipped,
+1 failed (`test_batch_citer.py::…test_the_contextualized_query_reaches_the_seam_when_on`). That test
+passes alone and in its own file, and the branch touches none of its code, so it looks order-dependent,
+not caused by this work; if it fails in your full runs too, log it by name. Four defects found — R1 is a
+planner error (Task 4 as written), not an implementation slip. Fix them in order, same rules as above
+(test first, watch it fail, one commit per fix, `fix(dedupe): <what>`, log each in the Handoff Log).
+**Do not start Task 7 Step 6 (the real backfill) until R1–R4 are committed and the owner says go.**
+
+### R1 (blocking): a seed found in the corpus must still land in `RAW_DIR`
+
+**Why:** `orchestrate.py` runs `discover → ingest_seed → extract`, and `agent1_extractor.run_extractor()`
+only globs `RAW_DIR/*.pdf`. Task 4 returns the corpus file's path (usually in `pulled_pdfs/` or
+`raw/processed/`), so Agent 1 finds nothing and the run stops with "No references could be extracted".
+
+**Files:** `research_assistant/agents/agent0_discoverer.py` (`download_seed_cascade`, `_download_and_record`);
+`tests/test_discoverer.py` (`TestSeedAlreadyInCorpus`).
+
+**Behaviour:** on a corpus hit (not `force`), copy the corpus file to `dest = RAW_DIR/filename_for(key)`
+with `shutil.copyfile` unless `dest` already exists (a local copy, no network), keep
+`download_status = "in_corpus"`, and return / record **`dest`**, not `hit.path`. Layer 2 then skips the copy
+at `ingest_seed` (it lives in `RAW_DIR`, so it is kept), and Agent 1 mines and files it as usual.
+
+- [x] Change the three existing `TestSeedAlreadyInCorpus` tests to expect `dest` (in `RAW_DIR`, bytes equal
+  the corpus file's) and still `download_pdf` not called; add
+  `test_corpus_seed_is_visible_to_the_extractor` — after `download_seed_cascade` on a hit,
+  `glob(RAW_DIR/*.pdf) == [dest]`.
+- [x] Red → implement → green (`tests/test_discoverer.py tests/test_e2e_discovery.py tests/test_orchestrate_upload.py`) → commit `fix(dedupe): copy a corpus seed into raw/ so Agent 1 can read it`.
+
+### R2: keep index paths valid when Agent 1 files a seed away
+
+**Why:** the seed is indexed at `ingest_seed` under `RAW_DIR/<name>.pdf`; Agent 1's `_file_away` then
+moves it to `raw/processed/`. The entry's path is dead, so both layers ignore it ("file gone → no
+match") and a later run re-downloads and re-ingests every earlier seed — the most common duplicate.
+
+**Files:** `research_assistant/shared/paper_index.py`; `research_assistant/agents/agent1_extractor.py`
+(`_file_away`); `research_assistant/shared/ingestion.py` (`_drop_title_duplicates`);
+tests in `tests/test_paper_index.py`, `tests/test_extractor.py`, `tests/test_ingest_dedupe.py`.
+
+**Produces:** `PaperIndex.repoint_path(old_path: str, new_path: str) -> int` — every entry whose
+`os.path.abspath(path) == os.path.abspath(old_path)` gets `path=new_path` (document unchanged); returns count.
+
+- [ ] Tests: `test_repoint_path_updates_matching_entry_only` (paper_index);
+  `test_filing_a_pdf_repoints_its_index_entry` (extractor: index entry at the RAW_DIR path → after
+  `_file_away` its path is the file's new location under `processed/`); `PAPER_INDEX_PATH` patched to a temp dir.
+- [ ] Implement: in `_file_away`, capture the destination from `_unique_destination`, and after a
+  successful `shutil.move` run `with edit(PAPER_INDEX_PATH) as idx: idx.repoint_path(pdf_path, destination)`
+  inside `try/except Exception` (log at warning, never fail extraction).
+- [ ] Because the index lock now has a second user, move the `read_header` calls in
+  `_drop_title_duplicates` **before** `with edit(...)`: read every candidate's header first, then take
+  the lock only for matching, aliasing and repointing. Existing `test_ingest_dedupe.py` must stay green.
+- [ ] Red → green (`tests/test_paper_index.py tests/test_extractor.py tests/test_ingest_dedupe.py tests/test_pipeline_status.py`) → commit `fix(dedupe): repoint index entry when Agent 1 files a seed`.
+
+### R3: Docling surnames lose accented edge letters
+
+**Why:** `header_from_docling` strips the surname with `^[^a-zA-Z]+|[^a-zA-Z]+$`, which treats
+accented letters as non-letters: `"Rasa Kulytė"` → `"Kulyt"`, `"Øystein Ødegård"` → `"degård"` (verified).
+GROBID reads `"Kulytė"`, so the same paper read Docling-only (GROBID down) never matches. The plan
+said "non-letter characters"; Unicode letters are letters.
+
+**Files:** `research_assistant/shared/paper_header.py`; `tests/test_paper_header.py`.
+
+- [ ] Tests: `test_accented_surnames_keep_their_letters` — author text `"Rasa Kulytė, Jonas Petras"` →
+  `first_author == "Kulytė"`; `"Øystein Ødegård and Kari Nord"` → `"Ødegård"`. Existing
+  `"Shantanu Mishra'+"` → `"Mishra"` and bare-initial tests must stay green.
+- [ ] Implement: strip with `^[\W\d_]+|[\W\d_]+$`; the "at least 2 letters" check counts
+  `sum(c.isalpha() for c in surname)`.
+- [ ] Red → green → commit `fix(dedupe): keep accented letters in Docling surnames`.
+
+### R4: the backfill must not overwrite entries written while it runs, and must not run without GROBID
+
+**Why:** `build_index` holds one in-memory index for ~40 minutes and saves it whole every 25 papers.
+The `edit()` lock is per-process, so any entry the running app adds meanwhile is overwritten. And if
+GROBID dies mid-run, the remaining papers are indexed Docling-only and, being "already indexed",
+are never re-read.
+
+**Files:** `scripts/build_paper_index.py`; `tests/test_build_paper_index.py`.
+
+- [ ] Tests: `test_backfill_keeps_entries_written_meanwhile` — stub `read_header` so its first call also
+  writes an extra entry X to the index file via `edit()`; after `build_index`, the reloaded index has X
+  plus every backfilled paper. `test_backfill_refuses_to_start_without_grobid` — GROBID probe stubbed
+  `False` → returns `{"error": ...}`, no index file written (`--dry-run` still works without GROBID).
+  `test_backfill_stops_cleanly_when_grobid_goes_down` — probe `True` at start, `False` at the first
+  checkpoint → papers read so far are saved, the run stops with `{"error": ..., "indexed": n}`.
+- [ ] Implement: collect new entries in a batch and flush every 25 (and at the end) with
+  `with edit(target_index) as fresh: for e in batch: fresh.add(e)` instead of `idx.save()`; probe
+  `f"{config.GROBID_SERVER}/api/isalive"` (10 s timeout, `"true"` in body) before starting and at each
+  flush; on failure flush what was read and stop with a "GROBID is down — rerun to resume" message.
+- [ ] Red → green → then the full suite (expect 2298 + new tests passed, 18 skipped) → commit
+  `fix(dedupe): backfill merges into the live index and stops without GROBID`.
+
+### Task 7 Step 6 — additions for the real backfill
+
+- Stop the running Marvin app first (even with R4 the two processes have no shared lock), and start it
+  again only after the backfill finishes.
+- Run with `$PY scripts/build_paper_index.py` from the repo root (commit `10f6595` made this work).
+
+### Noted, no change requested
+
+- Two brand-new copies of one paper in the **same** ingest batch are both ingested (neither is in the
+  index yet); the end-of-run sweep reports them. Acceptable per the design (report only).
+- Commit `10f6595` is not in the Handoff Log; add a line for it with the R1 entry.
+
 ## Handoff Log (append-only)
 
 Append one entry per finished task and for every stop/discrepancy:
@@ -501,4 +605,16 @@ Append one entry per finished task and for every stop/discrepancy:
 
 The reviewer (Claude Code session) diffs your branch against the baseline task by task. Do not squash or
 amend commits.
+
+2026-11-06 12:21 · Task 1 · 468a9b9 · tests/test_paper_index.py (15 passed), tests/test_fetcher.py + test_download.py (49 passed) → all green · none
+2026-11-06 12:24 · Task 2 · cd9a4be · tests/test_paper_header.py (20 passed) → all green · none
+2026-11-06 13:03 · Task 3 · 0ecc1de · tests/test_fetcher.py + test_download.py (52 passed) → all green · none
+2026-11-06 13:06 · Task 4 · 9a5638c · tests/test_discoverer.py + test_e2e_discovery.py (107 passed) → all green · none
+2026-11-06 13:09 · Task 4b · 4bab01d · tests/test_batch_uploader_dedupe.py + 7 existing batch_uploader test files (126 passed) → all green · none
+2026-11-06 13:13 · Task 5 · 029c38d · tests/test_ingest_dedupe.py + 3 ingestion test files (68 passed) → all green · none
+2026-11-06 13:15 · Task 6 · a356528 · tests/test_dedupe_sweep.py + test_fetcher.py + test_ingestion.py (69 passed) → all green · none
+2026-11-06 13:21 · Task 7 · 2cdf2d1 · full suite (2298 passed, 18 skipped) → all green · none
+2026-11-06 13:22 · Task 7 fix · 10f6595 · scripts/build_paper_index.py dry-run passed (1818 PDFs) · added package root to sys.path
+2026-11-06 14:12 · R1 · pending · tests/test_discoverer.py + test_e2e_discovery.py + test_orchestrate_upload.py (120 passed) → all green · none
+
 
