@@ -1,0 +1,179 @@
+"""Store duplicate detection, keeper selection, and cleanup planning."""
+
+from collections import defaultdict
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Literal
+
+from research_assistant.shared.source_key import fold_title
+
+TITLE_MIN = 15
+
+
+def title_key(title: str | None) -> str | None:
+    """Fold title if length >= TITLE_MIN, else None."""
+    if not title:
+        return None
+    folded = fold_title(title)
+    if not folded or len(folded) < TITLE_MIN:
+        return None
+    return folded
+
+
+@dataclass(frozen=True)
+class StoreDoc:
+    document: str
+    kind: Literal["pdf", "stub"] | None = None
+    title: str | None = None
+    surnames: frozenset[str] = frozenset()
+    chunks: int = 1
+    has_doi: bool = False
+
+    def __post_init__(self):
+        if self.kind is None:
+            object.__setattr__(
+                self, "kind", "pdf" if self.document.endswith(".pdf") else "stub"
+            )
+
+
+@dataclass(frozen=True)
+class Group:
+    title_key: str
+    keep: str
+    remove: tuple[str, ...]
+    reason: str  # "pdf+pdf" / "pdf+stub" / "stub+stub" etc: sorted kinds joined by "+"
+
+
+def plan_cleanup(
+    docs: Iterable[StoreDoc],
+    keep: Iterable[str] = (),
+    skip: Iterable[str] = (),
+    drop: Iterable[str] = (),
+) -> list[Group]:
+    """Group store duplicates and select keepers.
+
+    Groups by title_key. Inside each bucket, links docs unless both are PDFs with
+    disjoint surnames. Connected components of size >= 2 form duplicate groups.
+    keep forces the keeper; skip drops the whole group; drop creates single-member
+    groups with keep="" and reason="drop".
+    """
+    keep_set = set(keep)
+    skip_set = set(skip)
+    drop_set = set(drop)
+
+    docs_list = list(docs)
+    doc_map = {d.document: d for d in docs_list}
+
+    # Bucket non-dropped docs by title_key
+    buckets: dict[str, list[StoreDoc]] = defaultdict(list)
+    for d in docs_list:
+        if d.document in drop_set:
+            continue
+        tk = title_key(d.title)
+        if tk is not None:
+            buckets[tk].append(d)
+
+    groups: list[Group] = []
+
+    for tk, bdocs in buckets.items():
+        if len(bdocs) < 2:
+            continue
+
+        # Build adjacency graph
+        adj: dict[str, set[str]] = {d.document: set() for d in bdocs}
+        for i in range(len(bdocs)):
+            d1 = bdocs[i]
+            for j in range(i + 1, len(bdocs)):
+                d2 = bdocs[j]
+                if d1.kind == "pdf" and d2.kind == "pdf":
+                    if d1.surnames & d2.surnames:
+                        adj[d1.document].add(d2.document)
+                        adj[d2.document].add(d1.document)
+                else:
+                    # At least one is a stub
+                    adj[d1.document].add(d2.document)
+                    adj[d2.document].add(d1.document)
+
+        visited = set()
+        for d in bdocs:
+            doc_id = d.document
+            if doc_id in visited:
+                continue
+
+            # Connected component via BFS
+            comp_ids = []
+            queue = [doc_id]
+            visited.add(doc_id)
+            while queue:
+                curr = queue.pop(0)
+                comp_ids.append(curr)
+                for neighbor in adj[curr]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+
+            if len(comp_ids) < 2:
+                continue
+
+            # Check skip override
+            if any(cid in skip_set for cid in comp_ids):
+                continue
+
+            comp_docs = [doc_map[cid] for cid in comp_ids]
+
+            # Determine keeper
+            # 1. Manual keep override
+            manual_keeps = [cd for cd in comp_docs if cd.document in keep_set]
+            if manual_keeps:
+                keeper_doc = manual_keeps[0]
+            else:
+                pdfs = [cd for cd in comp_docs if cd.kind == "pdf"]
+                if pdfs:
+                    # Sort PDFs: most chunks, then has_doi, then smallest key
+                    pdfs.sort(
+                        key=lambda x: (
+                            -x.chunks,
+                            0 if x.has_doi else 1,
+                            x.document,
+                        )
+                    )
+                    keeper_doc = pdfs[0]
+                else:
+                    # All stubs: doi: key, then has_doi, then smallest key
+                    stubs = list(comp_docs)
+                    stubs.sort(
+                        key=lambda x: (
+                            0 if x.document.startswith("doi:") else 1,
+                            0 if x.has_doi else 1,
+                            x.document,
+                        )
+                    )
+                    keeper_doc = stubs[0]
+
+            keep_id = keeper_doc.document
+            remove_ids = tuple(sorted(cid for cid in comp_ids if cid != keep_id))
+            reason = "+".join(sorted(cd.kind for cd in comp_docs))
+            groups.append(
+                Group(
+                    title_key=tk,
+                    keep=keep_id,
+                    remove=remove_ids,
+                    reason=reason,
+                )
+            )
+
+    # Process drop documents
+    for drop_id in sorted(drop_set):
+        matching = doc_map.get(drop_id)
+        tk = title_key(matching.title) if matching else ""
+        groups.append(
+            Group(
+                title_key=tk or "",
+                keep="",
+                remove=(drop_id,),
+                reason="drop",
+            )
+        )
+
+    groups.sort(key=lambda g: (g.title_key, g.keep))
+    return groups

@@ -189,6 +189,26 @@ class PaperIndex:
     def add_alias(self, alias: str, document: str) -> None:
         self._aliases[alias] = document
 
+    def retire(self, document: str, keeper: str) -> None:
+        """Union document's dois/arxiv_ids into keeper's entry (if keeper is indexed),
+        delete document's entry, and add_alias(document, keeper). No-op if absent.
+        keeper == "" (a --drop): delete the entry, no alias.
+        """
+        entry = self._papers.get(document)
+        if entry is None:
+            return
+
+        del self._papers[document]
+
+        if keeper:
+            keeper_entry = self._papers.get(keeper)
+            if keeper_entry is not None:
+                new_dois = tuple(sorted(set(keeper_entry.dois) | set(entry.dois)))
+                new_arxiv = tuple(sorted(set(keeper_entry.arxiv_ids) | set(entry.arxiv_ids)))
+                new_dois = tuple(d for d in new_dois if not is_placeholder_doi(d))
+                self._papers[keeper] = replace(keeper_entry, dois=new_dois, arxiv_ids=new_arxiv)
+            self.add_alias(document, keeper)
+
     def repoint_path(self, old_path: str, new_path: str) -> int:
         norm_old = os.path.abspath(old_path)
         count = 0

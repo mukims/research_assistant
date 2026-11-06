@@ -344,6 +344,54 @@ class TestPaperIndex(unittest.TestCase):
         doi_groups = [g for g in groups if g["reason"] == "doi"]
         self.assertEqual(doi_groups, [])
 
+    def test_retire_merges_ids_and_aliases(self):
+        idx = PaperIndex(self.index_path)
+        keeper = PaperEntry(
+            document="keeper.pdf",
+            path="/corpus/keeper.pdf",
+            dois=("10.1000/keeper",),
+            arxiv_ids=("2001.00001",),
+        )
+        retired = PaperEntry(
+            document="retired.pdf",
+            path="/corpus/retired.pdf",
+            dois=("10.1000/retired",),
+            arxiv_ids=("2001.00002",),
+        )
+        idx.add(keeper)
+        idx.add(retired)
+
+        idx.retire("retired.pdf", "keeper.pdf")
+
+        # Keeper gains retired entry's DOI and arXiv ID
+        updated_keeper = idx.get("keeper.pdf")
+        self.assertIsNotNone(updated_keeper)
+        self.assertIn("10.1000/retired", updated_keeper.dois)
+        self.assertIn("10.1000/keeper", updated_keeper.dois)
+        self.assertIn("2001.00001", updated_keeper.arxiv_ids)
+        self.assertIn("2001.00002", updated_keeper.arxiv_ids)
+
+        # Retired entry is deleted
+        self.assertIsNone(idx.get("retired.pdf"))
+
+        # Alias is registered
+        resolved = idx.resolve("retired.pdf")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.document, "keeper.pdf")
+
+        # Dropping an entry with keeper == "" deletes entry without alias
+        to_drop = PaperEntry(document="drop.pdf", path="/p/drop.pdf")
+        idx.add(to_drop)
+        idx.retire("drop.pdf", "")
+        self.assertIsNone(idx.get("drop.pdf"))
+        self.assertIsNone(idx.resolve("drop.pdf"))
+
+    def test_retire_missing_is_noop(self):
+        idx = PaperIndex(self.index_path)
+        # Retiring a missing doc does nothing and raises nothing
+        idx.retire("missing.pdf", "keeper.pdf")
+        self.assertIsNone(idx.get("missing.pdf"))
+
 
 if __name__ == "__main__":
     unittest.main()

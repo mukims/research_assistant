@@ -106,6 +106,18 @@ def add_many(pdf_keys: Iterable[str]) -> None:
         _write(data)
 
 
+def discard_many(keys: Iterable[str]) -> int:
+    """One read-modify-write; returns number removed. On no match, does not rewrite file."""
+    data = load()
+    to_remove = set(keys) & set(data.keys())
+    if not to_remove:
+        return 0
+    for key in to_remove:
+        del data[key]
+    _write(data)
+    return len(to_remove)
+
+
 def rebuild_from_collection() -> int:
     """Repair the manifest from ChromaDB metadata. Returns the number of keys.
 
