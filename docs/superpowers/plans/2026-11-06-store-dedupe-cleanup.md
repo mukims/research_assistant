@@ -340,4 +340,5 @@ Format: `date time · task · sha · result · discrepancies`.
 2026-11-06 20:17 · Task 1 · 0103397 · tests/test_store_dedupe.py + test_paper_index.py (33 passed), full suite (2323 passed, 18 skipped) · none
 2026-11-06 20:25 · Task 2 · cf6237b · tests/test_agent3_abstract_dedupe.py (5 passed), full suite (2328 passed, 18 skipped) · none
 2026-11-06 20:30 · Task 3 · 1e1bb5d · tests/test_store_dedupe.py (13 passed), full suite (2329 passed, 18 skipped, 1 failed known flake in test_batch_citer.py) · none
-2026-11-06 20:36 · Task 4 · (this commit) · tests/test_store_dedupe.py (19 passed), full suite (2336 passed, 18 skipped) · none
+2026-11-06 20:36 · Task 4 · 2a78353 · tests/test_store_dedupe.py (19 passed), full suite (2336 passed, 18 skipped) · none
+2026-11-06 20:37 · Tasks 1–4 done · 2a78353 · full suite: 2336 passed, 18 skipped · none
