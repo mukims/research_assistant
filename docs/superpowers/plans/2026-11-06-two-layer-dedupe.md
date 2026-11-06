@@ -640,7 +640,7 @@ nothing is lost for good, but it is a one-run gap.)
 Layer 1 needs no change: a layer-1 hit is recorded in `downloaded.json` (or copied / staged), so the
 same run ingests it.
 
-- [ ] Tests: `test_match_that_was_never_ingested_does_not_drop` — P in the index with an existing file
+- [x] Tests: `test_match_that_was_never_ingested_does_not_drop` — P in the index with an existing file
   but **not** in the manifest; new PDF in `PULLED_PDFS_DIR` with a matching header → kept, file still
   exists, no alias, `downloaded.json` unchanged. Update the existing drop tests
   (`test_title_author_duplicate_in_pulled_pdfs_is_dropped_and_deleted`,
@@ -648,7 +648,7 @@ same run ingests it.
   `test_duplicate_is_aliased_and_downloaded_json_repointed`, `test_duplicate_never_reaches_the_store`)
   to record P's document with `manifest.add(...)` in their setup (the manifest lives under the test
   `DATA_DIR`; never touch the real one).
-- [ ] Red → implement → green (`tests/test_ingest_dedupe.py tests/test_ingestion.py tests/test_ingest_v2.py tests/test_p0_remediation.py`) → commit `fix(dedupe): only drop a duplicate of a paper that is in the store`.
+- [x] Red → implement → green (`tests/test_ingest_dedupe.py tests/test_ingestion.py tests/test_ingest_v2.py tests/test_p0_remediation.py`) → commit `fix(dedupe): only drop a duplicate of a paper that is in the store`.
 
 ### R6: ignore template placeholder DOIs
 
@@ -713,6 +713,7 @@ amend commits.
 2026-11-06 14:15 · R2 · 40a4a9b · tests/test_paper_index.py + test_extractor.py + test_ingest_dedupe.py + test_pipeline_status.py (113 passed) → all green · none
 2026-11-06 14:16 · R3 · 2c12fa5 · tests/test_paper_header.py (21 passed) → all green · none
 2026-11-06 14:22 · R4 · c4bfe5e · full suite (2305 passed, 18 skipped) → all green · none
-2026-11-06 15:21 · Task 7 Step 6 · (this commit) · backfill completed: 1818 papers indexed, 48 headers unreadable (2.64%), 100 duplicate groups found (doi: 28, arxiv: 26, title_author: 46), avg 1.69s/paper · none
+2026-11-06 15:21 · Task 7 Step 6 · e81fd21 · backfill completed: 1818 papers indexed, 48 headers unreadable (2.64%), 100 duplicate groups found (doi: 28, arxiv: 26, title_author: 46), avg 1.69s/paper · none
+2026-11-06 16:15 · R5 · pending · tests/test_ingest_dedupe.py + test_ingestion.py + test_ingest_v2.py + test_p0_remediation.py (69 passed) → all green · none
 
 

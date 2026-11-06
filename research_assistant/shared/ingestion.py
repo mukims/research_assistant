@@ -675,6 +675,7 @@ def _drop_title_duplicates(
                 match
                 and os.path.isfile(match.path)
                 and os.path.abspath(match.path) != os.path.abspath(path)
+                and manifest.contains(match.document)
             ):
                 real_path = os.path.realpath(path)
                 real_pulled = os.path.realpath(PULLED_PDFS_DIR)

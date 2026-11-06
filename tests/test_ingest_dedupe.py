@@ -57,6 +57,7 @@ class TestIngestDedupe(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def test_title_author_duplicate_in_pulled_pdfs_is_dropped_and_deleted(self):
+        manifest_mod.add(self.paper_p.document)
         new_pdf = os.path.join(self.pulled_dir, "new_dup.pdf")
         with open(new_pdf, "wb") as f:
             f.write(b"%PDF-1.4 new duplicate")
@@ -83,6 +84,7 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertFalse(os.path.exists(new_pdf))
 
     def test_duplicate_outside_pulled_pdfs_is_dropped_but_kept_on_disk(self):
+        manifest_mod.add(self.paper_p.document)
         new_pdf = os.path.join(self.raw_dir, "raw_dup.pdf")
         with open(new_pdf, "wb") as f:
             f.write(b"%PDF-1.4 raw duplicate")
@@ -104,6 +106,38 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertEqual(len(duplicates), 1)
         self.assertFalse(duplicates[0]["deleted"])
         self.assertTrue(os.path.exists(new_pdf))
+
+    def test_match_that_was_never_ingested_does_not_drop(self):
+        new_pdf = os.path.join(self.pulled_dir, "new_dup.pdf")
+        with open(new_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 new duplicate")
+
+        with open(self.downloaded_path, "w") as f:
+            json.dump({"ref1": {"path": new_pdf, "doi": "10.1038/nature05180"}}, f)
+
+        candidates = {new_pdf: "new_dup"}
+        corpus = [{"document": "new_dup.pdf", "text": "chunk"}]
+        header = PaperHeader(
+            title="Half-Metallic Graphene Nanoribbons",
+            first_authors=("Son",),
+            doi=None,
+            arxiv_id=None,
+        )
+
+        with patch("research_assistant.shared.ingestion.read_header", return_value=header):
+            kept_cands, kept_corp, duplicates, headers = ing._drop_title_duplicates(candidates, corpus)
+
+        self.assertIn(new_pdf, kept_cands)
+        self.assertEqual(kept_corp, corpus)
+        self.assertEqual(duplicates, [])
+        self.assertTrue(os.path.exists(new_pdf))
+
+        idx = PaperIndex.load(self.index_path)
+        self.assertIsNone(idx.resolve("new_dup.pdf"))
+
+        with open(self.downloaded_path) as f:
+            d_data = json.load(f)
+        self.assertEqual(d_data["ref1"]["path"], new_pdf)
 
     def test_unreadable_header_keeps_the_pdf(self):
         new_pdf = os.path.join(self.pulled_dir, "unreadable.pdf")
@@ -146,6 +180,7 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertTrue(os.path.exists(new_pdf))
 
     def test_duplicate_is_aliased_and_downloaded_json_repointed(self):
+        manifest_mod.add(self.paper_p.document)
         new_pdf = os.path.join(self.pulled_dir, "dup_alias.pdf")
         with open(new_pdf, "wb") as f:
             f.write(b"%PDF-1.4 dup alias")
@@ -206,6 +241,7 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertIn("cond-mat/0501001", entry.arxiv_ids)
 
     def test_duplicate_never_reaches_the_store(self):
+        manifest_mod.add(self.paper_p.document)
         dup_pdf = os.path.join(self.pulled_dir, "dup_paper.pdf")
         with open(dup_pdf, "wb") as f:
             f.write(b"%PDF-1.4 duplicate")
