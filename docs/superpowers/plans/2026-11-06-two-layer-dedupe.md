@@ -476,15 +476,15 @@ from `DOWNLOADED_JSON_PATH` and every `--extra-manifest` (match records on `path
 25 papers. Ends by calling `run_sweep()` and printing papers indexed, headers unreadable, groups found.
 `--dry-run` prints counts and writes nothing.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `test_backfill_skips_papers_already_indexed` — index already holds A; dir holds A and B → `read_header` called only for B
   - `test_backfill_takes_dois_from_manifests` — B's `downloaded.json` record has `doi` → entry `dois == ("10.1038/nature05180",)`
   - `test_dry_run_writes_nothing` — no index file afterwards
-- [ ] **Step 2: Run and confirm they fail.**
-- [ ] **Step 3: Implement the script and the `PIPELINE.md` paragraph.**
-- [ ] **Step 4: Full suite** — `CITATION_LOG_FILE=0 $PY -m pytest tests/ -q -p no:cacheprovider` → `0 failed`; passed = 2238 + your new tests; skipped still 18.
-- [ ] **Step 5: Commit** — `feat(dedupe): backfill script and docs`
-- [ ] **Step 6: Real backfill (only after the owner says go).**
+- [x] **Step 2: Run and confirm they fail.**
+- [x] **Step 3: Implement the script and the `PIPELINE.md` paragraph.**
+- [x] **Step 4: Full suite** — `CITATION_LOG_FILE=0 $PY -m pytest tests/ -q -p no:cacheprovider` → `0 failed`; passed = 2238 + your new tests; skipped still 18.
+- [x] **Step 5: Commit** — `feat(dedupe): backfill script and docs`
+- [x] **Step 6: Real backfill (only after the owner says go).**
   `$PY scripts/build_paper_index.py --dry-run --extra-manifest ../downloaded.json`, then
   `--limit 20` and record seconds per paper in the log, then the full run (safe to stop and resume).
   About 1,800 PDFs; 1,522 already have a Docling cache, and GROBID takes ≈1.2 s each, so expect roughly
@@ -632,6 +632,7 @@ amend commits.
 2026-11-06 14:12 · R1 · bc62b50 · tests/test_discoverer.py + test_e2e_discovery.py + test_orchestrate_upload.py (120 passed) → all green · none
 2026-11-06 14:15 · R2 · 40a4a9b · tests/test_paper_index.py + test_extractor.py + test_ingest_dedupe.py + test_pipeline_status.py (113 passed) → all green · none
 2026-11-06 14:16 · R3 · 2c12fa5 · tests/test_paper_header.py (21 passed) → all green · none
-2026-11-06 14:22 · R4 · pending · full suite (2305 passed, 18 skipped) → all green · none
+2026-11-06 14:22 · R4 · c4bfe5e · full suite (2305 passed, 18 skipped) → all green · none
+2026-11-06 15:21 · Task 7 Step 6 · (this commit) · backfill completed: 1818 papers indexed, 48 headers unreadable (2.64%), 100 duplicate groups found (doi: 28, arxiv: 26, title_author: 46), avg 1.69s/paper · none
 
 
