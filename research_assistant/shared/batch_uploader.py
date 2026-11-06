@@ -15,14 +15,17 @@ import socket
 from urllib.parse import urlparse
 from typing import Any
 
+import requests
+
 from research_assistant.shared.pdf_metadata import (
     _inspect_pdf,
     _is_pdf_content,
 )
 from research_assistant.shared.source_key import normalise_doi
 from research_assistant.shared.fetch import filename_for
-from research_assistant.config import RAW_DIR
+from research_assistant.config import RAW_DIR, PAPER_INDEX_PATH
 from research_assistant.shared.log import get_logger
+from research_assistant.shared.paper_index import PaperIndex
 
 logger = get_logger("batch_uploader")
 
@@ -309,6 +312,7 @@ def fetch_and_stage_urls_or_dois(
 
     staged: list[dict] = []
     seen_keys: set[str] = set()
+    paper_index = PaperIndex.load(PAPER_INDEX_PATH)
 
     for raw in items:
         token = raw.strip()
@@ -344,37 +348,53 @@ def fetch_and_stage_urls_or_dois(
         # Check if arXiv ID (e.g. 2401.12345 or arXiv:2401.12345)
         elif re.match(r"^(?:arxiv:)?\d{4}\.\d{4,5}(?:v\d+)?$", token, re.I):
             aid = re.sub(r"^arxiv:", "", token, flags=re.I).strip()
-            url = f"https://arxiv.org/pdf/{aid}.pdf"
             orig_name = f"arxiv_{aid}.pdf"
-            try:
-                resp = requests.get(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 Marvin-Citebot/1.0"},
-                    timeout=30,
-                )
-                if resp.status_code == 200 and _is_pdf_content(resp.content[:1024]):
-                    data = resp.content
-            except Exception as exc:
-                logger.warning("Failed fetching arXiv:%s: %s", aid, exc)
+            hit = paper_index.find_by_ids(arxiv_id=aid)
+            if hit and os.path.isfile(hit.path):
+                try:
+                    with open(hit.path, "rb") as fh:
+                        data = fh.read()
+                except OSError as exc:
+                    logger.warning("Failed reading corpus file %s: %s", hit.path, exc)
+            if not data:
+                url = f"https://arxiv.org/pdf/{aid}.pdf"
+                try:
+                    resp = requests.get(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0 Marvin-Citebot/1.0"},
+                        timeout=30,
+                    )
+                    if resp.status_code == 200 and _is_pdf_content(resp.content[:1024]):
+                        data = resp.content
+                except Exception as exc:
+                    logger.warning("Failed fetching arXiv:%s: %s", aid, exc)
 
         # Check if DOI (e.g. 10.xxxx/yyyy)
         elif token.startswith("10.") and "/" in token:
             doi = token
-            # Try Unpaywall / Europe PMC via Agent 2
-            try:
-                from research_assistant.agents import agent2_fetcher
-
-                tmp_dest = os.path.join(destination_dir, "temp_doi_fetch.pdf")
-                ok = agent2_fetcher.try_unpaywall(doi, tmp_dest)
-                if not ok:
-                    ok = agent2_fetcher.try_europepmc(doi, {"doi": doi}, tmp_dest)
-                if ok and os.path.exists(tmp_dest):
-                    with open(tmp_dest, "rb") as fh:
+            orig_name = f"doi_{doi.replace('/', '_')}.pdf"
+            hit = paper_index.find_by_ids(doi=doi)
+            if hit and os.path.isfile(hit.path):
+                try:
+                    with open(hit.path, "rb") as fh:
                         data = fh.read()
-                    os.unlink(tmp_dest)
-                    orig_name = f"doi_{doi.replace('/', '_')}.pdf"
-            except Exception as exc:
-                logger.warning("Failed resolving DOI %s: %s", doi, exc)
+                except OSError as exc:
+                    logger.warning("Failed reading corpus file %s: %s", hit.path, exc)
+            if not data:
+                # Try Unpaywall / Europe PMC via Agent 2
+                try:
+                    from research_assistant.agents import agent2_fetcher
+
+                    tmp_dest = os.path.join(destination_dir, "temp_doi_fetch.pdf")
+                    ok = agent2_fetcher.try_unpaywall(doi, tmp_dest)
+                    if not ok:
+                        ok = agent2_fetcher.try_europepmc(doi, {"doi": doi}, tmp_dest)
+                    if ok and os.path.exists(tmp_dest):
+                        with open(tmp_dest, "rb") as fh:
+                            data = fh.read()
+                        os.unlink(tmp_dest)
+                except Exception as exc:
+                    logger.warning("Failed resolving DOI %s: %s", doi, exc)
 
         if data:
             rec = _extract_from_bytes(data, orig_name, destination_dir)
