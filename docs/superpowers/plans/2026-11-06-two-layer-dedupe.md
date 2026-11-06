@@ -667,13 +667,13 @@ Applied at three points so old index entries are covered without rewriting the f
 `find_by_ids` returns `None` for a placeholder DOI query (an arXiv ID in the same call still counts);
 `duplicate_groups` skips placeholder keys when building DOI groups.
 
-- [ ] Tests: `test_placeholder_dois_are_recognised` — all 6 DOIs above → `True`; `10.1038/nature05180`,
+- [x] Tests: `test_placeholder_dois_are_recognised` — all 6 DOIs above → `True`; `10.1038/nature05180`,
   `10.1103/physrevx.10.011001`, `10.1145/3586183.3606763`, `None`, `""` → `False`.
   `test_add_drops_placeholder_dois` — `add(entry with dois=("10.1145/xxxxxx", "10.1038/nature05180"))`
   → `get(...).dois == ("10.1038/nature05180",)`. `test_find_by_ids_ignores_placeholder_doi`.
   `test_duplicate_groups_skip_placeholder_doi` — two entries loaded from disk (bypassing `add`) sharing
   `10.1145/nnnnnnn.nnnnnnn` → no `doi` group.
-- [ ] Red → green (`tests/test_paper_index.py tests/test_dedupe_sweep.py tests/test_build_paper_index.py`) → full suite (the known
+- [x] Red → green (`tests/test_paper_index.py tests/test_dedupe_sweep.py tests/test_build_paper_index.py`) → full suite (the known
   `test_batch_citer.py` ordering race may fail; log it by name if so) → commit `fix(dedupe): ignore template placeholder DOIs`.
 
 ### R7: repair the ingest manifest (real data — only after the owner says go)
@@ -714,6 +714,7 @@ amend commits.
 2026-11-06 14:16 · R3 · 2c12fa5 · tests/test_paper_header.py (21 passed) → all green · none
 2026-11-06 14:22 · R4 · c4bfe5e · full suite (2305 passed, 18 skipped) → all green · none
 2026-11-06 15:21 · Task 7 Step 6 · e81fd21 · backfill completed: 1818 papers indexed, 48 headers unreadable (2.64%), 100 duplicate groups found (doi: 28, arxiv: 26, title_author: 46), avg 1.69s/paper · none
-2026-11-06 16:15 · R5 · pending · tests/test_ingest_dedupe.py + test_ingestion.py + test_ingest_v2.py + test_p0_remediation.py (69 passed) → all green · none
+2026-11-06 16:15 · R5 · a9cb46c · tests/test_ingest_dedupe.py + test_ingestion.py + test_ingest_v2.py + test_p0_remediation.py (69 passed) → all green · none
+2026-11-06 16:21 · R6 · pending · full suite (2310 passed, 18 skipped) → all green · none
 
 

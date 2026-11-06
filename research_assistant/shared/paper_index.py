@@ -40,6 +40,22 @@ def normalise_arxiv(arxiv_id: str | None) -> str | None:
     return s if s else None
 
 
+_PLACEHOLDER_DOI_RE = re.compile(r"xx|nnnn|yyy|zzzz")
+
+
+def is_placeholder_doi(doi: str | None) -> bool:
+    """True when normalise_doi(doi) is not None and the part after the first '/'
+    matches re.search(r"xx|nnnn|yyy|zzzz", suffix).
+    """
+    if not doi:
+        return False
+    norm = normalise_doi(doi)
+    if not norm or "/" not in norm:
+        return False
+    _, suffix = norm.split("/", 1)
+    return bool(_PLACEHOLDER_DOI_RE.search(suffix))
+
+
 def surname_key(name: str | None) -> str | None:
     """NFKD; drop every char whose unicodedata.category is Mn, Sk or Lm (so 'Kulyt˙e' and 'Kulytė' agree);
     then fold_name(); return the LAST whitespace token ('Essam Ghareeb' -> 'ghareeb'); empty -> None.
@@ -123,20 +139,23 @@ class PaperIndex:
 
     def add(self, entry: PaperEntry) -> None:
         """Replaces an entry with the same document."""
+        filtered_dois = tuple(d for d in entry.dois if not is_placeholder_doi(d))
+        if len(filtered_dois) != len(entry.dois):
+            entry = replace(entry, dois=filtered_dois)
         self._papers[entry.document] = entry
 
     def get(self, document: str) -> PaperEntry | None:
         return self._papers.get(document)
 
     def find_by_ids(self, doi: str | None = None, arxiv_id: str | None = None) -> PaperEntry | None:
-        norm_doi = normalise_doi(doi) if doi else None
+        norm_doi = normalise_doi(doi) if doi and not is_placeholder_doi(doi) else None
         norm_arxiv = normalise_arxiv(arxiv_id) if arxiv_id else None
         if not norm_doi and not norm_arxiv:
             return None
         for entry in self._papers.values():
             if norm_doi:
                 for d in entry.dois:
-                    if normalise_doi(d) == norm_doi:
+                    if not is_placeholder_doi(d) and normalise_doi(d) == norm_doi:
                         return entry
             if norm_arxiv:
                 for a in entry.arxiv_ids:
@@ -194,8 +213,10 @@ class PaperIndex:
         doi_map: dict[str, set[str]] = defaultdict(set)
         for entry in self._papers.values():
             for d in entry.dois:
+                if is_placeholder_doi(d):
+                    continue
                 norm = normalise_doi(d)
-                if norm:
+                if norm and not is_placeholder_doi(norm):
                     doi_map[norm].add(entry.document)
         for key in sorted(doi_map):
             docs = doi_map[key]

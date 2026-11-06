@@ -10,6 +10,7 @@ from research_assistant.shared.paper_index import (
     PaperEntry,
     PaperIndex,
     edit,
+    is_placeholder_doi,
     normalise_arxiv,
     repoint_manifest,
     surname_key,
@@ -273,6 +274,75 @@ class TestPaperIndex(unittest.TestCase):
         self.assertEqual(idx.get("doc1").path, new_path)
         self.assertEqual(idx.get("doc1").title, "T1")
         self.assertEqual(idx.get("doc2").path, other_path)
+
+    def test_placeholder_dois_are_recognised(self):
+        placeholders = [
+            "10.1007/sxxxxx-yyy-zzzz-1",
+            "10.1109/xxx.0000.0000000",
+            "10.1145/nnnnnnn.nnnnnnn",
+            "10.1145/xxxxxx",
+            "10.1364/ao.xx.xxxxxx",
+            "10.15607/rss.2024.xx.015",
+        ]
+        for doi in placeholders:
+            self.assertTrue(is_placeholder_doi(doi), f"{doi} should be recognized as placeholder")
+
+        legitimate = [
+            "10.1038/nature05180",
+            "10.1103/physrevx.10.011001",
+            "10.1145/3586183.3606763",
+            None,
+            "",
+        ]
+        for doi in legitimate:
+            self.assertFalse(is_placeholder_doi(doi), f"{doi} should NOT be recognized as placeholder")
+
+    def test_add_drops_placeholder_dois(self):
+        idx = PaperIndex(self.index_path)
+        entry = PaperEntry(
+            document="doc1",
+            path="/corpus/doc1.pdf",
+            dois=("10.1145/xxxxxx", "10.1038/nature05180"),
+        )
+        idx.add(entry)
+        saved_entry = idx.get("doc1")
+        self.assertIsNotNone(saved_entry)
+        self.assertEqual(saved_entry.dois, ("10.1038/nature05180",))
+
+    def test_find_by_ids_ignores_placeholder_doi(self):
+        idx = PaperIndex(self.index_path)
+        entry = PaperEntry(
+            document="doc1",
+            path="/corpus/doc1.pdf",
+            dois=("10.1145/xxxxxx",),
+            arxiv_ids=("2001.00001",),
+        )
+        idx._papers["doc1"] = entry
+
+        # Placeholder DOI alone does not match
+        self.assertIsNone(idx.find_by_ids(doi="10.1145/xxxxxx"))
+
+        # arXiv ID in same call still matches
+        match = idx.find_by_ids(doi="10.1145/xxxxxx", arxiv_id="2001.00001")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.document, "doc1")
+
+    def test_duplicate_groups_skip_placeholder_doi(self):
+        data = {
+            "version": 1,
+            "papers": {
+                "A": {"document": "A", "path": "/p/A.pdf", "dois": ["10.1145/nnnnnnn.nnnnnnn"]},
+                "B": {"document": "B", "path": "/p/B.pdf", "dois": ["10.1145/nnnnnnn.nnnnnnn"]},
+            },
+            "aliases": {},
+        }
+        with open(self.index_path, "w") as f:
+            json.dump(data, f)
+
+        idx = PaperIndex.load(self.index_path)
+        groups = idx.duplicate_groups()
+        doi_groups = [g for g in groups if g["reason"] == "doi"]
+        self.assertEqual(doi_groups, [])
 
 
 if __name__ == "__main__":
