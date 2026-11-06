@@ -7,6 +7,10 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
+
+# Ensure package root is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research_assistant import config
 from research_assistant.shared.dedupe_sweep import run_sweep
