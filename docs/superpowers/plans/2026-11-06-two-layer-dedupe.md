@@ -692,6 +692,10 @@ missing from the store, so no entry is lost. Side effect (wanted): ingestion sto
   → papers 1,818; groups below 100 (the placeholder group is gone).
 - [ ] Log both numbers in the Handoff Log, commit the log (`docs(dedupe): record manifest repair`), stop and report.
 
+**Reviewer verdict on R5–R6 (`b6798a6`):** accepted. Both match the spec; reviewer's full suite 2309
+passed, 18 skipped, 1 failed — the known `test_batch_citer.py` ordering race, unrelated. The R6 log
+line says `pending`; its sha is `b6798a6`. **Cleared for R7 once the owner says go.**
+
 ## Handoff Log (append-only)
 
 Append one entry per finished task and for every stop/discrepancy:
@@ -715,6 +719,6 @@ amend commits.
 2026-11-06 14:22 · R4 · c4bfe5e · full suite (2305 passed, 18 skipped) → all green · none
 2026-11-06 15:21 · Task 7 Step 6 · e81fd21 · backfill completed: 1818 papers indexed, 48 headers unreadable (2.64%), 100 duplicate groups found (doi: 28, arxiv: 26, title_author: 46), avg 1.69s/paper · none
 2026-11-06 16:15 · R5 · a9cb46c · tests/test_ingest_dedupe.py + test_ingestion.py + test_ingest_v2.py + test_p0_remediation.py (69 passed) → all green · none
-2026-11-06 16:21 · R6 · pending · full suite (2310 passed, 18 skipped) → all green · none
+2026-11-06 16:21 · R6 · b6798a6 · full suite (2310 passed, 18 skipped) → all green · none
 
 
