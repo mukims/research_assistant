@@ -598,6 +598,20 @@ are never re-read.
   index yet); the end-of-run sweep reports them. Acceptable per the design (report only).
 - Commit `10f6595` is not in the Handoff Log; add a line for it with the R1 entry.
 
+## Review Round 2 (reviewer, 2026-11-06, against `c4bfe5e`)
+
+R1–R4 accepted: each matches its spec, with tests that would fail without the fix. Reviewer's full
+suite: 2304 passed, 18 skipped, 1 failed. The failure is again in
+`test_batch_citer.py::TestRunBatchCiterPassesContextAndQuery`, which is a pre-existing, unrelated race:
+`run_batch_citer` processes sentences in a `ThreadPoolExecutor` with `as_completed`, but the test reads
+`seen[1]` as if it were the second sentence. Not this branch's concern; do not fix it here.
+
+Small notes, no code change: the R4 Handoff Log line says `pending` where the sha is `c4bfe5e` (fix it
+when you append the backfill line). If GROBID dies mid-backfill, up to 25 papers (one batch) are
+saved Docling-only before the run stops; list their documents in the log if that happens.
+
+**Cleared for Task 7 Step 6 once the owner says go.**
+
 ## Handoff Log (append-only)
 
 Append one entry per finished task and for every stop/discrepancy:
