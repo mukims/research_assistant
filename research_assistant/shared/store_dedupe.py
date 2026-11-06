@@ -234,3 +234,86 @@ def ingested_titles(
             offset += limit
 
     return mapping
+
+
+def scan_store(collection, index, downloaded: dict) -> list[StoreDoc]:
+    """Scan collection to build StoreDoc entries.
+
+    One paged pass over collection.get(include=["metadatas"], limit=5000, offset=…):
+    counts chunks per document, takes citation_source of the first row seen.
+    PDFs look up title, surnames, and has_doi in index.
+    Stubs use citation_source as title; has_doi is True if key starts with 'doi:' or
+    matches a downloaded record with 'doi'.
+    """
+    from research_assistant.shared.paper_index import surname_key
+
+    downloaded_has_doi = set()
+    for k, v in (downloaded or {}).items():
+        if isinstance(v, dict) and v.get("doi"):
+            downloaded_has_doi.add(k)
+            if v.get("key"):
+                downloaded_has_doi.add(v["key"])
+
+    chunk_counts: dict[str, int] = defaultdict(int)
+    first_citations: dict[str, str] = {}
+
+    limit = 5000
+    offset = 0
+    while True:
+        batch = collection.get(include=["metadatas"], limit=limit, offset=offset)
+        metadatas = batch.get("metadatas") if batch else None
+        if not metadatas:
+            break
+        if metadatas and isinstance(metadatas[0], list):
+            metadatas = metadatas[0]
+        if not metadatas:
+            break
+        for meta in metadatas:
+            if not meta:
+                continue
+            doc = meta.get("document")
+            if not doc:
+                continue
+            chunk_counts[doc] += 1
+            if doc not in first_citations:
+                first_citations[doc] = meta.get("citation_source") or ""
+        if len(metadatas) < limit:
+            break
+        offset += limit
+
+    docs: list[StoreDoc] = []
+    for doc, chunks in chunk_counts.items():
+        if doc.endswith(".pdf"):
+            entry = index.get(doc)
+            title = (entry.title if entry and entry.title else None) or first_citations.get(doc)
+            surnames = (
+                frozenset(k for a in entry.first_authors if (k := surname_key(a)) is not None)
+                if entry
+                else frozenset()
+            )
+            has_doi = bool(entry.dois) if entry else False
+            docs.append(
+                StoreDoc(
+                    document=doc,
+                    kind="pdf",
+                    title=title,
+                    surnames=surnames,
+                    chunks=chunks,
+                    has_doi=has_doi,
+                )
+            )
+        else:
+            title = first_citations.get(doc)
+            has_doi = doc.startswith("doi:") or (doc in downloaded_has_doi)
+            docs.append(
+                StoreDoc(
+                    document=doc,
+                    kind="stub",
+                    title=title,
+                    surnames=frozenset(),
+                    chunks=chunks,
+                    has_doi=has_doi,
+                )
+            )
+
+    return docs

@@ -283,5 +283,149 @@ class TestManifestDiscard(unittest.TestCase):
         self.assertEqual(mtime_before, mtime_after)
 
 
+class TestScanStore(unittest.TestCase):
+    def test_scan_store_counts_chunks_and_titles(self):
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+        from research_assistant.shared.store_dedupe import scan_store
+
+        # Fake collection with 3 chunks for paper_a.pdf, 2 for stub_b, 1 for stub_c
+        metas = [
+            {"document": "paper_a.pdf", "citation_source": "Wrong Title In Store"},
+            {"document": "paper_a.pdf", "citation_source": "Wrong Title In Store"},
+            {"document": "paper_a.pdf", "citation_source": "Wrong Title In Store"},
+            {"document": "raw:b", "citation_source": "A Study of Quantum Hall Systems"},
+            {"document": "raw:b", "citation_source": "A Study of Quantum Hall Systems 2"},
+            {"document": "doi:10.1000/c", "citation_source": "Another Unique Paper Title"},
+        ]
+
+        class PagedCollection:
+            def __init__(self, items, page_size=2):
+                self.items = items
+                self.page_size = page_size
+
+            def get(self, include=None, limit=None, offset=0):
+                offset = offset or 0
+                limit = limit or self.page_size
+                return {"metadatas": self.items[offset : offset + limit]}
+
+        col = PagedCollection(metas, page_size=2)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        idx_path = os.path.join(tmp.name, "index.json")
+        idx = PaperIndex(idx_path)
+        idx.add(
+            PaperEntry(
+                document="paper_a.pdf",
+                path="/p/paper_a.pdf",
+                title="A Proper Title From Index",
+                first_authors=("Zhang",),
+                dois=("10.1000/a",),
+            )
+        )
+        idx.save()
+
+        downloaded = {
+            "raw:b": {"doi": "10.1000/b_doi", "title": "A Study of Quantum Hall Systems"},
+        }
+
+        docs = scan_store(col, idx, downloaded)
+        doc_map = {d.document: d for d in docs}
+
+        self.assertEqual(len(docs), 3)
+
+        # paper_a.pdf
+        doc_a = doc_map["paper_a.pdf"]
+        self.assertEqual(doc_a.kind, "pdf")
+        self.assertEqual(doc_a.chunks, 3)
+        self.assertEqual(doc_a.title, "A Proper Title From Index")
+        self.assertEqual(doc_a.surnames, frozenset(["zhang"]))
+        self.assertTrue(doc_a.has_doi)
+
+        # raw:b
+        doc_b = doc_map["raw:b"]
+        self.assertEqual(doc_b.kind, "stub")
+        self.assertEqual(doc_b.chunks, 2)
+        self.assertEqual(doc_b.title, "A Study of Quantum Hall Systems")
+        self.assertEqual(doc_b.surnames, frozenset())
+        self.assertTrue(doc_b.has_doi)  # from downloaded
+
+        # doi:10.1000/c
+        doc_c = doc_map["doi:10.1000/c"]
+        self.assertEqual(doc_c.kind, "stub")
+        self.assertEqual(doc_c.chunks, 1)
+        self.assertEqual(doc_c.title, "Another Unique Paper Title")
+        self.assertTrue(doc_c.has_doi)  # from doi: prefix
+
+
+class TestDedupeStoreScript(unittest.TestCase):
+    def test_dry_run_writes_plan_only(self):
+        import json
+        from unittest.mock import MagicMock, patch
+        from scripts import dedupe_store
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+
+        plan_path = os.path.join(tmp.name, "plan.json")
+        manifest_path = os.path.join(tmp.name, "manifest.json")
+        index_path = os.path.join(tmp.name, "index.json")
+
+        # Set up manifest
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"p1.pdf": "t1", "p2.pdf": "t2"}, f)
+        mtime_before = os.path.getmtime(manifest_path)
+
+        # Set up index
+        idx = PaperIndex(index_path)
+        title = "A Shared Title For Two Different PDF Chunks"
+        idx.add(PaperEntry(document="p1.pdf", path="/p/p1.pdf", title=title, first_authors=("Smith",), dois=("10.1/1",)))
+        idx.add(PaperEntry(document="p2.pdf", path="/p/p2.pdf", title=title, first_authors=("Smith",)))
+        idx.save()
+
+        # Fake store collection
+        metas = [
+            {"document": "p1.pdf", "citation_source": title},
+            {"document": "p1.pdf", "citation_source": title},
+            {"document": "p2.pdf", "citation_source": title},
+        ]
+        mock_col = MagicMock()
+        mock_col.get.side_effect = [
+            {"metadatas": metas},
+            {"metadatas": []},
+        ]
+        mock_col.delete.side_effect = RuntimeError("delete should not be called in dry run!")
+
+        mock_store = MagicMock()
+        mock_store.get_collection.return_value = mock_col
+
+        argv = ["--plan", plan_path]
+
+        with patch("research_assistant.shared.db.open_store", return_value=mock_store), \
+             patch("research_assistant.config.PAPER_INDEX_PATH", index_path), \
+             patch("research_assistant.shared.manifest.MANIFEST_PATH", manifest_path), \
+             patch("research_assistant.config.DOWNLOADED_JSON_PATH", os.path.join(tmp.name, "none.json")):
+            ret = dedupe_store.main(argv)
+
+        self.assertEqual(ret, 0)
+        self.assertTrue(os.path.exists(plan_path))
+
+        with open(plan_path, "r", encoding="utf-8") as f:
+            plan = json.load(f)
+
+        self.assertEqual(plan["totals"]["groups"], 1)
+        self.assertEqual(plan["totals"]["remove_docs"], 1)
+        self.assertEqual(plan["totals"]["remove_pdf_docs"], 1)
+        self.assertEqual(plan["totals"]["remove_stub_docs"], 0)
+        self.assertEqual(plan["totals"]["remove_chunks"], 1)  # p2.pdf had 1 chunk
+
+        # No delete was called
+        mock_col.delete.assert_not_called()
+
+        # Manifest unchanged
+        self.assertEqual(os.path.getmtime(manifest_path), mtime_before)
+
+
 if __name__ == "__main__":
     unittest.main()
