@@ -209,6 +209,25 @@ class TestPaperHeader(unittest.TestCase):
         header = header_from_docling(doc)
         self.assertEqual(header.first_authors, ())
 
+    def test_accented_surnames_keep_their_letters(self):
+        doc1 = {
+            "texts": [
+                {"label": "title", "text": "Lithuanian Study", "prov": [{"page_no": 1}]},
+                {"label": "text", "text": "Rasa Kulytė, Jonas Petras", "prov": [{"page_no": 1}]},
+            ]
+        }
+        header1 = header_from_docling(doc1)
+        self.assertEqual(header1.first_authors, ("Kulytė",))
+
+        doc2 = {
+            "texts": [
+                {"label": "title", "text": "Nordic Study", "prov": [{"page_no": 1}]},
+                {"label": "text", "text": "Øystein Ødegård and Kari Nord", "prov": [{"page_no": 1}]},
+            ]
+        }
+        header2 = header_from_docling(doc2)
+        self.assertEqual(header2.first_authors, ("Ødegård",))
+
     def test_venue_or_repository_banner_is_not_a_title(self):
         doc = {
             "texts": [

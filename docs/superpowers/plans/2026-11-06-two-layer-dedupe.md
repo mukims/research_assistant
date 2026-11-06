@@ -557,12 +557,12 @@ said "non-letter characters"; Unicode letters are letters.
 
 **Files:** `research_assistant/shared/paper_header.py`; `tests/test_paper_header.py`.
 
-- [ ] Tests: `test_accented_surnames_keep_their_letters` — author text `"Rasa Kulytė, Jonas Petras"` →
+- [x] Tests: `test_accented_surnames_keep_their_letters` — author text `"Rasa Kulytė, Jonas Petras"` →
   `first_author == "Kulytė"`; `"Øystein Ødegård and Kari Nord"` → `"Ødegård"`. Existing
   `"Shantanu Mishra'+"` → `"Mishra"` and bare-initial tests must stay green.
-- [ ] Implement: strip with `^[\W\d_]+|[\W\d_]+$`; the "at least 2 letters" check counts
+- [x] Implement: strip with `^[\W\d_]+|[\W\d_]+$`; the "at least 2 letters" check counts
   `sum(c.isalpha() for c in surname)`.
-- [ ] Red → green → commit `fix(dedupe): keep accented letters in Docling surnames`.
+- [x] Red → green → commit `fix(dedupe): keep accented letters in Docling surnames`.
 
 ### R4: the backfill must not overwrite entries written while it runs, and must not run without GROBID
 
@@ -616,6 +616,7 @@ amend commits.
 2026-11-06 13:21 · Task 7 · 2cdf2d1 · full suite (2298 passed, 18 skipped) → all green · none
 2026-11-06 13:22 · Task 7 fix · 10f6595 · scripts/build_paper_index.py dry-run passed (1818 PDFs) · added package root to sys.path
 2026-11-06 14:12 · R1 · bc62b50 · tests/test_discoverer.py + test_e2e_discovery.py + test_orchestrate_upload.py (120 passed) → all green · none
-2026-11-06 14:15 · R2 · pending · tests/test_paper_index.py + test_extractor.py + test_ingest_dedupe.py + test_pipeline_status.py (113 passed) → all green · none
+2026-11-06 14:15 · R2 · 40a4a9b · tests/test_paper_index.py + test_extractor.py + test_ingest_dedupe.py + test_pipeline_status.py (113 passed) → all green · none
+2026-11-06 14:16 · R3 · pending · tests/test_paper_header.py (21 passed) → all green · none
 
 

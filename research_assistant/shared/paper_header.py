@@ -171,8 +171,8 @@ def header_from_docling(doc: dict) -> PaperHeader:
 
             # Surname: last token with leading and trailing non-letters removed
             last_token = tokens[-1]
-            surname = re.sub(r"^[^a-zA-Z]+|[^a-zA-Z]+$", "", last_token)
-            if len(surname) < 2:
+            surname = re.sub(r"^[\W\d_]+|[\W\d_]+$", "", last_token)
+            if sum(c.isalpha() for c in surname) < 2:
                 # Bare initial, no surname
                 first_authors = ()
                 break
