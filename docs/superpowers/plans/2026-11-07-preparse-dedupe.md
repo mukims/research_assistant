@@ -296,3 +296,6 @@ the 2026-11-07 ingest has finished. The first real check is the next seed run's 
 ## Handoff Log (append-only)
 
 Format: `date time · task · sha · result · discrepancies`.
+
+2026-11-07 15:38 · Task 1 · b9b71e2 · tests/test_paper_index.py (25 passed), tests/test_ingest_dedupe.py (8 passed), tests/test_build_paper_index.py (6 passed) · none
+2026-11-07 15:49 · Task 2 · 1a3e6ea · tests/test_ingest_dedupe.py (20 passed), full suite (2353 passed, 18 skipped, 1 failed known flake in test_batch_citer.py) · none
