@@ -671,6 +671,7 @@ def _plan_drops(
     """
     drops: dict[str, PaperEntry | str] = {}
     accepted_batch: list[tuple[str, PaperHeader]] = []
+    candidate_paths = {os.path.abspath(p) for p in candidates}
 
     sorted_paths = sorted(candidates.keys(), key=lambda p: _keeper_rank(pdf_key(p)))
 
@@ -691,10 +692,12 @@ def _plan_drops(
         # 1. Store match
         store_match = None
         for entry in index.find_all_by_title_author(header.title, header.first_authors, exclude=doc_key):
+            entry_abspath = os.path.abspath(entry.path)
             if (
                 entry.document in ingested
                 and os.path.isfile(entry.path)
-                and os.path.abspath(entry.path) != os.path.abspath(path)
+                and entry_abspath != os.path.abspath(path)
+                and entry_abspath not in candidate_paths
             ):
                 store_match = entry
                 break

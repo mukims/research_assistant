@@ -657,6 +657,58 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertEqual(parsed_paths, [])
         self.assertFalse(manifest_mod.load())
 
+    def test_force_reingest_of_two_stored_copies_keeps_one(self):
+        x_path = os.path.join(self.pulled_dir, "title_x.pdf")
+        with open(x_path, "wb") as f:
+            f.write(b"%PDF-1.4 paper X")
+        y_path = os.path.join(self.pulled_dir, "title_y.pdf")
+        with open(y_path, "wb") as f:
+            f.write(b"%PDF-1.4 paper Y")
+
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(
+            document="title_x.pdf",
+            path=x_path,
+            title="Spin Transport in Graphene Bilayers",
+            first_authors=("Tombros",),
+        ))
+        idx.add(PaperEntry(
+            document="title_y.pdf",
+            path=y_path,
+            title="Spin Transport in Graphene Bilayers",
+            first_authors=("Tombros",),
+        ))
+        idx.save()
+
+        manifest_mod.add("title_x.pdf")
+        manifest_mod.add("title_y.pdf")
+
+        header = PaperHeader(
+            title="Spin Transport in Graphene Bilayers",
+            first_authors=("Tombros",),
+            doi=None,
+            arxiv_id=None,
+        )
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            doc = os.path.basename(path)
+            return [{"document": doc, "text": f"chunk {doc}"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", return_value=header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([y_path, x_path], skip_ingested=False)
+
+        self.assertTrue(os.path.exists(x_path))
+        self.assertFalse(os.path.exists(y_path))
+        self.assertEqual(parsed_paths, [x_path])
+        self.assertEqual([(d["document"], d["kept"]) for d in result["duplicates"]], [("title_y.pdf", "title_x.pdf")])
+        self.assertEqual(PaperIndex.load(self.index_path).resolve("title_x.pdf").document, "title_x.pdf")
+
 
 if __name__ == "__main__":
     unittest.main()

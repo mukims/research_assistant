@@ -293,6 +293,51 @@ the 2026-11-07 ingest has finished. The first real check is the next seed run's 
 
 ---
 
+## Review Round 1 (reviewer, 2026-11-07, against `4ae1e18`)
+
+Everything else matches the plan: the rule, keeper order, GROBID-down skip, header reuse, cancel path,
+`PIPELINE.md`. Full suite in the worktree: 2354 passed, 18 skipped, 1 error in
+`tests/test_app_render.py::TestDraftJobs::test_a_second_run_while_one_is_active_warns_and_starts_nothing`
+that passes on its own (13/13 for the class); not caused by this branch.
+
+### R11 (blocking): a forced re-ingest deletes both stored copies of a paper
+
+`_plan_drops` plans every drop before `_execute_drops` deletes anything. When the batch contains two
+copies that are **both already ingested** (any `skip_ingested=False` run: Force in the corpus and audit
+tabs, `agent3 --force`, `agent6`, `orchestrate` with `force`), each finds the other as a "store match":
+`title_x.pdf` is dropped against `title_y.pdf` and `title_y.pdf` against `title_x.pdf`. Both files are
+deleted from `pulled_pdfs/`, both are aliased to each other (a cycle), and neither is re-parsed.
+The old post-parse loop was safe here because it deleted as it went, so the second copy's
+`os.path.isfile(match.path)` was false.
+
+Reviewer's reproduction (two stored copies, same header, `ingest_pdfs([x, y], skip_ingested=False)`):
+`Duplicate dropped: title_x.pdf (matches title_y.pdf, deleted=True)`, then
+`Duplicate dropped: title_y.pdf (matches title_x.pdf, deleted=True)`, then
+`Pre-parse duplicate check: 2 of 2 PDF(s) dropped (0 match the store, 2 within this batch)`.
+
+**Fix:** in `_plan_drops`, a store-match entry whose path is one of this batch's candidates is not a store
+match (compare `os.path.abspath`); those copies are settled by the batch rule, which only matches against
+already-accepted candidates and so can never drop both. Keeper order then holds in force mode too.
+
+**Test** (in `TestIngestDedupe`):
+
+```python
+def test_force_reingest_of_two_stored_copies_keeps_one(self):
+    # title_x.pdf and title_y.pdf in pulled_dir, both in the index and the manifest, same header
+    # ("Spin Transport in Graphene Bilayers", ("Tombros",)); ingest_pdfs([y, x], skip_ingested=False)
+    assert os.path.exists(x_path) and not os.path.exists(y_path)
+    assert parsed_paths == [x_path]
+    assert [(d["document"], d["kept"]) for d in result["duplicates"]] == [("title_y.pdf", "title_x.pdf")]
+    assert PaperIndex.load(self.index_path).resolve("title_x.pdf").document == "title_x.pdf"
+```
+
+The pre-parse log line's store/batch split (which counts a drop as "batch" when its keeper is a
+candidate) is correct once R11 is fixed; no separate change needed.
+
+Commit `fix(dedupe): never drop two batch copies against each other`. Append a Handoff Log line, stop.
+
+---
+
 ## Handoff Log (append-only)
 
 Format: `date time · task · sha · result · discrepancies`.
