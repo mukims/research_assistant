@@ -466,3 +466,14 @@ pdf+pdf  title_0c3716fd7b2d10dd.pdf  ←  doi_10.1007_s11704-026-60308-3.pdf
 pdf+pdf  doi_10.4208_cicp.110113.010813a.pdf  ←  title_1b5352b9273b5bf5.pdf
 drop    ←  doi:10.1000/999
 pdf+pdf  doi_10.1002_adma.202211157.pdf  ←  title_c93a05ab11221828.pdf
+
+**Reviewer verdict on the dry run (`98d72ce`):** accepted.
+- **Totals:** 51 groups, 57 documents, 1,426 chunks, matching Review Round 1. All 51 groups
+  equal the reviewer's independent title grouping, plus the accepted graphene pair and the drop.
+- **Consistency:** every keeper and every removed document is in the manifest. All 14 PDFs to be
+  removed exist on disk: 12 in `pulled_pdfs/` and 2 in `raw/processed/`
+  (`arxiv_2406.10833.pdf`, `doi_10.1007_s11704-026-60308-3.pdf`). Both are old seed papers, and the UI
+  reads `seed_papers.json` for display metadata only, so moving them is safe.
+- **Backup:** `data/lancedb.bak-2026-11-06` is byte-identical to `data/lancedb` (93 files,
+  1,340,839,993 bytes, `diff -rq` clean).
+**Task 5 Step 6 waits for the owner's go, including the `p3.pdf` keeper choice.**
