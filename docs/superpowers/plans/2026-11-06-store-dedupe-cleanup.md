@@ -333,6 +333,63 @@ only removes versions older than that.
 
 ---
 
+## Review Round 1 (reviewer, 2026-11-06, against `5d40e1c`)
+
+Tasks 1–4 mostly match the plan, and the tests are honest. Three fixes are needed before Task 5;
+R8 blocks it. Do them on the same branch, test first, with one commit each
+(`fix(dedupe): <what>`). Then run the full suite, log, and stop.
+
+### R8 (blocking): `--apply` always refuses, even right after a matching dry run
+
+`scripts/dedupe_store.py` compares `[asdict(g) for g in groups]` with the plan file's `groups`. After
+the JSON round trip, `remove` is a list in the file but a tuple in memory, and `("a",) != ["a"]`.
+So any plan with at least one group is always reported as "store changed since the dry run". The only
+apply test that reaches success uses `"groups": []`, which hides this.
+- Fix: compare like with like, e.g. `json.loads(json.dumps(current_group_dicts)) != plan_data["groups"]`.
+- Test `test_dry_run_then_apply_same_store_succeeds`: on one fake store with one duplicate pair, run
+  `main([])` and then `main(["--apply", ...])`. Assert the second returns 0 and the fake `delete` was
+  called for the removed document in both tables.
+
+### R9: Agent 3 with `force=True` skips an ingested stub as a duplicate of itself
+
+With `force`, the `manifest.contains` check is bypassed. But `titles_map` already maps the stub's own
+title to its own key, so the record is skipped with "same paper as <itself>" and never re-ingested.
+- Fix: skip only when `titles_map[tk] != doc_key`.
+- Test `test_force_reingests_stub_already_in_store`: the store has `doi:x` titled T and the manifest
+  has `doi:x`. `run_ingestor(force=True)` with record `doi:x` titled T → `doi:x` is upserted.
+
+### R10: a failure after the deletes aborts the apply and loses the rollback record
+
+In `apply_cleanup`, only the two deletes are inside `try`. If `manifest.discard_many`, the index
+`edit`, or `shutil.move` raises (a full disk, a permission error), the exception escapes. The rest of
+the plan doesn't run, and the script never writes `store_dedupe_applied-*.json`. That file holds
+`versions_before` and the `moved` list the rollback needs.
+- Fix: wrap the post-delete steps for each document in their own `try` and record
+  `{"document", "stage": "manifest" | "index" | "move", "error"}` in `errors`. In the script, print
+  `versions_before` before the first delete. Write the applied file in a `finally` so it exists
+  even if something unexpected escapes.
+- Test `test_move_failure_is_recorded_and_apply_continues`: two PDF removals, and `shutil.move` raises
+  for the first. Assert the second is still removed and moved, `errors` has one entry with
+  `stage == "move"`, and the first PDF is still at its original path.
+
+### Accepted deviation
+
+`scan_store` falls back to the store's `citation_source` when a PDF's index entry has no title. That is
+broader than the design, but PDF+PDF links still need a shared surname, so it can only add PDF+stub
+groups. On the live store it adds exactly one real duplicate: `doi_10.1103_revmodphys.81.109.pdf`
+(no index title) and the abstract-only `title:976524d097dc9807`, both "The electronic properties of
+graphene". Keep it.
+
+### Corrected Task 5 numbers (reviewer's in-memory run of `scan_store` + `plan_cleanup` on the live store)
+
+- Step 3 (with `--drop "doi:10.1000/999"`): **51 groups** (14 pdf+pdf, 5 pdf+stub, 1 pdf+stub+stub,
+  26 stub+stub, 3 stub+stub+stub, 1 stub+stub+stub+stub, 1 drop), **57 documents** (14 PDFs,
+  43 abstract-only), **1,426 chunks**.
+- Step 6: manifest rebuild **1,724**; store **1,724** documents and **123,722** chunks; 14 PDFs quarantined.
+- `p3.pdf` is removed (kept: `title_b780af29ce603766.pdf`, 50 chunks vs 38); `p6.pdf` is kept.
+
+---
+
 ## Handoff Log (append-only)
 
 Format: `date time · task · sha · result · discrepancies`.
