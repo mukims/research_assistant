@@ -365,32 +365,42 @@ def apply_cleanup(
                 papers.delete(where={"document": doc})
                 summaries.delete(where={"document": doc})
             except Exception as exc:
-                errors.append({"document": doc, "error": str(exc)})
+                errors.append({"document": doc, "stage": "delete", "error": str(exc)})
                 continue
 
             removed.append(doc)
-            manifest.discard_many([doc])
+
+            try:
+                manifest.discard_many([doc])
+            except Exception as exc:
+                errors.append({"document": doc, "stage": "manifest", "error": str(exc)})
 
             if doc.endswith(".pdf"):
                 pdf_path = None
-                with edit(index_path) as idx:
-                    entry = idx.get(doc)
-                    if entry and entry.path:
-                        pdf_path = entry.path
-                    idx.retire(doc, keep)
+                try:
+                    with edit(index_path) as idx:
+                        entry = idx.get(doc)
+                        if entry and entry.path:
+                            pdf_path = entry.path
+                        idx.retire(doc, keep)
+                except Exception as exc:
+                    errors.append({"document": doc, "stage": "index", "error": str(exc)})
 
                 if pdf_path and os.path.exists(pdf_path):
-                    os.makedirs(quarantine_dir, exist_ok=True)
-                    base_name = os.path.basename(pdf_path)
-                    dest_path = os.path.join(quarantine_dir, base_name)
-                    if os.path.exists(dest_path):
-                        stem, ext = os.path.splitext(base_name)
-                        counter = 1
-                        while os.path.exists(dest_path):
-                            dest_path = os.path.join(quarantine_dir, f"{stem}_{counter}{ext}")
-                            counter += 1
-                    shutil.move(pdf_path, dest_path)
-                    moved.append([pdf_path, dest_path])
+                    try:
+                        os.makedirs(quarantine_dir, exist_ok=True)
+                        base_name = os.path.basename(pdf_path)
+                        dest_path = os.path.join(quarantine_dir, base_name)
+                        if os.path.exists(dest_path):
+                            stem, ext = os.path.splitext(base_name)
+                            counter = 1
+                            while os.path.exists(dest_path):
+                                dest_path = os.path.join(quarantine_dir, f"{stem}_{counter}{ext}")
+                                counter += 1
+                        shutil.move(pdf_path, dest_path)
+                        moved.append([pdf_path, dest_path])
+                    except Exception as exc:
+                        errors.append({"document": doc, "stage": "move", "error": str(exc)})
 
     return {
         "versions_before": versions_before,

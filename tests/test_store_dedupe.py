@@ -715,6 +715,63 @@ class TestApplyCleanup(unittest.TestCase):
         self.assertEqual(ret, 0)
         self.assertEqual(lock_acquired, [True, False])
 
+    def test_move_failure_is_recorded_and_apply_continues(self):
+        import shutil
+        from unittest.mock import MagicMock, patch
+        from research_assistant.shared import manifest
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+        from research_assistant.shared.store_dedupe import Group, apply_cleanup
+
+        manifest.add("k.pdf")
+        manifest.add("r1.pdf")
+        manifest.add("r2.pdf")
+
+        r1_path = os.path.join(self.tmp.name, "r1.pdf")
+        with open(r1_path, "wb") as f:
+            f.write(b"R1 CONTENT")
+
+        r2_path = os.path.join(self.tmp.name, "r2.pdf")
+        with open(r2_path, "wb") as f:
+            f.write(b"R2 CONTENT")
+
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="k.pdf", path="/p/k.pdf", title="Title"))
+        idx.add(PaperEntry(document="r1.pdf", path=r1_path, title="Title"))
+        idx.add(PaperEntry(document="r2.pdf", path=r2_path, title="Title"))
+        idx.save()
+
+        papers = MagicMock()
+        papers.table.version = 1
+        summaries = MagicMock()
+        summaries.table.version = 1
+
+        g = Group(title_key="title", keep="k.pdf", remove=("r1.pdf", "r2.pdf"), reason="pdf+pdf+pdf")
+
+        real_move = shutil.move
+        def fake_move(src, dst):
+            if src == r1_path:
+                raise OSError("Disk full")
+            return real_move(src, dst)
+
+        with patch("shutil.move", side_effect=fake_move):
+            res = apply_cleanup([g], papers, summaries, self.index_path, self.quarantine_dir)
+
+        # Assert errors has one entry with stage == "move" for r1.pdf
+        self.assertEqual(len(res["errors"]), 1)
+        self.assertEqual(res["errors"][0]["document"], "r1.pdf")
+        self.assertEqual(res["errors"][0]["stage"], "move")
+
+        # Assert the first PDF is still at its original path
+        self.assertTrue(os.path.exists(r1_path))
+
+        # Assert the second is still removed and moved
+        self.assertIn("r2.pdf", res["removed"])
+        self.assertFalse(os.path.exists(r2_path))
+        quarantined_r2 = os.path.join(self.quarantine_dir, "r2.pdf")
+        self.assertTrue(os.path.exists(quarantined_r2))
+        self.assertEqual(len(res["moved"]), 1)
+        self.assertEqual(res["moved"][0], [r2_path, quarantined_r2])
+
 
 if __name__ == "__main__":
     unittest.main()

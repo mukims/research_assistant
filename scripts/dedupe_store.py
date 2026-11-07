@@ -153,18 +153,42 @@ def main(argv=None) -> int:
         manifest_before_count = len(manifest.load())
         summaries_col = db.open_store().get_collection(name=config.SUMMARY_COLLECTION_NAME)
         quarantine_dir = os.path.join(config.DATA_DIR, "quarantine", "store_dedupe")
-        res = apply_cleanup(groups, col, summaries_col, config.PAPER_INDEX_PATH, quarantine_dir)
 
-        db.clear_search_cache()
-        rebuild_count = manifest.rebuild_from_collection()
-        expected_count = manifest_before_count - len(res["removed"])
-        print(f"Rebuilt manifest count: {rebuild_count} (expected {expected_count})")
+        def _get_version(tbl) -> int:
+            t = getattr(tbl, "table", tbl)
+            v = getattr(t, "version", 0)
+            if callable(v):
+                v = v()
+            return int(v) if v is not None else 0
 
-        run_sweep()
+        versions_before = {
+            "papers": _get_version(col),
+            "summaries": _get_version(summaries_col),
+        }
+        print(
+            f"Store versions before cleanup: papers={versions_before['papers']}, "
+            f"summaries={versions_before['summaries']}"
+        )
 
-        now_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-        applied_path = os.path.join(config.DATA_DIR, f"store_dedupe_applied-{now_str}.json")
-        atomic_write_json(applied_path, res)
+        res = {
+            "versions_before": versions_before,
+            "removed": [],
+            "moved": [],
+            "errors": [],
+        }
+        try:
+            res = apply_cleanup(groups, col, summaries_col, config.PAPER_INDEX_PATH, quarantine_dir)
+
+            db.clear_search_cache()
+            rebuild_count = manifest.rebuild_from_collection()
+            expected_count = manifest_before_count - len(res["removed"])
+            print(f"Rebuilt manifest count: {rebuild_count} (expected {expected_count})")
+
+            run_sweep()
+        finally:
+            now_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+            applied_path = os.path.join(config.DATA_DIR, f"store_dedupe_applied-{now_str}.json")
+            atomic_write_json(applied_path, res)
 
         if res.get("errors"):
             print(f"Apply completed with {len(res['errors'])} error(s): {res['errors']}")
