@@ -74,8 +74,11 @@ from research_assistant.shared.paper_index import (
     edit,
     normalise_arxiv,
     repoint_manifest,
+    surname_key,
 )
-from research_assistant.shared.source_key import normalise_doi
+from research_assistant.shared.source_key import fold_title, normalise_doi
+from research_assistant.shared.grobid_manager import is_grobid_alive
+from research_assistant.shared import docling_extract
 
 logger = get_logger("ingestion")
 
@@ -638,88 +641,204 @@ def ingest_pdfs(
     return res
 
 
+def _read_header_for_dedupe(path: str) -> PaperHeader | None:
+    header = read_header(path)
+    if header is not None:
+        return header
+    cache_path = docling_extract._docling_cache_path(path)
+    if not os.path.exists(cache_path):
+        return read_header(path, convert_if_missing=True)
+    return None
+
+
+def _keeper_rank(document: str) -> tuple[int, str]:
+    if document.startswith("doi_"):
+        return (0, document)
+    if document.startswith("arxiv_"):
+        return (1, document)
+    return (2, document)
+
+
+def _plan_drops(
+    candidates: dict[str, str],
+    headers: dict[str, PaperHeader | None],
+    index: PaperIndex,
+    ingested: set[str],
+) -> dict[str, PaperEntry | str]:
+    """Plan duplicate drops against store and within batch.
+
+    Returns mapping of dropped path -> PaperEntry (store match) or keeper path (batch match).
+    """
+    drops: dict[str, PaperEntry | str] = {}
+    accepted_batch: list[tuple[str, PaperHeader]] = []
+
+    sorted_paths = sorted(candidates.keys(), key=lambda p: _keeper_rank(pdf_key(p)))
+
+    for path in sorted_paths:
+        doc_key = pdf_key(path)
+        header = headers.get(path)
+        if not header or not header.title or not header.first_authors:
+            continue
+
+        f_title = fold_title(header.title)
+        if not f_title:
+            continue
+
+        s_keys = {k for a in header.first_authors if (k := surname_key(a)) is not None}
+        if not s_keys:
+            continue
+
+        # 1. Store match
+        store_match = None
+        for entry in index.find_all_by_title_author(header.title, header.first_authors, exclude=doc_key):
+            if (
+                entry.document in ingested
+                and os.path.isfile(entry.path)
+                and os.path.abspath(entry.path) != os.path.abspath(path)
+            ):
+                store_match = entry
+                break
+
+        if store_match is not None:
+            drops[path] = store_match
+            continue
+
+        # 2. Batch match among already-accepted candidates
+        batch_match_path = None
+        for acc_path, acc_header in accepted_batch:
+            if fold_title(acc_header.title) == f_title:
+                acc_keys = {k for a in acc_header.first_authors if (k := surname_key(a)) is not None}
+                if s_keys & acc_keys:
+                    batch_match_path = acc_path
+                    break
+
+        if batch_match_path is not None:
+            drops[path] = batch_match_path
+        else:
+            accepted_batch.append((path, header))
+
+    return drops
+
+
+def _execute_drops(
+    drops: dict[str, PaperEntry | str],
+    index: PaperIndex,
+    log_prefix: str = "",
+) -> list[dict]:
+    """Execute duplicate drops: delete if in pulled_pdfs, alias, repoint, log, and event."""
+    duplicates: list[dict] = []
+    real_pulled = os.path.realpath(PULLED_PDFS_DIR)
+
+    for path, target in drops.items():
+        doc_key = pdf_key(path)
+        if isinstance(target, PaperEntry):
+            keeper_doc = target.document
+            keeper_path = target.path
+        else:
+            keeper_path = target
+            keeper_doc = pdf_key(target)
+
+        real_path = os.path.realpath(path)
+        is_in_pulled = (
+            os.path.commonpath([real_path, real_pulled]) == real_pulled
+            and real_path != real_pulled
+        )
+        deleted = False
+        if is_in_pulled:
+            try:
+                os.unlink(path)
+                deleted = True
+            except OSError as exc:
+                logger.warning("%sFailed to delete duplicate PDF %s: %s", log_prefix, path, exc)
+
+        index.add_alias(doc_key, keeper_doc)
+        repoint_manifest(DOWNLOADED_JSON_PATH, path, keeper_path)
+
+        dup_rec = {
+            "path": path,
+            "document": doc_key,
+            "kept": keeper_doc,
+            "deleted": deleted,
+        }
+        duplicates.append(dup_rec)
+        logger.info(
+            "%sDuplicate dropped: %s (matches %s, deleted=%s)",
+            log_prefix, doc_key, keeper_doc, deleted,
+        )
+        try:
+            pipeline_status.add_event(
+                f"🗑️ Dropped duplicate {doc_key} (matches {keeper_doc})"
+            )
+        except Exception:
+            pass
+
+    return duplicates
+
+
+def _drop_duplicates_before_parse(
+    candidates: dict[str, str],
+    log_prefix: str = "",
+) -> tuple[dict[str, str], list[dict], dict[str, PaperHeader | None]] | None:
+    """Pre-parse duplicate check. Read headers and drop duplicates before parsing.
+
+    Returns (kept_candidates, duplicate_records, headers), or None if cancelled.
+    """
+    headers: dict[str, PaperHeader | None] = {}
+    n = len(candidates)
+
+    for i, (path, label) in enumerate(candidates.items(), 1):
+        if pipeline_status.is_cancel_requested():
+            return None
+        name = os.path.basename(path)
+        pipeline_status.update_progress(
+            item_current=i,
+            item_total=n,
+            detail=f"Checking for duplicates [{i}/{n}]: {name}",
+        )
+        headers[path] = _read_header_for_dedupe(path)
+
+    with edit(PAPER_INDEX_PATH) as index:
+        ingested = set(manifest.load())
+        drops = _plan_drops(candidates, headers, index, ingested)
+        duplicate_records = _execute_drops(drops, index, log_prefix=log_prefix)
+
+    kept_candidates = {p: l for p, l in candidates.items() if p not in drops}
+    return kept_candidates, duplicate_records, headers
+
+
 def _drop_title_duplicates(
     candidates: dict[str, str],
     corpus: list[dict],
     log_prefix: str = "",
+    headers: dict[str, PaperHeader | None] | None = None,
 ) -> tuple[dict[str, str], list[dict], list[dict], dict[str, PaperHeader]]:
     """Drop title+author duplicates before store upsert.
 
     Returns (kept candidates, kept corpus entries, duplicates, headers of kept paths).
     """
-    kept_candidates: dict[str, str] = {}
-    kept_headers: dict[str, PaperHeader] = {}
-    duplicates: list[dict] = []
-    dropped_documents: set[str] = set()
-
-    headers = {path: read_header(path) for path in candidates}
+    merged_headers: dict[str, PaperHeader | None] = {}
+    for path in candidates:
+        if headers is not None and headers.get(path) is not None:
+            merged_headers[path] = headers[path]
+        else:
+            merged_headers[path] = read_header(path)
 
     with edit(PAPER_INDEX_PATH) as index:
-        for path, label in candidates.items():
-            doc_key = pdf_key(path)
-            header = headers.get(path)
+        ingested = set(manifest.load())
+        drops = _plan_drops(candidates, merged_headers, index, ingested)
+        duplicates = _execute_drops(drops, index, log_prefix=log_prefix)
 
-            if not header or not header.title or not header.first_authors:
-                kept_candidates[path] = label
-                if header:
-                    kept_headers[path] = header
-                continue
-
-            match = index.find_by_title_author(
-                header.title,
-                header.first_authors,
-                exclude=doc_key,
-            )
-
-            if (
-                match
-                and os.path.isfile(match.path)
-                and os.path.abspath(match.path) != os.path.abspath(path)
-                and manifest.contains(match.document)
-            ):
-                real_path = os.path.realpath(path)
-                real_pulled = os.path.realpath(PULLED_PDFS_DIR)
-                is_in_pulled = (
-                    os.path.commonpath([real_path, real_pulled]) == real_pulled
-                    and real_path != real_pulled
-                )
-                deleted = False
-                if is_in_pulled:
-                    try:
-                        os.unlink(path)
-                        deleted = True
-                    except OSError as exc:
-                        logger.warning("%sFailed to delete duplicate PDF %s: %s", log_prefix, path, exc)
-
-                index.add_alias(doc_key, match.document)
-                repoint_manifest(DOWNLOADED_JSON_PATH, path, match.path)
-
-                dropped_documents.add(doc_key)
-                dup_rec = {
-                    "path": path,
-                    "document": doc_key,
-                    "kept": match.document,
-                    "deleted": deleted,
-                }
-                duplicates.append(dup_rec)
-                logger.info(
-                    "%sDuplicate dropped: %s (matches %s, deleted=%s)",
-                    log_prefix, doc_key, match.document, deleted,
-                )
-                try:
-                    pipeline_status.add_event(
-                        f"🗑️ Dropped duplicate {doc_key} (matches {match.document})"
-                    )
-                except Exception:
-                    pass
-            else:
-                kept_candidates[path] = label
-                kept_headers[path] = header
-
+    dropped_documents = {pdf_key(p) for p in drops}
+    kept_candidates = {p: l for p, l in candidates.items() if p not in drops}
     kept_corpus = [
         entry for entry in corpus
         if entry.get("document") not in dropped_documents
     ]
+    kept_headers = {
+        p: merged_headers[p]
+        for p in kept_candidates
+        if merged_headers.get(p) is not None
+    }
 
     return kept_candidates, kept_corpus, duplicates, kept_headers
 
@@ -849,6 +968,37 @@ def _ingest_pdfs_locked(
         )
 
     try:
+        pre_headers: dict[str, PaperHeader | None] = {}
+        pre_duplicates: list[dict] = []
+        if not is_grobid_alive():
+            logger.warning("%sGROBID is not reachable; skipping the pre-parse duplicate check.", log_prefix)
+        else:
+            pre_res = _drop_duplicates_before_parse(candidates, log_prefix=log_prefix)
+            if pre_res is None:
+                pipeline_status.add_event("⏹️ Ingestion stopped by user")
+                logger.info("%sIngestion stopped early by user request.", log_prefix)
+                return result
+            kept_cands, pre_duplicates, pre_headers = pre_res
+            n_dropped = len(pre_duplicates)
+            n_total = len(candidates)
+            cand_keys = {pdf_key(p) for p in candidates}
+            n_batch = sum(1 for d in pre_duplicates if d["kept"] in cand_keys)
+            n_store = n_dropped - n_batch
+            n_unreadable = sum(
+                1 for p in kept_cands
+                if not pre_headers.get(p) or not pre_headers[p].title or not pre_headers[p].first_authors
+            )
+            logger.info(
+                "%sPre-parse duplicate check: %d of %d PDF(s) dropped (%d match the store, %d within this batch); %d without a readable header will be parsed.",
+                log_prefix,
+                n_dropped,
+                n_total,
+                n_store,
+                n_batch,
+                n_unreadable,
+            )
+            candidates = kept_cands
+
         corpus = []
         scanned_or_empty = []
         if workers <= 1:
@@ -962,10 +1112,10 @@ def _ingest_pdfs_locked(
             )
 
         kept_candidates, corpus, duplicates, kept_headers = _drop_title_duplicates(
-            candidates, corpus, log_prefix=log_prefix
+            candidates, corpus, log_prefix=log_prefix, headers=pre_headers
         )
         candidates = kept_candidates
-        result["duplicates"] = duplicates
+        result["duplicates"] = pre_duplicates + duplicates
 
         if corpus:
             last_summary_run.update(attempted=0, made=0, failed=0, error="", failed_docs=[])

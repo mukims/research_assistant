@@ -298,6 +298,365 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertEqual(len(result["duplicates"]), 1)
         self.assertEqual(result["duplicates"][0]["document"], "dup_paper.pdf")
 
+    def test_store_duplicate_is_dropped_before_parsing(self):
+        manifest_mod.add(self.paper_p.document)
+        dup_pdf = os.path.join(self.pulled_dir, "dup_pdf.pdf")
+        with open(dup_pdf, "wb") as f:
+            f.write(b"%PDF dup")
+        uniq_pdf = os.path.join(self.pulled_dir, "uniq_pdf.pdf")
+        with open(uniq_pdf, "wb") as f:
+            f.write(b"%PDF uniq")
+
+        dup_header = PaperHeader(
+            title="Half-Metallic Graphene Nanoribbons",
+            first_authors=("Son",),
+            doi=None,
+            arxiv_id=None,
+        )
+        uniq_header = PaperHeader(
+            title="Unique Paper",
+            first_authors=("Geim",),
+            doi=None,
+            arxiv_id=None,
+        )
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            doc = os.path.basename(path)
+            return [{"document": doc, "text": f"chunk {doc}"}]
+
+        def fake_read_header(path, *a, **k):
+            if "dup_pdf" in path:
+                return dup_header
+            return uniq_header
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([dup_pdf, uniq_pdf])
+
+        self.assertEqual(parsed_paths, [uniq_pdf])
+        self.assertFalse(os.path.exists(dup_pdf))
+        self.assertEqual([d["kept"] for d in result["duplicates"]], ["existing_p.pdf"])
+
+    def test_two_copies_in_one_batch_keep_the_doi_file(self):
+        title_abc_path = os.path.join(self.pulled_dir, "title_abc.pdf")
+        with open(title_abc_path, "wb") as f:
+            f.write(b"%PDF title_abc")
+        doi_path = os.path.join(self.pulled_dir, "doi_10.1_x.pdf")
+        with open(doi_path, "wb") as f:
+            f.write(b"%PDF doi")
+
+        with open(self.downloaded_path, "w") as f:
+            json.dump({"ref": {"path": title_abc_path}}, f)
+
+        header = PaperHeader(
+            title="Spin Transport in Graphene Bilayers",
+            first_authors=("Tombros",),
+            doi=None,
+            arxiv_id=None,
+        )
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            doc = os.path.basename(path)
+            return [{"document": doc, "text": f"chunk {doc}"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", return_value=header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([title_abc_path, doi_path])
+
+        self.assertEqual(parsed_paths, [doi_path])
+        self.assertFalse(os.path.exists(title_abc_path))
+        self.assertEqual(result["duplicates"][0]["document"], "title_abc.pdf")
+        self.assertEqual(result["duplicates"][0]["kept"], "doi_10.1_x.pdf")
+        self.assertEqual(PaperIndex.load(self.index_path).resolve("title_abc.pdf").document, "doi_10.1_x.pdf")
+        self.assertEqual(json.load(open(self.downloaded_path))["ref"]["path"], doi_path)
+        self.assertIn("doi_10.1_x.pdf", manifest_mod.load())
+        self.assertNotIn("title_abc.pdf", manifest_mod.load())
+
+    def test_same_title_different_authors_in_one_batch_are_both_parsed(self):
+        a_path = os.path.join(self.pulled_dir, "paper_a.pdf")
+        with open(a_path, "wb") as f:
+            f.write(b"%PDF a")
+        b_path = os.path.join(self.pulled_dir, "paper_b.pdf")
+        with open(b_path, "wb") as f:
+            f.write(b"%PDF b")
+
+        header_a = PaperHeader(title="A Survey of Large Language Models", first_authors=("Zhao",), doi=None, arxiv_id=None)
+        header_b = PaperHeader(title="A Survey of Large Language Models", first_authors=("Chang",), doi=None, arxiv_id=None)
+
+        def fake_read_header(path, *a, **k):
+            if "paper_a" in path:
+                return header_a
+            return header_b
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            doc = os.path.basename(path)
+            return [{"document": doc, "text": f"chunk {doc}"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([a_path, b_path])
+
+        self.assertEqual(sorted(parsed_paths), sorted([a_path, b_path]))
+        self.assertEqual(result["duplicates"], [])
+
+    def test_ingested_match_behind_a_pending_entry_still_drops(self):
+        q_file = os.path.join(self.tmp.name, "pending_q.pdf")
+        with open(q_file, "wb") as f:
+            f.write(b"%PDF pending Q")
+
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="pending_q.pdf", path=q_file, title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",)))
+        idx.add(self.paper_p)
+        idx.save()
+
+        manifest_mod.add("existing_p.pdf")
+
+        dup_pdf = os.path.join(self.pulled_dir, "dup_candidate.pdf")
+        with open(dup_pdf, "wb") as f:
+            f.write(b"%PDF dup cand")
+
+        header = PaperHeader(title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",), doi=None, arxiv_id=None)
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            doc = os.path.basename(path)
+            return [{"document": doc, "text": f"chunk {doc}"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", return_value=header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([dup_pdf])
+
+        self.assertEqual(parsed_paths, [])
+        self.assertEqual(result["duplicates"][0]["kept"], "existing_p.pdf")
+
+    def test_grobid_without_a_header_falls_back_to_docling_first_pages(self):
+        manifest_mod.add(self.paper_p.document)
+        dup_pdf = os.path.join(self.pulled_dir, "dup.pdf")
+        with open(dup_pdf, "wb") as f:
+            f.write(b"%PDF dup")
+
+        read_header_kwargs = []
+        p_header = PaperHeader(title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",), doi=None, arxiv_id=None)
+
+        def fake_read_header(path, *a, **k):
+            read_header_kwargs.append(dict(k))
+            if k.get("convert_if_missing"):
+                return p_header
+            return None
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            return [{"document": "dup.pdf", "text": "chunk"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([dup_pdf])
+
+        self.assertEqual(parsed_paths, [])
+        self.assertTrue(any(k.get("convert_if_missing") for k in read_header_kwargs))
+
+    def test_readable_grobid_header_never_converts(self):
+        dup_pdf = os.path.join(self.pulled_dir, "dup.pdf")
+        with open(dup_pdf, "wb") as f:
+            f.write(b"%PDF dup")
+
+        read_header_kwargs = []
+        p_header = PaperHeader(title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",), doi=None, arxiv_id=None)
+
+        def fake_read_header(path, *a, **k):
+            read_header_kwargs.append(dict(k))
+            return p_header
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", return_value=[]), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            ing.ingest_pdfs([dup_pdf])
+
+        self.assertFalse(any(k.get("convert_if_missing") for k in read_header_kwargs))
+
+    def test_pdf_with_a_docling_cache_is_not_converted_again(self):
+        pdf = os.path.join(self.pulled_dir, "cached.pdf")
+        with open(pdf, "wb") as f:
+            f.write(b"%PDF cached")
+
+        cache_dir = os.path.join(self.tmp.name, "docling_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        read_header_kwargs = []
+        def fake_read_header(path, *a, **k):
+            read_header_kwargs.append(dict(k))
+            return None
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            return [{"document": "cached.pdf", "text": "chunk"}]
+
+        from research_assistant import config
+        from research_assistant.shared import docling_extract
+        with patch.object(config, "DOCLING_CACHE_DIR", cache_dir):
+            cache_file = docling_extract._docling_cache_path(pdf)
+            with open(cache_file, "w") as f:
+                f.write("{}")
+
+            with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+                 patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+                 patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+                 patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+                 patch("research_assistant.shared.ingestion.rebuild_bm25"):
+                result = ing.ingest_pdfs([pdf])
+
+        self.assertFalse(any(k.get("convert_if_missing") for k in read_header_kwargs))
+        self.assertEqual(parsed_paths, [pdf])
+
+    def test_unreadable_header_is_parsed(self):
+        pdf = os.path.join(self.pulled_dir, "unreadable.pdf")
+        with open(pdf, "wb") as f:
+            f.write(b"%PDF unreadable")
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            return [{"document": "unreadable.pdf", "text": "chunk"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", return_value=None), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([pdf])
+
+        self.assertEqual(parsed_paths, [pdf])
+        self.assertEqual(result["duplicates"], [])
+
+    def test_post_parse_check_reuses_pre_parse_headers(self):
+        pdf = os.path.join(self.pulled_dir, "unique.pdf")
+        with open(pdf, "wb") as f:
+            f.write(b"%PDF unique")
+
+        header = PaperHeader(title="Novel 2D Physics", first_authors=("Geim",), doi=None, arxiv_id=None)
+
+        call_paths = []
+        def fake_read_header(path, *a, **k):
+            call_paths.append(path)
+            return header
+
+        def fake_process(path, label, *a, **k):
+            return [{"document": "unique.pdf", "text": "chunk"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            ing.ingest_pdfs([pdf])
+
+        self.assertEqual(call_paths.count(pdf), 1)
+
+    def test_batch_of_only_duplicates_parses_and_stores_nothing(self):
+        manifest_mod.add(self.paper_p.document)
+        dup_pdf = os.path.join(self.pulled_dir, "dup.pdf")
+        with open(dup_pdf, "wb") as f:
+            f.write(b"%PDF dup")
+
+        dup_header = PaperHeader(title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",), doi=None, arxiv_id=None)
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            return [{"document": "dup.pdf", "text": "chunk"}]
+
+        upsert_calls = 0
+        def fake_upsert(corpus):
+            nonlocal upsert_calls
+            upsert_calls += 1
+            return len(corpus)
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.ingestion.read_header", return_value=dup_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", side_effect=fake_upsert), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([dup_pdf])
+
+        self.assertEqual(parsed_paths, [])
+        self.assertEqual(upsert_calls, 0)
+        self.assertEqual(len(result["duplicates"]), 1)
+
+    def test_grobid_down_skips_the_pre_parse_check(self):
+        manifest_mod.add(self.paper_p.document)
+        dup_pdf = os.path.join(self.pulled_dir, "dup.pdf")
+        with open(dup_pdf, "wb") as f:
+            f.write(b"%PDF dup")
+
+        dup_header = PaperHeader(title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",), doi=None, arxiv_id=None)
+
+        read_header_kwargs = []
+        def fake_read_header(path, *a, **k):
+            read_header_kwargs.append(dict(k))
+            return dup_header
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            return [{"document": "dup.pdf", "text": "chunk"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=False), \
+             patch("research_assistant.shared.ingestion.read_header", side_effect=fake_read_header), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([dup_pdf])
+
+        self.assertEqual(parsed_paths, [dup_pdf])
+        self.assertFalse(any(k.get("convert_if_missing") for k in read_header_kwargs))
+        self.assertEqual(len(result["duplicates"]), 1)
+
+    def test_cancel_during_header_check_parses_nothing(self):
+        pdf = os.path.join(self.pulled_dir, "cand.pdf")
+        with open(pdf, "wb") as f:
+            f.write(b"%PDF cand")
+
+        parsed_paths = []
+        def fake_process(path, label, *a, **k):
+            parsed_paths.append(path)
+            return [{"document": "cand.pdf", "text": "chunk"}]
+
+        with patch("research_assistant.shared.ingestion.is_grobid_alive", return_value=True), \
+             patch("research_assistant.shared.pipeline_status.is_cancel_requested", return_value=True), \
+             patch("research_assistant.shared.ingestion.process_pdf", side_effect=fake_process), \
+             patch("research_assistant.shared.ingestion.upsert_corpus", return_value=1), \
+             patch("research_assistant.shared.ingestion.rebuild_bm25"):
+            result = ing.ingest_pdfs([pdf])
+
+        self.assertEqual(parsed_paths, [])
+        self.assertFalse(manifest_mod.load())
+
 
 if __name__ == "__main__":
     unittest.main()
