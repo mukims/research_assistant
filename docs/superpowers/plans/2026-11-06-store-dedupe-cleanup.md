@@ -388,6 +388,18 @@ graphene". Keep it.
 - Step 6: manifest rebuild **1,724**; store **1,724** documents and **123,722** chunks; 14 PDFs quarantined.
 - `p3.pdf` is removed (kept: `title_b780af29ce603766.pdf`, 50 chunks vs 38); `p6.pdf` is kept.
 
+**Reviewer verdict on R8–R10 (`91e8c30`, `770ab29`, `4d2d1cc`):** accepted. Each fix matches the
+request and has the requested test.
+- R8: the plan comparison now goes through a JSON round trip.
+- R9: a stub is skipped only when the matching title belongs to a different document.
+- R10: the manifest, index and move steps each record their own errors, versions are printed before
+  the deletes, and the applied file is written in a `finally`.
+
+Residual, accepted: if `apply_cleanup` itself raised unexpectedly, the applied file would hold only
+`versions_before`, with no `moved` list. The per-step guards make that very unlikely, and the full
+`data/lancedb.bak-2026-11-06` copy (Task 5 Step 2) covers it.
+**Cleared for Task 5 once the owner says go.**
+
 ---
 
 ## Handoff Log (append-only)
