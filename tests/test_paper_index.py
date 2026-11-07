@@ -130,6 +130,26 @@ class TestPaperIndex(unittest.TestCase):
         )
         self.assertIsNone(match)
 
+    def test_find_all_by_title_author_returns_every_match(self):
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="a.pdf", path="/corpus/a.pdf", title="Spin Transport in Graphene Bilayers", first_authors=("Tombros",)))
+        idx.add(PaperEntry(document="b.pdf", path="/corpus/b.pdf", title="Spin Transport in Graphene Bilayers", first_authors=("Tombros", "Popinciuc")))
+        idx.add(PaperEntry(document="c.pdf", path="/corpus/c.pdf", title="Spin Transport in Graphene Bilayers", first_authors=("Geim",)))
+        found = idx.find_all_by_title_author("Spin transport in graphene bilayers", ["Tombros"])
+        self.assertEqual([e.document for e in found], ["a.pdf", "b.pdf"])
+
+    def test_find_all_by_title_author_honours_exclude(self):
+        idx = PaperIndex(self.index_path)
+        idx.add(PaperEntry(document="a.pdf", path="/corpus/a.pdf", title="Spin Transport in Graphene Bilayers", first_authors=("Tombros",)))
+        idx.add(PaperEntry(document="b.pdf", path="/corpus/b.pdf", title="Spin Transport in Graphene Bilayers", first_authors=("Tombros", "Popinciuc")))
+        found = idx.find_all_by_title_author("Spin Transport in Graphene Bilayers", ["Tombros"], exclude="a.pdf")
+        self.assertEqual([e.document for e in found], ["b.pdf"])
+
+    def test_find_all_by_title_author_without_title_or_authors_is_empty(self):
+        idx = PaperIndex(self.index_path)
+        self.assertEqual(idx.find_all_by_title_author(None, ["Tombros"]), [])
+        self.assertEqual(idx.find_all_by_title_author("Spin Transport in Graphene Bilayers", []), [])
+
     def test_alias_resolves_to_the_kept_paper(self):
         idx = PaperIndex(self.index_path)
         entry = PaperEntry(

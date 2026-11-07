@@ -163,19 +163,20 @@ class PaperIndex:
                         return entry
         return None
 
-    def find_by_title_author(
+    def find_all_by_title_author(
         self,
         title: str | None,
         first_authors: Iterable[str],
         exclude: str | None = None,
-    ) -> PaperEntry | None:
+    ) -> list[PaperEntry]:
         folded_title = fold_title(title)
         if not folded_title:
-            return None
+            return []
         query_keys = {k for a in first_authors if (k := surname_key(a)) is not None}
         if not query_keys:
-            return None
+            return []
 
+        matches = []
         for entry in self._papers.values():
             if exclude and entry.document == exclude:
                 continue
@@ -183,8 +184,17 @@ class PaperIndex:
                 continue
             entry_keys = {k for a in entry.first_authors if (k := surname_key(a)) is not None}
             if query_keys & entry_keys:
-                return entry
-        return None
+                matches.append(entry)
+        return matches
+
+    def find_by_title_author(
+        self,
+        title: str | None,
+        first_authors: Iterable[str],
+        exclude: str | None = None,
+    ) -> PaperEntry | None:
+        matches = self.find_all_by_title_author(title, first_authors, exclude=exclude)
+        return matches[0] if matches else None
 
     def add_alias(self, alias: str, document: str) -> None:
         self._aliases[alias] = document
