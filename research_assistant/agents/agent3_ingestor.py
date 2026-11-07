@@ -136,7 +136,7 @@ def run_ingestor(workers: int = 1, force: bool = False):
                 if not force and manifest.contains(doc_key):
                     continue
                 tk = title_key(record.get("title"))
-                if tk and tk in titles_map:
+                if tk and tk in titles_map and titles_map[tk] != doc_key:
                     logger.info("Skipping abstract-only %s: same paper as %s", doc_key, titles_map[tk])
                     continue
                 if tk:

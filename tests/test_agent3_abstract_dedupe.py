@@ -226,6 +226,48 @@ class TestAgent3AbstractDedupe(unittest.TestCase):
             docs = {entry["document"] for entry in corpus}
             self.assertIn("doi:10.1000/fallback", docs)
 
+    def test_force_reingests_stub_already_in_store(self):
+        title = "A Comprehensive Survey of Deep Learning for Graphs"
+        # The store has an abstract-only row doi:x / citation_source T
+        fake_col = FakeCollection([
+            {
+                "document": "doi:10.1000/x",
+                "citation_source": title,
+                "type": "abstract_only",
+            }
+        ])
+        manifest_data = {"doi:10.1000/x": "2026-11-06T00:00:00"}
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f)
+
+        idx = PaperIndex(self.index_path)
+        idx.save()
+
+        # Record doi:x titled T in downloaded.json
+        self._write_downloaded({
+            "doi:10.1000/x": {
+                "key": "doi:10.1000/x",
+                "evidence_tier": "abstract_only",
+                "title": title,
+                "abstract": "Updated or forced abstract...",
+            }
+        })
+
+        mock_store = MagicMock()
+        mock_store.get_collection.return_value = fake_col
+
+        with patch("research_assistant.agents.agent3_ingestor.DOWNLOADED_JSON_PATH", self.downloaded_path), \
+             patch("research_assistant.shared.manifest.MANIFEST_PATH", self.manifest_path), \
+             patch("research_assistant.config.PAPER_INDEX_PATH", self.index_path), \
+             patch("research_assistant.shared.db.open_store", return_value=mock_store), \
+             patch("research_assistant.shared.ingestion.upsert_corpus") as mock_upsert:
+            agent3_ingestor.run_ingestor(force=True)
+
+            self.assertTrue(mock_upsert.called)
+            corpus = mock_upsert.call_args[0][0]
+            docs = {entry["document"] for entry in corpus}
+            self.assertIn("doi:10.1000/x", docs)
+
 
 if __name__ == "__main__":
     unittest.main()
