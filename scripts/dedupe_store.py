@@ -142,7 +142,7 @@ def main(argv=None) -> int:
         return 1
 
     current_group_dicts = [asdict(g) for g in groups]
-    if current_group_dicts != plan_data.get("groups"):
+    if json.loads(json.dumps(current_group_dicts)) != plan_data.get("groups"):
         print("store changed since the dry run — rerun the dry run")
         return 1
 

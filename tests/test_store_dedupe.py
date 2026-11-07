@@ -426,6 +426,85 @@ class TestDedupeStoreScript(unittest.TestCase):
         # Manifest unchanged
         self.assertEqual(os.path.getmtime(manifest_path), mtime_before)
 
+    def test_dry_run_then_apply_same_store_succeeds(self):
+        import json
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock, patch
+        from scripts import dedupe_store
+        from research_assistant.shared.paper_index import PaperEntry, PaperIndex
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+
+        plan_path = os.path.join(tmp.name, "plan.json")
+        manifest_path = os.path.join(tmp.name, "manifest.json")
+        index_path = os.path.join(tmp.name, "index.json")
+
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"p1.pdf": "t1", "p2.pdf": "t2"}, f)
+
+        idx = PaperIndex(index_path)
+        title = "A Shared Title For Two Different PDF Chunks"
+        idx.add(PaperEntry(document="p1.pdf", path="/p/p1.pdf", title=title, first_authors=("Smith",), dois=("10.1/1",)))
+        idx.add(PaperEntry(document="p2.pdf", path="/p/p2.pdf", title=title, first_authors=("Smith",)))
+        idx.save()
+
+        metas = [
+            {"document": "p1.pdf", "citation_source": title},
+            {"document": "p2.pdf", "citation_source": title},
+        ]
+
+        class FakeCol:
+            def __init__(self):
+                self.table = MagicMock()
+                self.table.version = 1
+                self.delete_calls = []
+
+            def get(self, include=None, limit=None, offset=0):
+                if offset == 0:
+                    return {"metadatas": metas}
+                return {"metadatas": []}
+
+            def delete(self, where=None):
+                self.delete_calls.append(where)
+
+        papers_col = FakeCol()
+        summaries_col = FakeCol()
+
+        mock_store = MagicMock()
+        def get_col(name):
+            if "summaries" in name:
+                return summaries_col
+            return papers_col
+        mock_store.get_collection.side_effect = get_col
+
+        @contextmanager
+        def fake_lock():
+            yield
+
+        with patch("research_assistant.shared.db.open_store", return_value=mock_store), \
+             patch("research_assistant.config.PAPER_INDEX_PATH", index_path), \
+             patch("research_assistant.shared.manifest.MANIFEST_PATH", manifest_path), \
+             patch("research_assistant.shared.manifest.rebuild_from_collection", return_value=1), \
+             patch("research_assistant.shared.dedupe_sweep.run_sweep"), \
+             patch("research_assistant.shared.db.clear_search_cache"), \
+             patch("research_assistant.shared.ingestion._ingest_lock", fake_lock), \
+             patch("research_assistant.config.DOWNLOADED_JSON_PATH", os.path.join(tmp.name, "none.json")):
+
+            # 1. Dry run
+            ret_dry = dedupe_store.main(["--plan", plan_path])
+            self.assertEqual(ret_dry, 0)
+            self.assertTrue(os.path.exists(plan_path))
+
+            # 2. Apply on the same store
+            ret_apply = dedupe_store.main(["--apply", "--plan", plan_path])
+            self.assertEqual(ret_apply, 0)
+
+            # Assert fake delete was called for the removed document (p2.pdf) in both tables
+            expected_where = {"document": "p2.pdf"}
+            self.assertIn(expected_where, papers_col.delete_calls)
+            self.assertIn(expected_where, summaries_col.delete_calls)
+
 
 class TestApplyCleanup(unittest.TestCase):
     def setUp(self):
