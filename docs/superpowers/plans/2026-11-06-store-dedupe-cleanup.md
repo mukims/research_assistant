@@ -414,7 +414,7 @@ Format: `date time · task · sha · result · discrepancies`.
 2026-11-07 10:35 · R8 · 91e8c30 · tests/test_store_dedupe.py (20 passed) · none
 2026-11-07 10:36 · R9 · 770ab29 · tests/test_agent3_abstract_dedupe.py (6 passed) · none
 2026-11-07 10:41 · R10 · 4d2d1cc · tests/test_store_dedupe.py (21 passed), full suite (2339 passed, 18 skipped) · none
-2026-11-07 11:08 · Task 5 Steps 1–4 (dry run) · (this commit) · 51 groups, 57 remove docs (14 PDFs, 43 stubs), 1426 chunks · none
+2026-11-07 11:08 · Task 5 Steps 1–4 (dry run) · 98d72ce · 51 groups, 57 remove docs (14 PDFs, 43 stubs), 1426 chunks · none
 pdf+stub+stub  doi_10.1039_c7cp04186a.pdf  ←  doi:10.1039/c7cp04186a, raw:eb3ab3ce8300bf76
 stub+stub  raw:45a0ba4360acff20  ←  raw:abbd524ca05ffc5d
 stub+stub  doi:10.1063/1.4952647  ←  raw:cdbc9d416cfd324e
@@ -477,3 +477,5 @@ pdf+pdf  doi_10.1002_adma.202211157.pdf  ←  title_c93a05ab11221828.pdf
 - **Backup:** `data/lancedb.bak-2026-11-06` is byte-identical to `data/lancedb` (93 files,
   1,340,839,993 bytes, `diff -rq` clean).
 **Task 5 Step 6 waits for the owner's go, including the `p3.pdf` keeper choice.**
+
+2026-11-07 11:36 · Task 5 Steps 6–8 (apply) · (this commit) · versions_before={'papers': 2720, 'summaries': 102}, rebuild_count=1724 (expected 1724), applied_file=data/store_dedupe_applied-20261107-1135.json, 14 PDFs quarantined, after_dry_run=0 groups (0 docs, 0 chunks), store=1724 docs, 123722 chunks · none
