@@ -413,4 +413,56 @@ Format: `date time · task · sha · result · discrepancies`.
 2026-11-06 20:37 · Tasks 1–4 done · 2a78353 · full suite: 2336 passed, 18 skipped · none
 2026-11-07 10:35 · R8 · 91e8c30 · tests/test_store_dedupe.py (20 passed) · none
 2026-11-07 10:36 · R9 · 770ab29 · tests/test_agent3_abstract_dedupe.py (6 passed) · none
-2026-11-07 10:41 · R10 · (this commit) · tests/test_store_dedupe.py (21 passed), full suite (2339 passed, 18 skipped) · none
+2026-11-07 10:41 · R10 · 4d2d1cc · tests/test_store_dedupe.py (21 passed), full suite (2339 passed, 18 skipped) · none
+2026-11-07 11:08 · Task 5 Steps 1–4 (dry run) · (this commit) · 51 groups, 57 remove docs (14 PDFs, 43 stubs), 1426 chunks · none
+pdf+stub+stub  doi_10.1039_c7cp04186a.pdf  ←  doi:10.1039/c7cp04186a, raw:eb3ab3ce8300bf76
+stub+stub  raw:45a0ba4360acff20  ←  raw:abbd524ca05ffc5d
+stub+stub  doi:10.1063/1.4952647  ←  raw:cdbc9d416cfd324e
+stub+stub  doi:10.1103/physrevb.44.943  ←  raw:a7624afc99390855
+stub+stub  doi:10.1088/1361-648x/aa6667  ←  raw:85d5e12c84f3b54a
+stub+stub  doi:10.1063/1.5008981  ←  raw:8f942bb066bdb33f
+stub+stub  doi:10.1063/1.4958636  ←  raw:48f421e577fb082e
+pdf+pdf  title_5d1b8104d3220524.pdf  ←  arxiv_2406.10833.pdf
+pdf+pdf  title_b780af29ce603766.pdf  ←  p3.pdf
+stub+stub  doi:10.1103/physrevlett.84.5172  ←  raw:59c24c0a55949cd2
+stub+stub  doi:10.1103/physreva.38.3098  ←  raw:e6ef27586ada03b2
+stub+stub  doi:10.1002/qua.560280846  ←  raw:7688a1a8c28771a9
+stub+stub  doi:10.1103/physrevlett.49.1691  ←  raw:d5ceb456935ba561
+stub+stub  doi:10.1103/physrevb.48.16929  ←  raw:7fa00e9ac4df2bd4
+stub+stub  doi:10.1103/physrevb.52.r5467  ←  raw:870c69fec536b64d
+stub+stub  doi:10.1063/1.464913  ←  raw:dc42d5a4cf98fa72
+pdf+stub  raw_d8b73794c1cae008.pdf  ←  raw:d8b73794c1cae008
+stub+stub  doi:10.1103/physrevb.37.785  ←  raw:aed6c091df7ce8c0
+stub+stub+stub  doi:10.1063/1.5090445  ←  raw:7e51f38bfa66e7c7, raw:93fe2293a90b3774
+pdf+pdf  p6.pdf  ←  doi_10.1088_1361-648x_adc52c.pdf
+stub+stub  doi:10.1103/physrevb.57.1505  ←  raw:f5b7186b6518615a
+pdf+stub  doi_10.1103_revmodphys.81.109.pdf  ←  title:976524d097dc9807
+stub+stub  doi:10.1017/cbo9780511805776  ←  title:a2addbed1ba36587
+stub+stub  doi:10.1103/physrevb.82.165109  ←  raw:82ac9d797f71c3bd
+pdf+stub  raw_7820c1093d7afde6.pdf  ←  raw:7820c1093d7afde6
+pdf+pdf  doi_10.1038_nature12952.pdf  ←  nature12952.pdf
+stub+stub+stub  doi:10.1103/physrevlett.77.3865  ←  raw:5b598f8dbbbc5443, title:c0f36c3f5177b602
+stub+stub  doi:10.1063/1.4959882  ←  raw:25baf2f103d70960
+stub+stub  title:8cb78f24b8e4d890  ←  title:43ecb61cf2c4b336
+pdf+stub  title_2bbfb8ffb5918041.pdf  ←  title:2bbfb8ffb5918041
+stub+stub  doi:10.1063/1.1564060  ←  raw:fbaccd3fafb1e586
+stub+stub  doi:10.1103/physrev.136.b864  ←  raw:f8da2006732551ed
+stub+stub  doi:10.1103/physrevlett.68.2512  ←  title:36de9d75ff887cac
+stub+stub  doi:10.1021/acs.jctc.9b00322  ←  raw:b71c6d1878fbd1b3
+pdf+pdf  title_179bb67320a2268f.pdf  ←  title_960f865668cf20c7.pdf
+pdf+pdf  nmat3687.pdf  ←  title_5489394486b132f6.pdf
+stub+stub+stub+stub  raw:3da7b8294a88831a  ←  raw:783e2ab566f88bdb, raw:c3107662494b31b6, raw:c396c26df039eaeb
+stub+stub  doi:10.1063/1.5025723  ←  raw:28c72208f05e6d58
+pdf+pdf  title_d86ca14c50306fe2.pdf  ←  title_bad77363b9702ff2.pdf
+stub+stub  doi:10.1063/1.477923  ←  raw:3a16d3e83751e74e
+stub+stub+stub  raw:0ada165f5fd9704f  ←  raw:3f2a23a2776b7698, raw:9b39f883ea24d31e
+pdf+pdf  doi_10.1038_nature13831.pdf  ←  title_bca16e6249d6aeb0.pdf
+pdf+pdf  title_31c5a0663f14c5b5.pdf  ←  title_f5645863e6a98f2e.pdf
+pdf+pdf  title_81c4479574c12c4a.pdf  ←  title_575bddaa45fac00a.pdf
+stub+stub  doi:10.1063/1.2387954  ←  raw:912217fcffbd46f2
+pdf+stub  raw_c49332877bb83d0e.pdf  ←  raw:c49332877bb83d0e
+pdf+pdf  doi_10.1038_nature17151.pdf  ←  nature17151.pdf
+pdf+pdf  title_0c3716fd7b2d10dd.pdf  ←  doi_10.1007_s11704-026-60308-3.pdf
+pdf+pdf  doi_10.4208_cicp.110113.010813a.pdf  ←  title_1b5352b9273b5bf5.pdf
+drop    ←  doi:10.1000/999
+pdf+pdf  doi_10.1002_adma.202211157.pdf  ←  title_c93a05ab11221828.pdf
