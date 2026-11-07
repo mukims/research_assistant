@@ -114,8 +114,11 @@ cmd_up() {
       *) die "unknown option: $arg (usage: deploy/local.sh up [--no-grobid])" ;;
     esac
   done
-  "$PYTHON" -c "import streamlit" >/dev/null 2>&1 \
-    || die "'$PYTHON' cannot import streamlit. Install the requirements into it, or point PYTHON at the interpreter that has them: PYTHON=/path/to/python deploy/local.sh up"
+  # find_spec, not import: docling takes seconds to import, and a missing store
+  # (lancedb) otherwise starts the app with a broken-store banner instead of failing here.
+  local missing
+  missing="$("$PYTHON" -c 'import importlib.util as u, sys; m = [n for n in ("streamlit", "lancedb", "docling") if u.find_spec(n) is None]; print(" ".join(m)); sys.exit(1 if m else 0)' 2>/dev/null)" \
+    || die "'$PYTHON' is missing: ${missing:-the requirements (it did not run)}. Install requirements.txt into it, or point PYTHON at the interpreter that has them: PYTHON=/path/to/python deploy/local.sh up"
   port_in_use "$PORT" && die "port $PORT is already taken on 127.0.0.1. Is Marvin already running? Use PORT=<free port> for a second copy."
   if [ "$manage_grobid" -eq 1 ]; then grobid_up; else say "Skipping GROBID (--no-grobid)"; fi
   echo "ollama  $OLLAMA_URL   $(ollama_line)"

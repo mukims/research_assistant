@@ -54,6 +54,7 @@ STUBS = {
         echo "python $*" >> "$CALLS"
         case "$*" in *" run --path "*) [ -e "$STATE/chroma_starts" ] && rm -f "$STATE/chroma_down"; exit 0 ;; esac
         [ "$1" = "-c" ] && [ -e "$STATE/no_streamlit" ] && exit 1
+        [ "$1" = "-c" ] && [ -e "$STATE/missing" ] && { cat "$STATE/missing"; exit 1; }
         exit 0
     ''',
 }
@@ -201,6 +202,24 @@ class TestLocalScript(ScriptHarness):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("PYTHON=", result.stderr)
         self.assertEqual(self.app_launches(), [])
+
+    def test_an_interpreter_without_lancedb_is_refused_by_name_before_anything_starts(self):
+        # Nov 6: base conda Python 3.13 has streamlit but not lancedb, so the app
+        # started and showed a broken-store banner instead of failing here.
+        self.flag("missing", "lancedb docling\n")
+        result = self.up()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lancedb docling", result.stderr)
+        self.assertIn("PYTHON=", result.stderr)
+        self.assertEqual(self.app_launches(), [])
+        self.assertEqual(self.calls_starting("docker"), [])
+
+    def test_the_interpreter_check_covers_the_store_and_the_parser(self):
+        self.flag("grobid_alive")
+        self.up()
+        (check,) = self.calls_starting("python -c")
+        for module in ("streamlit", "lancedb", "docling"):
+            self.assertIn(module, check)
 
     def test_an_unknown_option_is_refused(self):
         result = self.up("--everything")
