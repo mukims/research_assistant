@@ -376,7 +376,13 @@ def grobid_fulltext(pdf_path: str, server: str = GROBID_SERVER,
 
 # ─── PyMuPDF fallback ────────────────────────────────────────────────────────
 
-_BIB_HEAD = re.compile(r"^\s*(references?|bibliography|literature cited)\s*$", re.I)
+# A bibliography heading: optional section number, optional prefix, the name, optional colon.
+_BIB_HEAD = re.compile(
+    r"^\s*(?:[0-9IVXivx]+\.?\s+)?(?:supplementary\s+|additional\s+|cited\s+)?"
+    r"(?:references?(?:\s+and\s+notes)?|notes\s+and\s+references|bibliography"
+    r"|literature(?:\s+cited)?|литература|works\s+cited)\s*:?\s*$",
+    re.I,
+)
 
 
 def extract_pymupdf(pdf_path: str, key: str) -> Document:

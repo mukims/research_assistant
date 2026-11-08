@@ -117,6 +117,82 @@ class TestSyntheticDoclingExtraction(unittest.TestCase):
         self.assertNotIn("First citation", all_text)
         self.assertNotIn("Second citation", all_text)
 
+    # ─── Unlabelled reference lists (2026-11-07 reference-leak plan) ──────────
+
+    @staticmethod
+    def _extract(items):
+        """Run extract_docling over (label, text) pairs with a fake Docling doc."""
+        from research_assistant.shared.docling_extract import extract_docling
+
+        class FakeItem:
+            def __init__(self, label, text, page=1):
+                self.label = label
+                self.text = text
+                self.prov = [types.SimpleNamespace(page_no=page)]
+
+        class FakeDoc:
+            name = "synthetic_test.pdf"
+            pictures = []
+            tables = []
+            texts = [1]
+
+            def iterate_items(self):
+                return [(FakeItem(label, text), 1) for label, text in items]
+
+            def model_dump(self, mode="json"):
+                return {}
+
+        with patch("research_assistant.shared.docling_extract.get_digital_converter") as mock_conv, \
+             patch("research_assistant.shared.docling_extract.needs_ocr", return_value=False), \
+             patch("os.path.isfile", return_value=True), \
+             patch("builtins.open", unittest.mock.mock_open()):
+            mock_conv_instance = MagicMock()
+            mock_conv_instance.convert.return_value = types.SimpleNamespace(document=FakeDoc())
+            mock_conv.return_value = mock_conv_instance
+            return extract_docling("dummy.pdf", use_cache=False)
+
+    def test_a_reference_list_under_methods_is_kept_out(self):
+        from tests.test_bibliography import APS, APS2, ARX, ELS, PROSE
+        doc = self._extract([
+            ("section_header", "Methods"),
+            ("text", PROSE),
+            ("list_item", APS), ("list_item", APS2), ("list_item", ELS), ("list_item", ARX),
+            ("section_header", "Extended Data"),
+            ("text", "Table S1 lists the samples."),
+        ])
+        methods = next(s for s in doc.sections if s.heading == "Methods")
+        self.assertEqual([p.text for p in methods.paragraphs], [PROSE])
+        self.assertIn("Extended Data", [s.heading for s in doc.sections])
+        self.assertEqual(doc.n_bib, 4)
+
+    def test_supplementary_references_heading_is_a_bibliography(self):
+        from tests.test_bibliography import APS, PROSE
+        doc = self._extract([
+            ("section_header", "Results"),
+            ("text", PROSE),
+            ("section_header", "Supplementary references"),
+            ("list_item", APS),
+            ("list_item", "Unrelated note."),
+        ])
+        self.assertNotIn("Supplementary references", [s.heading for s in doc.sections])
+        self.assertNotIn("Unrelated note.", " ".join(p.text for s in doc.sections for p in s.paragraphs))
+
+    def test_n_bib_counts_labelled_headed_and_run_references(self):
+        from tests.test_bibliography import APS, APS2, ELS
+        doc = self._extract([
+            ("section_header", "1. Introduction"),
+            ("text", "Introductory discussion."),
+            ("section_header", "Methods"),
+            ("list_item", APS), ("list_item", APS2), ("list_item", ELS),
+            ("section_header", "References"),
+            ("reference", "[1] First citation."),
+            ("reference", "[2] Second citation."),
+            ("section_header", "Appendix A: Mathematical Derivations"),
+            ("text", "Detailed derivation step."),
+        ])
+        # 2 labelled `reference` items + a run of 3 => 5
+        self.assertEqual(doc.n_bib, 5)
+
 
 class TestIdempotentBatchHandling(unittest.TestCase):
     def test_delete_document_rows_calls_table_delete(self):

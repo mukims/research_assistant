@@ -28,6 +28,7 @@ from research_assistant.shared.extract import (
     _BIB_HEAD,
     normalise_section_kind,
 )
+from research_assistant.shared.bibliography import reference_runs
 from research_assistant.shared.log import get_logger
 
 try:
@@ -161,6 +162,19 @@ def _docling_cache_path(pdf_path: str) -> str:
     return os.path.join(config.DOCLING_CACHE_DIR, f"{stem}.docling.json")
 
 
+def _drop_reference_runs(paras: list[Paragraph]) -> tuple[list[Paragraph], int]:
+    """Drop runs of reference entries (see shared.bibliography) from one section's paragraphs.
+
+    Returns the kept paragraphs and how many were dropped. Runs are found per section,
+    so they never cross a heading.
+    """
+    runs = reference_runs([p.text for p in paras])
+    if not runs:
+        return list(paras), 0
+    drop = {i for start, end in runs for i in range(start, end)}
+    return [p for i, p in enumerate(paras) if i not in drop], len(drop)
+
+
 def extract_docling(
     pdf_path: str,
     key: Optional[str] = None,
@@ -245,9 +259,24 @@ def extract_docling(
     current_heading = ""
     current_paras: list[Paragraph] = []
     in_bibliography = False
+    n_bib = 0  # labelled reference items + items under a bibliography heading + run drops
 
     title = doc.name or key
     abstract: list[Paragraph] = []
+
+    def close_section() -> None:
+        """Move current_paras into the abstract or a section, minus reference runs."""
+        nonlocal abstract, n_bib
+        kept, dropped = _drop_reference_runs(current_paras)
+        n_bib += dropped
+        current_paras.clear()
+        if not kept:
+            return
+        sec_kind = normalise_section_kind(current_heading)
+        if sec_kind == "abstract" and not abstract:
+            abstract = kept
+        else:
+            sections.append(Section(current_heading, sec_kind, kept))
 
     for item, _level in doc.iterate_items():
         label = str(getattr(item, "label", "")).lower()
@@ -265,6 +294,7 @@ def extract_docling(
             is_reference = True
 
         if is_reference:
+            n_bib += 1
             continue
 
         # Skip running page headers, footers, footnotes, and captions from main prose
@@ -278,49 +308,31 @@ def extract_docling(
 
             # Check if this heading indicates the bibliography / references section
             if _BIB_HEAD.match(heading_text):
-                if current_paras:
-                    sec_kind = normalise_section_kind(current_heading)
-                    if sec_kind == "abstract" and not abstract:
-                        abstract = list(current_paras)
-                    else:
-                        sections.append(Section(current_heading, sec_kind, list(current_paras)))
-                    current_paras.clear()
+                if not in_bibliography:
+                    close_section()
                 in_bibliography = True
                 current_heading = heading_text
                 continue
             else:
                 if in_bibliography:
                     in_bibliography = False
-                    current_paras.clear()
-                elif current_paras:
-                    sec_kind = normalise_section_kind(current_heading)
-                    if sec_kind == "abstract" and not abstract:
-                        abstract = list(current_paras)
-                    else:
-                        sections.append(Section(current_heading, sec_kind, list(current_paras)))
-                    current_paras.clear()
+                else:
+                    close_section()
 
                 current_heading = heading_text
                 continue
 
-        if in_bibliography:
-            continue
-
         # Standard text paragraph or list item
         text = (getattr(item, "text", "") or "").strip()
-        if text:
-            current_paras.append(Paragraph(text, page_0))
+        if not text:
+            continue
+        if in_bibliography:
+            n_bib += 1
+            continue
+        current_paras.append(Paragraph(text, page_0))
 
-    if current_paras and not in_bibliography:
-        sec_kind = normalise_section_kind(current_heading)
-        if sec_kind == "abstract" and not abstract:
-            abstract = list(current_paras)
-        else:
-            sections.append(Section(current_heading, sec_kind, list(current_paras)))
-
-    # If no sections were created (e.g. flat text), wrap all paragraphs into one
-    if not sections and current_paras:
-        sections.append(Section("", "other", list(current_paras)))
+    if not in_bibliography:
+        close_section()
 
     # ─── 2. Map Figures and Save Clean Visual Crops ───────────────────────────
     figures: list[Figure] = []
@@ -617,6 +629,6 @@ def extract_docling(
         sections=sections,
         figures=figures,
         extraction=extraction_mode,
-        n_bib=0,
+        n_bib=n_bib,
         formulas=formulas,
     )
