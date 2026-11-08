@@ -278,6 +278,24 @@ class TestPaperIndex(unittest.TestCase):
         self.assertEqual(updated["key1"]["path"], "/new/dir/target.pdf")
         self.assertEqual(updated["key2"]["path"], "/old/dir/other.pdf")
 
+    def test_repoint_manifest_skips_records_without_a_path(self):
+        # Abstract-only records in downloaded.json carry "path": null.
+        manifest_path = os.path.join(self.tmp.name, "downloaded.json")
+        data = {
+            "abs": {"path": None, "title": "Abstract only"},
+            "nokey": {"title": "No path key"},
+            "key1": {"path": "/old/dir/target.pdf", "title": "Paper 1"},
+        }
+        with open(manifest_path, "w") as f:
+            json.dump(data, f)
+
+        count = repoint_manifest(manifest_path, "/old/dir/target.pdf", "/new/dir/target.pdf")
+        self.assertEqual(count, 1)
+        with open(manifest_path) as f:
+            updated = json.load(f)
+        self.assertIsNone(updated["abs"]["path"])
+        self.assertEqual(updated["key1"]["path"], "/new/dir/target.pdf")
+
     def test_repoint_path_updates_matching_entry_only(self):
         idx = PaperIndex(self.index_path)
         old_path = os.path.join(self.tmp.name, "raw", "target.pdf")

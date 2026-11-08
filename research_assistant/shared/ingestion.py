@@ -746,6 +746,10 @@ def _execute_drops(
             os.path.commonpath([real_path, real_pulled]) == real_pulled
             and real_path != real_pulled
         )
+        # Record where the duplicate went before deleting it: if this raises, the PDF stays.
+        index.add_alias(doc_key, keeper_doc)
+        repoint_manifest(DOWNLOADED_JSON_PATH, path, keeper_path)
+
         deleted = False
         if is_in_pulled:
             try:
@@ -753,9 +757,6 @@ def _execute_drops(
                 deleted = True
             except OSError as exc:
                 logger.warning("%sFailed to delete duplicate PDF %s: %s", log_prefix, path, exc)
-
-        index.add_alias(doc_key, keeper_doc)
-        repoint_manifest(DOWNLOADED_JSON_PATH, path, keeper_path)
 
         dup_rec = {
             "path": path,

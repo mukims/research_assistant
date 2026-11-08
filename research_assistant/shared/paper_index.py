@@ -343,7 +343,8 @@ def repoint_manifest(manifest_path: str, old_path: str, new_path: str) -> int:
     count = 0
     records = data.values() if isinstance(data, dict) else data
     for record in records:
-        if isinstance(record, dict) and os.path.basename(record.get("path", "")) == target_basename:
+        # Abstract-only records carry "path": null.
+        if isinstance(record, dict) and os.path.basename(record.get("path") or "") == target_basename:
             record["path"] = new_path
             count += 1
 

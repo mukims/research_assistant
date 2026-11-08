@@ -83,6 +83,41 @@ class TestIngestDedupe(unittest.TestCase):
         self.assertTrue(duplicates[0]["deleted"])
         self.assertFalse(os.path.exists(new_pdf))
 
+    def test_a_null_path_record_in_downloaded_json_does_not_stop_the_drop(self):
+        # 2026-11-08: abstract-only records carry "path": null and crashed repoint_manifest
+        # after the duplicate PDF had already been deleted.
+        manifest_mod.add(self.paper_p.document)
+        new_pdf = os.path.join(self.pulled_dir, "new_dup.pdf")
+        with open(new_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 new duplicate")
+        with open(self.downloaded_path, "w") as f:
+            json.dump({"raw:abs": {"path": None, "title": "Abstract only"},
+                       "doi:new": {"path": new_pdf, "title": "Half-Metallic Graphene Nanoribbons"}}, f)
+        header = PaperHeader(title="Half-Metallic Graphene Nanoribbons", first_authors=("Son",),
+                             doi=None, arxiv_id=None)
+
+        with patch("research_assistant.shared.ingestion.read_header", return_value=header):
+            kept_cands, _, duplicates, _ = ing._drop_title_duplicates({new_pdf: "new_dup"}, [])
+
+        self.assertNotIn(new_pdf, kept_cands)
+        self.assertEqual([d["kept"] for d in duplicates], ["existing_p.pdf"])
+        with open(self.downloaded_path) as f:
+            downloaded = json.load(f)
+        self.assertEqual(downloaded["doi:new"]["path"], self.p_file)
+        self.assertIsNone(downloaded["raw:abs"]["path"])
+
+    def test_a_drop_whose_bookkeeping_fails_keeps_its_pdf(self):
+        # Record the alias and repoint the manifest before deleting, so a failure there
+        # never leaves a deleted PDF that nothing points at.
+        new_pdf = os.path.join(self.pulled_dir, "new_dup.pdf")
+        with open(new_pdf, "wb") as f:
+            f.write(b"%PDF-1.4 new duplicate")
+        index = PaperIndex.load(self.index_path)
+        with patch.object(ing, "repoint_manifest", side_effect=RuntimeError("manifest unwritable")):
+            with self.assertRaises(RuntimeError):
+                ing._execute_drops({new_pdf: self.paper_p}, index)
+        self.assertTrue(os.path.exists(new_pdf))
+
     def test_duplicate_outside_pulled_pdfs_is_dropped_but_kept_on_disk(self):
         manifest_mod.add(self.paper_p.document)
         new_pdf = os.path.join(self.raw_dir, "raw_dup.pdf")
