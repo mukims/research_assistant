@@ -56,6 +56,8 @@ layer and by Agents 4, 5 and 7.
 
 During ingestion, duplicate PDFs are now dropped before the Docling full-text parse, using GROBID's header with a Docling first-pages fallback, including duplicate copies within one batch (keeping DOI files first, then arXiv, then alphabetical document key). Dropped files in `data/pulled_pdfs/` are deleted while preserving seed papers and user uploads in `data/raw/`. The post-parse check remains as a backstop reusing pre-parse headers.
 
+Reference lists are kept out of the text chunks three ways: Docling items labelled `reference` are skipped, everything under a bibliography heading (`References`, `VI. References`, `Supplementary references`, `Notes and references`, `Bibliography`, `Literature`, `Works cited`, …) is skipped, and, inside any other section, a run of three or more consecutive reference entries is dropped ([shared/bibliography.py](research_assistant/shared/bibliography.py): an entry is a short paragraph with a citation mark such as `82, 165109 (2010)`, an arXiv id or a DOI). The count of what was kept out is logged per paper as `bib entries kept out`. Papers stored before the run rule existed are repaired by `scripts/repair_reference_leak.py`: the default dry run re-chunks each paper that has a reference-heavy chunk from its Docling cache (never a new conversion) and writes `data/reference_repair_plan.json`; `--apply` replaces only those papers' text chunks and needs Marvin stopped and a backup of `data/lancedb`.
+
 **[orchestrate.py](orchestrate.py)** runs the whole chain for one research idea
 as a **LangGraph** state machine:
 
