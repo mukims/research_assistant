@@ -172,6 +172,14 @@ class TestScan(unittest.TestCase):
         self.assertEqual(result["repaired"], ["c.pdf"])
         self.assertEqual(result["errors"], [{"document": "a.pdf", "error": "deleted_not_reinserted: boom"}])
 
+    def test_an_upsert_that_stores_nothing_is_reported_as_deleted_not_reinserted(self):
+        # upsert_corpus stops early on a pending cancel yet still returns the full count.
+        repairs, _, fresh = scan_reference_leaks(self.col, self.index, fresh_chunks=self.stub_clean)
+        result = apply_reference_repair(repairs, fresh, self.col, upsert=lambda entries: len(entries))
+        self.assertEqual(result["repaired"], [])
+        self.assertEqual(result["errors"],
+                         [{"document": "a.pdf", "error": "deleted_not_reinserted: 0 of 1 text chunks stored"}])
+
     def test_missing_docling_cache_is_skipped_without_conversion(self):
         with patch("research_assistant.config.DOCLING_CACHE_DIR", os.path.join(self.tmp, "no_cache")), \
              patch("research_assistant.shared.ingest_v2.process_pdf_v2",
@@ -197,6 +205,11 @@ class TestScan(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, AssertionError)
 
 
+class FakeEmbedder:
+    def embed_query(self, text):
+        return [0.0]
+
+
 class TestCli(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -214,6 +227,7 @@ class TestCli(unittest.TestCase):
                   return_value=PaperIndex(os.path.join(self.tmp, "index.json"))),
             patch("research_assistant.shared.reference_repair._fresh_chunks_from_cache",
                   side_effect=lambda d, p, c: [chunk_entry(d, CLEAN)]),
+            patch("research_assistant.shared.llm.get_embeddings", return_value=FakeEmbedder()),
         ]
         for p in self.patches:
             p.start()
@@ -242,6 +256,46 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("store changed since the dry run", out)
         self.assertEqual(self.col.texts(document="a.pdf"), [HEAVY])
+
+    def test_apply_refuses_while_a_cancel_is_pending(self):
+        self.run_main([])
+        with patch("research_assistant.shared.pipeline_status.is_cancel_requested", return_value=True):
+            rc, out = self.run_main(["--apply"])
+        self.assertEqual(rc, 1)
+        self.assertIn("cancel", out)
+        self.assertEqual(self.col.texts(document="a.pdf"), [HEAVY])
+
+    def test_apply_stops_before_deleting_when_the_embedder_is_down(self):
+        self.run_main([])
+        with patch("research_assistant.shared.llm.get_embeddings", side_effect=RuntimeError("ollama down")):
+            rc, out = self.run_main(["--apply"])
+        self.assertEqual(rc, 1)
+        self.assertIn("embedder", out)
+        self.assertEqual(self.col.texts(document="a.pdf"), [HEAVY])
+
+    def test_apply_rescans_under_the_ingest_lock(self):
+        from contextlib import contextmanager
+        self.run_main([])
+        state = {"locked": False, "scanned_locked": []}
+
+        @contextmanager
+        def fake_lock():
+            state["locked"] = True
+            yield
+            state["locked"] = False
+
+        def fresh(d, p, c):
+            state["scanned_locked"].append(state["locked"])
+            return [chunk_entry(d, CLEAN)]
+
+        with patch("research_assistant.shared.ingestion._ingest_lock", fake_lock), \
+             patch("research_assistant.shared.reference_repair._fresh_chunks_from_cache", side_effect=fresh), \
+             patch("scripts.repair_reference_leak.apply_reference_repair",
+                   return_value={"versions_before": {}, "repaired": [], "errors": []}), \
+             patch("research_assistant.config.DATA_DIR", self.tmp):
+            rc, _ = self.run_main(["--apply"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(state["scanned_locked"], [True])
 
     def test_apply_without_a_plan_refuses(self):
         rc, out = self.run_main(["--apply"])

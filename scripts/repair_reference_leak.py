@@ -51,34 +51,37 @@ def main(argv=None) -> int:
     col = db.open_store().get_collection(name=db.COLLECTION_NAME)
     index = paper_index.PaperIndex.load(config.PAPER_INDEX_PATH)
 
-    if args.apply and not os.path.exists(args.plan):
-        print(f"Plan file {args.plan} does not exist. Run the dry run first.")
-        return 1
+    if args.apply:
+        return _apply(args, col, index)
 
     repairs, skips, fresh = scan_reference_leaks(col, index)
     totals = _totals(repairs)
 
-    if not args.apply:
-        skip_counts: dict[str, int] = {}
-        for s in skips:
-            reason = s.reason.split(":", 1)[0]
-            skip_counts[reason] = skip_counts.get(reason, 0) + 1
-        atomic_write_json(args.plan, {
-            "created": datetime.now(timezone.utc).isoformat(),
-            "repairs": [asdict(r) for r in repairs],
-            "skips": [asdict(s) for s in skips],
-            "totals": {**totals, "skips": skip_counts},
-        })
-        for r in repairs:
-            print(f"{r.document}  {r.stored_chunks}→{r.fresh_chunks} chunks, "
-                  f"reference-heavy {r.stored_heavy}→{r.fresh_heavy}")
-        for reason, n in sorted(skip_counts.items()):
-            print(f"skipped {n}: {reason}")
-        print(f"{totals['papers']} papers, {totals['stored_chunks']} stored chunks → "
-              f"{totals['fresh_chunks']} fresh chunks, {totals['heavy_removed']} reference-heavy chunks removed")
-        print(f"Plan written to {args.plan}")
-        return 0
+    skip_counts: dict[str, int] = {}
+    for s in skips:
+        reason = s.reason.split(":", 1)[0]
+        skip_counts[reason] = skip_counts.get(reason, 0) + 1
+    atomic_write_json(args.plan, {
+        "created": datetime.now(timezone.utc).isoformat(),
+        "repairs": [asdict(r) for r in repairs],
+        "skips": [asdict(s) for s in skips],
+        "totals": {**totals, "skips": skip_counts},
+    })
+    for r in repairs:
+        print(f"{r.document}  {r.stored_chunks}→{r.fresh_chunks} chunks, "
+              f"reference-heavy {r.stored_heavy}→{r.fresh_heavy}")
+    for reason, n in sorted(skip_counts.items()):
+        print(f"skipped {n}: {reason}")
+    print(f"{totals['papers']} papers, {totals['stored_chunks']} stored chunks → "
+          f"{totals['fresh_chunks']} fresh chunks, {totals['heavy_removed']} reference-heavy chunks removed")
+    print(f"Plan written to {args.plan}")
+    return 0
 
+
+def _apply(args, col, index) -> int:
+    if not os.path.exists(args.plan):
+        print(f"Plan file {args.plan} does not exist. Run the dry run first.")
+        return 1
     try:
         with open(args.plan, "r", encoding="utf-8") as f:
             plan_data = json.load(f)
@@ -86,14 +89,26 @@ def main(argv=None) -> int:
         print(f"Could not read plan file {args.plan}: {exc}")
         return 1
 
-    if json.loads(json.dumps([asdict(r) for r in repairs])) != plan_data.get("repairs"):
-        print("store changed since the dry run — rerun the dry run")
-        return 1
+    from research_assistant.shared import ingestion, pipeline_status
 
-    from research_assistant.shared import ingestion
+    # upsert_corpus stops embedding on a pending cancel, and every paper's rows are
+    # deleted before its upsert: refuse rather than strand papers without chunks.
+    if pipeline_status.is_cancel_requested():
+        print("A pipeline cancel is pending; clear it (or restart Marvin) before applying.")
+        return 1
+    try:
+        from research_assistant.shared.llm import get_embeddings
+        get_embeddings().embed_query("reference repair preflight")
+    except Exception as exc:
+        print(f"The embedder is not answering ({exc}); nothing was changed.")
+        return 1
 
     res = {"versions_before": {}, "repaired": [], "errors": []}
     with ingestion._ingest_lock():
+        repairs, _skips, fresh = scan_reference_leaks(col, index)
+        if json.loads(json.dumps([asdict(r) for r in repairs])) != plan_data.get("repairs"):
+            print("store changed since the dry run — rerun the dry run")
+            return 1
         try:
             res = apply_reference_repair(repairs, fresh, col)
             print(f"Store version before repair: papers={res['versions_before'].get('papers')}")
@@ -111,7 +126,6 @@ def main(argv=None) -> int:
         print(f"{len(res['errors'])} error(s): {res['errors']}")
         return 1
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -163,6 +163,11 @@ def scan_reference_leaks(
     return repairs, skips, fresh
 
 
+def _count_text_chunks(col, document: str) -> int:
+    batch = col.get(where={"$and": [{"document": document}, {"type": "text_chunk"}]}, include=["metadatas"])
+    return len((batch or {}).get("ids") or (batch or {}).get("metadatas") or [])
+
+
 def _table_version(col) -> int:
     t = getattr(col, "table", col)
     v = getattr(t, "version", 0)
@@ -195,10 +200,18 @@ def apply_reference_repair(repairs: list[LeakRepair], fresh: dict[str, list[dict
             result["errors"].append({"document": r.document, "error": f"delete_failed: {exc}"})
             continue
         try:
-            upsert(entries)
+            inserted = upsert(entries)
         except Exception as exc:                      # noqa: BLE001
             logger.error("%s: text chunks deleted but not reinserted: %s", r.document, exc)
             result["errors"].append({"document": r.document, "error": f"deleted_not_reinserted: {exc}"})
+            continue
+        # upsert_corpus stops early on a pending cancel and still returns the full count,
+        # so trust only what the store now holds.
+        stored = _count_text_chunks(col, r.document)
+        if stored == 0 or (isinstance(inserted, int) and stored < inserted):
+            logger.error("%s: only %d of %d text chunks stored after the repair", r.document, stored, len(entries))
+            result["errors"].append({"document": r.document,
+                                     "error": f"deleted_not_reinserted: {stored} of {len(entries)} text chunks stored"})
             continue
         result["repaired"].append(r.document)
     return result
