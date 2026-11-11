@@ -143,10 +143,11 @@ share of tasks whose acceptance check passed. It does not say the paper's
 numbers were reproduced, and a dry run, which fills in placeholder data, can
 earn the top rating.
 
-Retrieval is two-stage so he stays fast as the corpus grows: match the query
-against the one-paragraph **paper summaries** first, let the model drop the
-off-topic papers, then run the detailed hybrid (vector + keyword) chunk search
-only over what survives.
+Retrieval is two-stage so his reading stays bounded as the corpus grows:
+shortlist papers by their one-paragraph **paper summaries** plus the papers
+behind the best whole-corpus chunks, let the model drop the off-topic ones,
+then run the detailed hybrid (vector + keyword) chunk search only over what
+survives (at most 8 papers).
 
 Agent 8 is the one that keeps him honest. For every `\cite{}` Agent 5
 inserted — or, in the Citation auditor, every in-text citation in the paper you

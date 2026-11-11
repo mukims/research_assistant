@@ -376,11 +376,15 @@ During the design and migration to Ingestion v2 (`CITATION_INDEX_VERSION=2`), fi
 
 ## 5. Retrieval — two-stage
 
-### 5.1 Summary shortlist → LLM gate → deep search
+### 5.1 Summary shortlist (+ flat papers) → LLM gate → deep search
 
 ```
-query ─▶ rank_documents()   nearest summaries (cheap vector search)
+query ─▶ shortlist_documents()
+           rank_documents()   nearest summaries (cheap vector search), top DOC_SELECT_K
+         + flat_documents()   papers behind the best whole-corpus hybrid chunks,
+                              up to DOC_FLAT_K not already shortlisted
       ─▶ gate_documents()   LLM: "relevant prior work? Y/N" per summary
+      ─▶ cap                at most SYNTHESIS_MAX_PAPERS, summary hits first
       ─▶ deep_search()      hybrid chunk search, restricted to survivors
 ```
 
@@ -397,7 +401,23 @@ because both are "inverse problems in physics". A one-token LLM judgment
 ("could this be relevant prior work, even loosely?") removes those. It falls
 back to the top-1 summary if it rejects everything, so a query never dead-ends.
 
-**Trade-off.** `DOC_SELECT_K` (default 6) summaries are gated in one batched call (`CITATION_GATE_BATCHED=1`); a reply that cannot be aligned to the summaries falls back to one call per summary. `CITATION_DOC_GATE=0` turns the gate off.
+**Stage-1 recall, measured (2026-11-10).** If stage 1 drops the paper that
+matters, nothing downstream gets it back, so stage 1 was measured against
+ground truth: 64 sentences from three seed papers, each with the paper its
+authors cited, that paper in the store and the seed itself excluded. Summary
+search alone put the cited paper in the top 6 for 22% of bare-sentence queries
+and 30% of paragraph queries. The papers behind the best whole-corpus chunks
+caught many that the summaries missed: with 6 of them added (`DOC_FLAT_K`),
+the shortlist held the cited paper 48% / 45% of the time. The gate kept it
+97% of the time it saw it (it had kept 100% from the summary-only shortlist),
+so end-to-end recall went from 22% / 30% to 47% / 44%. The cost: the gate
+keeps about 9 of the 12, not 5 of 6, so synthesis reads more papers; that is
+capped at `SYNTHESIS_MAX_PAPERS` (8, what the reduce context fits). How often
+the cap cuts the cited paper was not measured. About half the cited papers are
+in neither search's top 50, because many cited sentences are generic background
+that many papers fit. The measurement scripts are not in the repo yet.
+
+**Trade-off.** `DOC_SELECT_K` (default 6) summaries plus up to `DOC_FLAT_K` (default 6, `0` = summaries only) flat papers are gated in one batched call (`CITATION_GATE_BATCHED=1`); a reply that cannot be aligned to the summaries falls back to one call per summary. `CITATION_DOC_GATE=0` turns the gate off.
 
 ### 5.2 `hybrid_search` gains a `doc_filter`
 

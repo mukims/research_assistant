@@ -347,6 +347,11 @@ DEFAULT_TOP_K    = 3                # Default number of results to return
 # DOC_SELECT_K, optionally have the LLM drop the off-topic ones (DOC_GATE),
 # then run the detail search only over what survives.
 DOC_SELECT_K     = _env_int("CITATION_DOC_SELECT_K", 6)
+# ...plus up to DOC_FLAT_K more papers: those behind the best whole-corpus
+# hybrid chunks that summary search missed. Summary top-6 alone put an
+# author-cited paper on the shortlist 22-30% of the time; with 6 flat papers
+# added, 45-48% (64 cited sentences, 2026-11-10). 0 = summaries only.
+DOC_FLAT_K       = _env_int("CITATION_DOC_FLAT_K", 6)
 DOC_GATE         = _env_bool("CITATION_DOC_GATE", True)
 # One gate call listing every shortlisted summary instead of one call per
 # summary. Falls back to per-summary calls when the reply cannot be aligned.
@@ -363,6 +368,9 @@ SYNTHESIS_PER_PAPER_CHUNKS    = _env_int("CITATION_SYNTHESIS_PER_PAPER_CHUNKS", 
 SYNTHESIS_PER_PAPER_MAX_CHARS = _env_int("CITATION_SYNTHESIS_PER_PAPER_MAX_CHARS", 5000)
 SYNTHESIS_TEMPERATURE         = float(os.environ.get("CITATION_SYNTHESIS_TEMPERATURE", "0.1"))
 SYNTHESIS_OLLAMA_OPTIONS      = {"num_ctx": _env_int("CITATION_SYNTHESIS_NUM_CTX", 8192)}
+# The gate keeps ~9 of a 12-paper shortlist; synthesis reads at most this many
+# (summary hits first), one notes call each, and 8 is what the reduce context fits.
+SYNTHESIS_MAX_PAPERS          = _env_int("CITATION_SYNTHESIS_MAX_PAPERS", 8)
 
 
 # ─── Technique transfer ───────────────────────────────────────────────────────

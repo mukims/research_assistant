@@ -167,6 +167,7 @@ class ResearchAnswerTestCase(unittest.TestCase):
         self.ranked = _ranked(3)
         p = patch.object(rt, "rank_documents", return_value=[dict(r) for r in self.ranked]); p.start(); self.addCleanup(p.stop)
         p = patch.object(rt, "DOC_GATE", False); p.start(); self.addCleanup(p.stop)
+        p = patch.object(rt, "flat_documents", return_value=[]); p.start(); self.addCleanup(p.stop)
         p = patch.object(rt, "load_search_resources", return_value=(None, None, [], [])); p.start(); self.addCleanup(p.stop)
 
         def fake_search(query, collection, bm25, texts, metadatas, top_k, doc_filter=None, exclude_types=None, **kw):
@@ -274,6 +275,100 @@ class TestSingle(ResearchAnswerTestCase):
         self.assertEqual(hs.call_args.kwargs["doc_filter"], {"d1.pdf"})
 
 
+
+class TestShortlistDocuments(unittest.TestCase):
+    """Stage 1 is summary top-k plus the papers behind the best whole-corpus
+    chunks: summary search alone put an author-cited paper on the shortlist
+    22-30% of the time, the union 45-48% (64 cited sentences, 2026-11-10)."""
+
+    def setUp(self):
+        p = patch.object(rt, "rank_documents", side_effect=lambda q, k=6: _ranked(3)[:k]); p.start(); self.addCleanup(p.stop)
+        p = patch.object(rt, "load_search_resources", return_value=(None, None, [], [])); p.start(); self.addCleanup(p.stop)
+        p = patch.object(rt, "summary_records", side_effect=lambda docs: {
+            d: {"summary": f"about {d}", "citation": f"Title of {d}"} for d in docs if d != "nosum.pdf"})
+        p.start(); self.addCleanup(p.stop)
+        self.search_calls = []
+
+    def _chunks(self, docs):
+        def fake(query, collection, bm25, texts, metadatas, top_k, **kw):
+            self.search_calls.append(kw)
+            excl = kw.get("exclude_docs") or set()
+            return [{"text": "t", "metadata": {"document": d}} for d in docs if d not in excl]
+        return patch.object(rt, "hybrid_search", side_effect=fake)
+
+    def test_summary_hits_first_then_new_flat_papers_up_to_flat_k(self):
+        with self._chunks(["f1.pdf", "f1.pdf", "d1.pdf", "f2.pdf", "f3.pdf"]):
+            out = rt.shortlist_documents("q", k=3, flat_k=2)
+        self.assertEqual([r["document"] for r in out], ["d1.pdf", "d2.pdf", "d3.pdf", "f1.pdf", "f2.pdf"])
+        self.assertEqual([r["source"] for r in out], ["summary"] * 3 + ["flat"] * 2)
+        self.assertEqual(out[3]["summary"], "about f1.pdf")
+        self.assertEqual(out[3]["citation"], "Title of f1.pdf")
+        self.assertIsNone(out[3]["score"])
+
+    def test_flat_search_skips_shortlisted_papers_and_non_evidence(self):
+        with self._chunks(["f1.pdf"]):
+            rt.shortlist_documents("q", k=3, flat_k=2)
+        kw = self.search_calls[0]
+        self.assertEqual(kw["exclude_docs"], {"d1.pdf", "d2.pdf", "d3.pdf"})
+        self.assertEqual(set(kw["exclude_types"]), set(EXCLUDED_FROM_EVIDENCE))
+        self.assertIsNone(kw.get("doc_filter"))
+
+    def test_a_flat_paper_without_a_summary_is_skipped(self):
+        # The gate judges summaries; a paper it cannot read does not take a slot.
+        with self._chunks(["nosum.pdf", "f1.pdf", "f2.pdf"]):
+            out = rt.shortlist_documents("q", k=1, flat_k=2)
+        self.assertEqual([r["document"] for r in out], ["d1.pdf", "f1.pdf", "f2.pdf"])
+
+    def test_flat_k_zero_is_summary_only_and_does_not_search(self):
+        with self._chunks(["f1.pdf"]):
+            out = rt.shortlist_documents("q", k=3, flat_k=0)
+        self.assertEqual([r["document"] for r in out], ["d1.pdf", "d2.pdf", "d3.pdf"])
+        self.assertEqual(self.search_calls, [])
+
+    def test_a_failed_flat_search_keeps_the_summary_shortlist(self):
+        with patch.object(rt, "hybrid_search", side_effect=RuntimeError("index down")):
+            out = rt.shortlist_documents("q", k=3, flat_k=2)
+        self.assertEqual([r["document"] for r in out], ["d1.pdf", "d2.pdf", "d3.pdf"])
+
+    def test_empty_corpus_is_empty_and_does_not_search(self):
+        with patch.object(rt, "rank_documents", return_value=[]), self._chunks(["f1.pdf"]):
+            self.assertEqual(rt.shortlist_documents("q"), [])
+        self.assertEqual(self.search_calls, [])
+
+
+class TestDedupeShortlistWithFlatEntries(unittest.TestCase):
+    def test_unscored_flat_entries_follow_scored_ones_in_their_order(self):
+        rows = _ranked(2) + [
+            {"document": "f2.pdf", "citation": "F two", "summary": "s", "score": None},
+            {"document": "f1.pdf", "citation": "F one", "summary": "s", "score": None},
+        ]
+        out = rt.dedupe_shortlist(rows)
+        self.assertEqual([r["document"] for r in out], ["d1.pdf", "d2.pdf", "f2.pdf", "f1.pdf"])
+
+    def test_the_summary_copy_of_a_paper_beats_its_flat_copy(self):
+        rows = [{"document": "flat-copy.pdf", "citation": "Paper 1", "summary": "s", "score": None}] + _ranked(1)
+        self.assertEqual([r["document"] for r in rt.dedupe_shortlist(rows)], ["d1.pdf"])
+
+
+class TestSynthesisCap(ResearchAnswerTestCase):
+    """The gate keeps ~9 of a 12-paper shortlist; synthesis reads at most
+    SYNTHESIS_MAX_PAPERS of them, summary hits first."""
+
+    def test_gate_sees_the_union_and_synthesis_reads_at_most_the_cap(self):
+        flat = [{"document": f"f{i}.pdf", "citation": f"Flat {i}", "summary": f"flat {i}", "score": None,
+                 "source": "flat"} for i in (1, 2, 3)]
+        seen = []
+
+        def gate(query, ranked, **kw):
+            seen.extend(r["document"] for r in ranked)
+            return ranked
+        with patch.object(rt, "flat_documents", return_value=flat), \
+             patch.object(rt, "DOC_GATE", True), patch.object(rt, "gate_documents", side_effect=gate), \
+             patch.object(rt, "SYNTHESIS_MAX_PAPERS", 4):
+            out = rt.research_answer("idea", mode="single")
+        self.assertEqual(seen, ["d1.pdf", "d2.pdf", "d3.pdf", "f1.pdf", "f2.pdf", "f3.pdf"])
+        self.assertEqual([s["document"] for s in out["selected"]], ["d1.pdf", "d2.pdf", "d3.pdf", "f1.pdf"])
+        self.assertEqual(list(out["keys"]), ["P1", "P2", "P3", "P4"])
 
 
 class TestDocumentSummaries(unittest.TestCase):

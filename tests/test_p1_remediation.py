@@ -255,6 +255,7 @@ class TestArea6BoundedConcurrency(unittest.TestCase):
             {"key": "P2", "document": "doc2.pdf", "summary": "sum2"},
         ]
         with patch.object(retrieve, "rank_documents", return_value=selected), \
+             patch.object(retrieve, "flat_documents", return_value=[]), \
              patch.object(retrieve, "gate_documents", side_effect=lambda q, r, **kw: r), \
              patch.object(retrieve, "passages_per_paper", return_value={"P1": [{"text": "t1"}], "P2": [{"text": "t2"}]}), \
              patch.object(retrieve, "paper_notes", return_value=("Notes text", True)) as mock_notes, \

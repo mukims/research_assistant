@@ -2,14 +2,18 @@
 Two-stage retrieval.
 
 Stage 1 — cheap: rank documents by the similarity of their *summary* to the
-query, keep the top DOC_SELECT_K, and (if DOC_GATE) let the LLM drop the ones
-that aren't plausibly relevant prior work.
+query and keep the top DOC_SELECT_K; add up to DOC_FLAT_K papers behind the
+best whole-corpus hybrid chunks that the summaries missed; then (if DOC_GATE)
+let the LLM drop the ones that aren't plausibly relevant prior work.
+Summaries alone missed most author-cited papers (22-30% on the shortlist);
+the flat papers recover many of them (45-48%), and the gate keeps ~97% of
+the cited papers it sees.
 
 Stage 2 — expensive: hybrid chunk search, but only over the documents that
 survived stage 1.
 
-As the corpus grows this keeps the detailed search bounded to a handful of
-papers instead of the whole store.
+As the corpus grows this keeps the detailed reading bounded to a handful of
+papers (at most SYNTHESIS_MAX_PAPERS) instead of the whole store.
 """
 
 import concurrent.futures
@@ -20,11 +24,13 @@ from research_assistant.config import (
     EXCLUDED_FROM_EVIDENCE,
     SUMMARY_COLLECTION_NAME,
     DOC_SELECT_K,
+    DOC_FLAT_K,
     DOC_GATE,
     GATE_BATCHED,
     DEFAULT_TOP_K,
     CHAT_OLLAMA_OPTIONS,
     SYNTHESIS_MODE,
+    SYNTHESIS_MAX_PAPERS,
     SYNTHESIS_PER_PAPER_CHUNKS,
     SYNTHESIS_PER_PAPER_MAX_CHARS,
     SYNTHESIS_TEMPERATURE,
@@ -89,6 +95,13 @@ def document_summaries(documents) -> dict[str, str]:
     One store read for the lot; a document without a summary is absent
     from the result, and no summary collection at all is an empty dict."""
 
+    return {d: r["summary"] for d, r in summary_records(documents).items()}
+
+
+def summary_records(documents) -> dict[str, dict]:
+    """{document: {summary, citation}} for each named document that has a
+    summary — what the gate and the shortlist need. One store read."""
+
     wanted = sorted({d for d in documents if d})
     if not wanted:
         return {}
@@ -100,12 +113,63 @@ def document_summaries(documents) -> dict[str, str]:
         return {}
     check_embedder(col)
     got = col.get(ids=[f"sum::{d}" for d in wanted], include=["documents", "metadatas"])
-    out: dict[str, str] = {}
+    out: dict[str, dict] = {}
     for text, meta in zip(got.get("documents") or [], got.get("metadatas") or []):
         doc = (meta or {}).get("document")
         if doc and text:
-            out[doc] = text
+            out[doc] = {"summary": text, "citation": (meta or {}).get("citation_source", "")}
     return out
+
+
+# Chunks scanned for the flat papers: enough that six distinct papers turn up
+# even when one paper owns many of the top chunks. ~0.5 s on 157k chunks.
+_FLAT_CHUNKS = 200
+
+
+def flat_documents(query: str, k: int = DOC_FLAT_K, exclude=()) -> list[dict]:
+    """The first k distinct papers behind a whole-corpus hybrid chunk search,
+    `exclude` left out, as shortlist entries (summary and citation from the
+    summary store, score None, source "flat"). A paper with no summary is
+    skipped: the gate judges summaries."""
+
+    collection, bm25, texts, metadatas = load_search_resources()
+    hits = hybrid_search(
+        query, collection, bm25, texts, metadatas,
+        top_k=_FLAT_CHUNKS, exclude_docs=set(exclude),
+        exclude_types=EXCLUDED_FROM_EVIDENCE,
+    )
+    docs = []
+    for h in hits:
+        d = (h.get("metadata") or {}).get("document")
+        if d and d not in docs and d not in exclude:
+            docs.append(d)
+    records = summary_records(docs)
+    out = []
+    for d in docs:
+        if d in records:
+            out.append({"document": d, "citation": records[d]["citation"],
+                        "summary": records[d]["summary"], "score": None, "source": "flat"})
+            if len(out) == k:
+                break
+    return out
+
+
+def shortlist_documents(query: str, k: int = DOC_SELECT_K, flat_k: int = DOC_FLAT_K) -> list[dict]:
+    """Stage 1: summary top-k, then up to flat_k papers from flat search that
+    are not already on it. Empty when the corpus is; a failed flat search
+    leaves the summary shortlist as it is."""
+
+    ranked = rank_documents(query, k)
+    for r in ranked:
+        r["source"] = "summary"
+    if not ranked or flat_k <= 0:
+        return ranked
+    try:
+        extra = flat_documents(query, flat_k, exclude={r["document"] for r in ranked})
+    except Exception as e:                          # noqa: BLE001 — stage 1 still has the summaries
+        logger.warning("Flat search for the shortlist failed (%s) — summaries only.", e)
+        extra = []
+    return ranked + extra
 
 
 _VERDICT_RE = re.compile(r"^\s*(\d+)\s*[:.)\-]\s*(YES|NO)\b", re.I | re.M)
@@ -186,13 +250,20 @@ def _norm_title(title: str) -> str:
 def dedupe_shortlist(ranked: list[dict]) -> list[dict]:
     """The same paper under two document keys (an arXiv copy and a DOI copy)
     must not take two slots. Keyed on the normalised title; the higher
-    stage-1 score wins; order is score-descending."""
+    stage-1 score wins; order is score-descending. Flat-search entries have
+    no score: they lose to a scored copy and follow the scored entries in
+    the order they came."""
+
+    def rank(r):
+        s = r.get("score", 0)
+        return (s is not None, s if s is not None else 0)
+
     best = {}
     for r in ranked:
         k = _norm_title(r.get("citation")) or r["document"]
-        if k not in best or r.get("score", 0) > best[k].get("score", 0):
+        if k not in best or rank(r) > rank(best[k]):
             best[k] = r
-    return sorted(best.values(), key=lambda r: -r.get("score", 0))
+    return sorted(best.values(), key=lambda r: (not rank(r)[0], -rank(r)[1]))
 
 
 def assign_keys(selected: list[dict]) -> dict:
@@ -330,13 +401,16 @@ def research_answer(query: str, top_k: int = DEFAULT_TOP_K, mode: str | None = N
                 logger.debug("on_progress raised: %s", exc)
 
     t_start = time.perf_counter()
-    ranked = rank_documents(query)
+    ranked = shortlist_documents(query)
     if not ranked:
         return None
 
     t0 = time.perf_counter()
     selected = gate_documents(query, ranked, model=model, backend=backend) if DOC_GATE else ranked
     selected = dedupe_shortlist(selected)
+    if len(selected) > SYNTHESIS_MAX_PAPERS:
+        logger.info("Reading %d of the %d papers the gate kept.", SYNTHESIS_MAX_PAPERS, len(selected))
+        selected = selected[:SYNTHESIS_MAX_PAPERS]
     keys = assign_keys(selected)
     t_gate = time.perf_counter() - t0
     emit("shortlist", {"papers": [{"key": r["key"], "citation": keys[r["key"]]} for r in selected]})
