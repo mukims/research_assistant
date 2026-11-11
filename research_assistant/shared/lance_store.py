@@ -198,6 +198,24 @@ class LanceTableAdapter:
         except Exception as e:
             logger.warning("FTS index creation warning for %s: %s", self.name, e)
 
+    def ensure_fts_index(self, column: str = "text") -> bool:
+        """Build the FTS index on any target column that lacks one; leave
+        existing ones alone. Rows added after an index was built are still
+        found (LanceDB searches unindexed rows) and optimize() folds them in,
+        so an ingest batch needs no full rebuild. Returns whether it built."""
+        target = "summary" if self.is_summary else column
+        try:
+            indexed = {c for i in self.table.list_indices() if i.index_type == "FTS" for c in i.columns}
+        except Exception as exc:                    # noqa: BLE001 — cannot tell: build what is asked
+            logger.debug("Could not list indices on %s (%s).", self.name, exc)
+            indexed = set()
+        schema_names = set(getattr(getattr(self.table, "schema", None), "names", []) or [])
+        wanted = [target] + (["citation_source"] if "citation_source" in schema_names else [])
+        missing = [c for c in wanted if c not in indexed]
+        for col in missing:
+            self.create_fts_index(col, replace=True)
+        return bool(missing)
+
     def _build_where_sql(
         self,
         doc_filter: Optional[set] = None,

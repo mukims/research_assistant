@@ -555,8 +555,15 @@ def pdf_key(pdf_path: str) -> str:
 # ─── BM25 rebuild ─────────────────────────────────────────────────────────────
 
 
-def rebuild_bm25():
-    """Refresh the LanceDB full-text search (Tantivy FTS) index."""
+def rebuild_bm25(full: bool = False):
+    """Refresh the LanceDB full-text search (Tantivy FTS) index.
+
+    By default (after an ingest) only make sure the index exists: rows added
+    since it was built are searched unindexed until optimize() folds them in.
+    A full rebuild over every chunk after each batch left an old index copy on
+    disk per batch for the 7-day version window. ``full=True`` rebuilds from
+    scratch — for repairs that rewrite many chunks.
+    """
     if pipeline_status.is_cancel_requested():
         logger.info("rebuild_bm25 skipped because cancellation was requested")
         return
@@ -571,9 +578,12 @@ def rebuild_bm25():
     store_client = open_store()
     collection = store_client.get_collection(name=COLLECTION_NAME)
 
-    if hasattr(collection, "create_fts_index"):
+    if full and hasattr(collection, "create_fts_index"):
         collection.create_fts_index("text", replace=True)
-        pipeline_status.add_event("📚 Refreshed LanceDB Tantivy FTS index")
+        pipeline_status.add_event("📚 Rebuilt LanceDB Tantivy FTS index")
+    elif hasattr(collection, "ensure_fts_index"):
+        if collection.ensure_fts_index("text"):
+            pipeline_status.add_event("📚 Built LanceDB Tantivy FTS index")
 
     from research_assistant.shared.db import clear_search_cache
     clear_search_cache()

@@ -113,7 +113,7 @@ def _apply(args, col, index) -> int:
             res = apply_reference_repair(repairs, fresh, col)
             print(f"Store version before repair: papers={res['versions_before'].get('papers')}")
             if res["repaired"]:
-                ingestion.rebuild_bm25()
+                ingestion.rebuild_bm25(full=True)
             db.clear_search_cache()
         finally:
             now_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")

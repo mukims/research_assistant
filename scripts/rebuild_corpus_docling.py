@@ -521,7 +521,7 @@ def main():
     if not args.dry_run and succeeded_keys:
         logger.info("Refreshing LanceDB Tantivy FTS index...")
         try:
-            rebuild_bm25()
+            rebuild_bm25(full=True)
         except Exception as exc:
             logger.warning("FTS index rebuild notice: %s", exc)
 
