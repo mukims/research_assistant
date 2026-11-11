@@ -501,9 +501,9 @@ def upsert_corpus(corpus: list[dict]):
             "✓ Ingested %d chunks into %s in %.1fs (embed: %.1fs, total: %.1fs)",
             len(documents), db_name, elapsed, embed_elapsed, elapsed,
         )
-        if hasattr(collection, "optimize"):
+        if hasattr(collection, "compact_if_fragmented"):
             try:
-                collection.optimize()
+                collection.compact_if_fragmented()
             except Exception as exc:
                 logger.warning("Post-ingest collection optimization skipped: %s", exc)
     else:
@@ -1169,8 +1169,8 @@ def _ingest_pdfs_locked(
         try:
             store_client = open_store()
             col = store_client.get_collection(COLLECTION_NAME)
-            if hasattr(col, "optimize"):
-                col.optimize()
+            if hasattr(col, "compact_if_fragmented"):
+                col.compact_if_fragmented()
         except Exception as exc:
             logger.debug("Post-batch optimization notice: %s", exc)
 

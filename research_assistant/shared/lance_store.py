@@ -548,6 +548,34 @@ class LanceTableAdapter:
         target_col = "summary" if self.is_summary else column
         self.create_fts_index(target_col)
 
+    def compact_if_fragmented(self, *, min_share: float = 0.10, max_fragments: int = 256) -> bool:
+        """optimize() only when compaction is worth a full rewrite.
+
+        Every add is a new fragment, and compaction merges them into the big
+        one — rewriting the whole table (~600 MB at 157k chunks) and leaving
+        the old copy on disk for the 7-day version window. After every ingest
+        batch that piled up ~36 dead copies (21 GB). So: compact once the rows
+        outside the largest fragment reach `min_share` of the table, or the
+        fragment count reaches `max_fragments` (search slows with many).
+        Returns whether it optimized; unreadable stats fall back to optimizing.
+        """
+        try:
+            stats = self.table.stats()
+            frag = stats["fragment_stats"]
+            n_frag = int(frag["num_fragments"])
+            outside = int(stats["num_rows"]) - int(frag["lengths"]["max"])
+            total = int(stats["num_rows"])
+        except Exception as exc:                    # noqa: BLE001 — old behaviour when we cannot tell
+            logger.debug("No fragment stats for %s (%s) — optimizing.", self.name, exc)
+            self.optimize()
+            return True
+        if n_frag <= 1 or (n_frag < max_fragments and outside < min_share * total):
+            logger.info("Skipping compaction of %s: %d fragments, %d of %d rows outside the largest.",
+                        self.name, n_frag, max(outside, 0), total)
+            return False
+        self.optimize()
+        return True
+
     def optimize(self, cleanup_older_than_days: int = 7):
         """Compact small files and clean up old table versions."""
         from datetime import timedelta

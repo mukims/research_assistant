@@ -117,7 +117,8 @@ class TestFeature15LanceDBRemediation(unittest.TestCase):
             self.assertEqual(add_kwargs["documents"][0], "chunk two brand new unique text")
 
             # Check post-ingest optimization called
-            mock_col.optimize.assert_called_once()
+            mock_col.compact_if_fragmented.assert_called_once()
+            mock_col.optimize.assert_not_called()
 
     def test_lance_table_adapter_optimize(self):
         """Verifies LanceTableAdapter.optimize calls Table.optimize with the cleanup window."""
