@@ -9,7 +9,7 @@ maintainer's machine; see [Where the numbers come from](#where-the-numbers-come-
 
 ## What this repo is
 
-One Python package, [`research_assistant/`](research_assistant/), serving three
+One Python package, [`research_assistant/`](research_assistant/), serving four
 products that share a core.
 
 **The shared core**
@@ -85,9 +85,9 @@ The tool runs on one machine for one user: `deploy/local.sh` binds the app to
 Ingestion runs synchronously under one lock, so the tool is single-user.
 
 **Code health.**
-`shared/seed_audit.py` is ~2,000 lines and `agents/agent0_discoverer.py` ~1,800.
-`app.py` is a ~90-line page layout; the UI is `research_assistant/ui/`, one
-module per tab and per concern, the largest (`ui/audit.py`) ~570 lines.
+`shared/seed_audit.py` is ~1,540 lines (after factoring claim extraction, resolution, and report generation into `research_assistant/audit/`) and `agents/agent0_discoverer.py` is ~1,670.
+`app.py` is a ~150-line page layout; the UI is `research_assistant/ui/`, one
+module per tab and per concern, the largest (`ui/audit.py`) ~590 lines.
 
 ## Directions
 
@@ -166,10 +166,11 @@ or repository.
 ## Where the numbers come from
 
 The evaluation results and corpus counts are from `data/eval/`,
-`data/failed_downloads.json`, `data/downloaded.json` and the ChromaDB files on
+`data/failed_downloads.json`, `data/downloaded.json`, and the LanceDB / legacy ChromaDB stores on
 the maintainer's machine. `data/` is gitignored, so they cannot be checked from
 a clone. The harnesses that produced them are in the repository:
 [`scripts/evaluate_judge.py`](scripts/evaluate_judge.py),
-[`scripts/evaluate_citer.py`](scripts/evaluate_citer.py), and the cases under
+[`scripts/evaluate_citer.py`](scripts/evaluate_citer.py),
+[`scripts/evaluate_transfer.py`](scripts/evaluate_transfer.py), and the cases under
 `research_assistant/judgement/cases/` and `research_assistant/eval/cases/`.
 They need a live model backend, so they are not part of the test suite.

@@ -42,7 +42,7 @@ The left sidebar provides persistent visibility and control over background oper
 - **Live Event Log**: Expandable rolling log showing the last 15 system events (e.g. `✅ Downloaded 14 reference PDFs`, `✓ Ingested 18 papers into index v3`).
 
 ### 2. Cooperative Pipeline Cancellation
-- **"🛑 Stop pipeline" Button**: Appears in the sidebar and at the top of active tabs whenever a background job is running.
+- **"⏹️ Stop Pipeline" Button**: Appears in the sidebar and at the top of active tabs whenever a background job is running.
 - **Persistent Job Cancellation Ledger**: Cancellation requests are atomically synchronized across `data/pipeline_status.json` and `data/jobs/<job_id>/status.json`. Flags persist across progress ticks without being overwritten, cleanly halting worker execution loops.
 - **Safe Item-Boundary Abort**: Cancellation is checked between discrete items (between individual PDF downloads, PDF parsings, summary calls, and graph nodes). It **never** aborts mid-write or inside an in-flight LLM call, ensuring LanceDB, ChromaDB, and BM25 index files are never corrupted.
 
@@ -102,11 +102,13 @@ Once execution finishes, Tab 1 displays the following sections:
 - **Supports 🟢**: The cited text confirms the statement's finding, scope, and strength.
 - **Partially Supports 🟡**: The cited text confirms the core finding, but scope or certainty is overstated.
 - **Need Review 🔴 / 🟠**: The cited text contradicts the assertion (`Contradicts 🔴`) or fails to address it (`Does Not Support 🟠`).
-- **Pending Evidence (Deferred) ⏳**: Statements whose evaluation was deferred because more than 50% of the cited references in that paragraph are paywalled/missing.
+- **Pending Evidence (Deferred) ⏳**: Statements whose evaluation was deferred because more than 90% of the cited references in that paragraph are paywalled/missing (configurable via `CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD`).
 
 ##### B. Filter Tabs & Claim Expanders
 - **Supported Tab**: Every verified claim with its verbatim quote from the cited paper.
 - **Need Review Tab**: Every contradicted or unsupported claim with slot-by-slot breakdown and explanation.
+- **⏸ In Corpus, Not Judged Tab**: Citations whose referenced paper is in the corpus, but which could not be evaluated (for example, due to claim caps or empty retrieval).
+- **🔧 Not a Claim Tab**: Non-assertive or structural citations (such as background mentions or section pointers) that do not require factual verification.
 - **⏳ Pending Evidence (Deferred) Tab**:
   - Missing paper cards with direct DOI links.
   - Inline drag-and-drop PDF uploaders to supply institutional copies.
@@ -190,9 +192,9 @@ Use Tab 3 to explore a new research topic or hypothesis from scratch without upl
 ```
 
 #### Step-by-Step Instructions:
-1. **Enter your topic**: Type your research question or idea into **Research idea**.
-2. *(Optional)* **Anchor with a Seed URL**: Paste a direct arXiv or PDF link if you want the search anchored to a specific landmark paper.
-3. **Configure Toggles**: Turn on **Synthesize answer** to get a structured literature review.
+1. **Enter your topic**: Type your research question or idea into **Research idea** (or pick a starter from **Example Research Topics**).
+2. *(Optional)* **Anchor with a Seed URL or PDF**: Paste a direct arXiv or PDF link into **Seed paper URL**, or upload a **Seed paper PDF** directly.
+3. **Configure Toggles** *(under **⚙️ Synthesis & Pipeline Controls**)*: Choose **Synthesize answer**, **Audit seed citations**, **Synthesis Depth** (`Deep (Map-Reduce notes)` or `Fast (Single-pass)`), **Force re-run**, and **Enable OCR**.
 4. **Click "Explore Research Idea"**:
    - **Agent 0** searches arXiv, OpenAlex, and Semantic Scholar for candidate literature and downloads the seed paper.
    - **Agents 1 & 2** extract the seed's references and fetch open-access connected literature.
@@ -390,19 +392,20 @@ The Technique transfer sub-tab (the second one under **Labs**) discovers and ada
 
 ##### 2. The 4 Transfer Pipeline Stages
 1. **Technique Cards & Bottleneck Abstraction**: Matches your problem against pre-extracted technique cards (`data/transfer/cards/`). Each card encapsulates an invariant method (its general objective, 2–5 operational steps, and verbatim source evidence) stripped of domain-specific nouns.
-2. **Analogical Role-by-Role Mapping**: Formulates the transfer:
+2. **Analogical Role-by-Role Mapping (Parallel Seed Development)**: Develops candidate seeds in parallel (`CITATION_TRANSFER_MAX_WORKERS`, default 3) and formulates each transfer:
    - Maps source variables/entities directly to target domain counterparts.
    - Assesses mathematical identifiability (whether target observations mathematically determine unknown parameters).
    - Formulates concrete implementation steps, baseline benchmarks, specific predictions, and refutation criteria.
-3. **Adversarial Critic Debate**: An adversarial reviewer raises strict domain objections (e.g., breakdown of scale separation, gauge ambiguity, non-convexity). The proposer must refute each objection with mathematical reasoning or concede the limitation.
-4. **Deterministic Scoring & Prior Art Verification**:
+3. **Adversarial Critic Debate & Rebuttal Verification**: An adversarial reviewer raises strict domain objections (e.g., breakdown of scale separation, gauge ambiguity, non-convexity). The proposer must refute each objection with mathematical reasoning or concede the limitation, and the critic verifies whether each rebuttal holds.
+4. **Calibrated Scoring & Prior Art Verification**:
    - Gating criteria: Rejects transfers with contradicted premises, fatal conceded assumptions, or unidentified parameters.
-   - Depth checklist: Evaluates 10 structural transfer dimensions.
+   - Depth & alignment scoring: Evaluates the 10-item structural transfer checklist and calibrates reward by premise support, problem-shape match, mechanism overlap, and contested/tune penalties.
    - Prior-art search: Queries arXiv and OpenAlex to confirm that the suggested transfer is novel and has not already been published.
 
 ##### 3. Deliverables & Inspection Views
-* **📄 Full Transfer Report**: Formatted Markdown document containing complete mapping tables, mathematical formulations, critic objections and rebuttals, refutation tests, and prior art status.
-* **🌳 Methodology Search Tree**: Interactive Mermaid diagram visualizing the lineage from target bottleneck to source cards, transfer proposals, and final verdicts.
+Completed runs are automatically persisted as JSON and Markdown under `data/transfer/runs/`.
+* **📄 Full Transfer Report**: Formatted Markdown document containing complete mapping tables, mathematical formulations, critic objections, rebuttals, critic checks, refutation tests, and prior art status.
+* **🌳 Transfer Tree**: Interactive Mermaid diagram visualizing the lineage from target bottleneck to source cards, transfer proposals, and final verdicts.
 * **💾 Raw JSON**: Machine-readable JSON export of the entire transfer payload (`RunResult`).
 
 ---

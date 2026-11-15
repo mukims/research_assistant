@@ -512,9 +512,11 @@ embeddings.
 
 ### 6.2 Embedding model must stay fixed per corpus
 
-Documented, not enforced: changing `CITATION_EMBED_MODEL` after a corpus exists
-breaks search (dimension mismatch, or silently wrong geometry). The fix is to
-delete `physics_vectordb` and re-ingest.
+Changing `CITATION_EMBED_MODEL` after a corpus exists breaks search (dimension
+mismatch, or silently wrong geometry). As noted in §4.8, v3 collections record
+their `embedder` and `db.check_embedder()` refuses to open an index under a
+different model. Swapping the embedder means bumping `CITATION_INDEX_VERSION` or
+rebuilding the store (`data/lancedb/`).
 
 ### 6.3 `config.py` is the only place constants live
 
@@ -902,7 +904,7 @@ extra one is inert.
 
 ## 12. Streamlit Application UI Architecture
 
-The interactive user interface has seven top-level tabs, in the order `research_assistant/ui/layout.py` gives them (`MAIN_TABS`): the auditor leads because it is the mature product, and the two experimental workspaces sit one level down under **Labs** (`LAB_TABS`). `app.py` only lays out the page (sidebar, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` (and `research_assistant/tasks/ui.py` for the planner), while the pieces they share are the other modules in `research_assistant/ui/`:
+The interactive user interface has seven top-level tabs, in the order `research_assistant/ui/layout.py` gives them (`MAIN_TABS`): the auditor leads because it is the mature product, and the two experimental workspaces sit one level down under **Labs** (`LAB_TABS`). `app.py` lays out the page (sidebar, first-run preflight banner and checks via `ui/preflight.py` / `shared/preflight.py`, tab bar, one call per tab); each tab's code is `research_assistant/ui/<name>_tab.py` (and `research_assistant/tasks/ui.py` for the planner), while the pieces they share are the other modules in `research_assistant/ui/`:
 
 1. **⚖️ Citation auditor (`tab_audit`)**:
    - The primary research verification tool. Accepts an uploaded seed PDF or searches the literature via arXiv.
@@ -1025,19 +1027,21 @@ Breakthroughs in science frequently occur when a mathematical technique or exper
 
 Pipeline 3 (`research_assistant/transfer/`) operationalizes this process through a 4-stage pipeline:
 1. **Invariant Technique Cards (`data/transfer/cards/`)**:
-   - `build_cards.py` scans papers across diverse fields and extracts invariant methodology cards (`Card`).
-   - Each card strips out field-specific nouns (e.g. specific materials, biological organisms, or particle names) and records the abstract problem solved, operational steps (2–5 sequential actions), and verbatim evidence quotes.
+   - `cards.py` and `scripts/build_cards.py` scan papers across diverse fields and extract invariant methodology cards (`Card`), while `CardStore.prune()` (`--prune-stale`) drops cards whose source documents are no longer in the corpus.
+   - Each card strips out field-specific nouns (e.g. specific materials, biological organisms, or particle names) and records the abstract problem solved, operational steps (`mechanism`, 2–5 sequential actions), and verbatim evidence quotes.
+   - `chunk_store.py` (`ChunkStore` protocol with `LanceChunkStore` and `SequenceChunkStore`) decouples card evidence, premise verification, and neighbour-window lookups from full-table offset scans.
 2. **Three-Tier Bottleneck Abstraction**:
-   - When given a target problem, the system extracts its computational bottlenecks and formulates three abstraction tiers: *specific*, *mid-level*, and *broad/domain-agnostic*.
+   - When given a target problem, `stages.ground()` extracts its computational bottlenecks and formulates three abstraction tiers: *specific*, *mid-level*, and *broad/domain-agnostic*.
    - A fourth formulation ("what is inferred from what") is derived for inverse problems.
-3. **Analogical Mapping & Identifiability Analysis**:
-   - Proposes role-by-role mappings between the source technique and the target problem.
-   - Evaluates *identifiability*: rigorously checking whether the observations and measurements available in the target regime mathematically suffice to determine the unknown parameters.
-   - Generates concrete implementation steps, baseline benchmarks, testable predictions, and refutation criteria.
-4. **Adversarial Critique & Deterministic Scoring**:
-   - An adversarial reviewer scrutinizes the proposal for hidden assumptions, scale-separation breakdowns, noise sensitivity, and non-convexities.
-   - The proposer must refute or concede each objection.
-   - The transfer is scored against a 10-point depth checklist and verified against live arXiv and OpenAlex APIs to ensure the idea is truly novel and not already published prior art.
+3. **Analogical Mapping, Parallel Seed Development & Rebuttal Verification**:
+   - `engine.py` develops independent candidate seeds concurrently via `ThreadPoolExecutor` (`TRANSFER_MAX_WORKERS`, default 3) using `develop_isolated()` and merges passages/warnings deterministically with `merge_developed()`.
+   - Each proposal maps source roles to the target problem, argues mathematical *identifiability* (whether target measurements suffice to determine unknown parameters), and states concrete steps, a baseline, a directional prediction, and a refuting result.
+   - Replies across transfer, critique, revision, and rebuttal-check stages are enforced by `replies.py` (`ReplyValidationError` and stage-specific nested schema validators with a targeted nudge retry).
+   - An adversarial critique and revision pass scrutinizes hidden assumptions and scale/gauge/non-convexity failures; when `verify_rebuttals` is enabled, the critic checks whether each rebuttal actually holds (`rebuttal_accepted`) before allowing a broken core row to become `"contested"`.
+4. **Calibrated Deterministic Scoring, Prior Art & Persistence**:
+   - `scoring.py` enforces hard set-aside gates (contradicted evidence, conceded core breaks, underdetermined identifiability, metric mismatch, prior art) and evaluates the 10-item `DEPTH_CHECKS` rubric.
+   - `score_transfer()` calibrates the final reward by prior-art status (verified against live arXiv and OpenAlex APIs via `prior_art.py`), contested core-row penalties, partial shape-match penalties (`TRANSFER_PARTIAL_SHAPE_PENALTY`), tune-only penalties, `premise_quality`, and `mechanism_overlap`.
+   - `store.py` persists every completed run atomically as both JSON and rendered Markdown under `data/transfer/runs/` (from both `scripts/transfer.py` and `ui/transfer_tab.py`).
 
 ---
 
@@ -1107,4 +1111,23 @@ The production corpus satisfies strict 1:1:1 invariant consistency:
 - **Summaries Table (`physics_summaries_v3`)**: exactly 1,719 distinct documents.
 - **Figure Images (`data/images/`)**: 14,668 clean figure crops with 0 small figures ($< 60\text{ px}$).
 - **Quarantine / Aliases**: 0 quarantined documents and 0 unresolved alias keys in the database.
+
+---
+
+## 18. Post-Cutover Hardening: Modular Audit, Two-Layer Deduplication & Reference-Leak Repair
+
+### 18.1 Modular Citation Audit (`research_assistant/audit/`)
+To keep `shared/seed_audit.py` maintainable, TEI extraction, reference resolution/contextualization, and verdict report rendering were factored into `research_assistant/audit/`:
+- `extractor.py`: Extracts in-text citation claims and bibliography references from GROBID TEI XML.
+- `resolver.py`: Matches references against `downloaded.json`, contextualizes search queries from surrounding paragraphs, and attaches cited paper summaries.
+- `report.py`: Formats verdict explanations, badges, unassessed-item buckets, and Markdown scorecards.
+
+### 18.2 Two-Layer Pre-Parse Deduplication (`paper_index.py`, `paper_header.py`, `store_dedupe.py`)
+To stop duplicate PDFs and abstract stubs from entering the index across batches:
+- **Layer 1 (Pre-Download)**: `PaperIndex` (`data/paper_index.json`, backfilled by `scripts/build_paper_index.py`) checks DOIs, arXiv IDs, and normalized title/first-author matches before downloading or fetching.
+- **Layer 2 (Pre-Parse)**: `paper_header.py` extracts title, author surnames, DOI, and arXiv ID from GROBID headers (with a Docling first-pages fallback) before full Docling parsing, dropping duplicate copies (including within the same batch) while keeping seed/uploaded files in `data/raw/` intact.
+- **Store Cleanup & Sweep**: `dedupe_sweep.py` writes `data/dedupe_report.json` at the end of runs, and `store_dedupe.py` / `scripts/dedupe_store.py` detect and safely remove redundant PDF/stub chunks from LanceDB.
+
+### 18.3 Reference-Leak Filtering & Cache-Based Repair (`bibliography.py`, `reference_repair.py`)
+Unlabelled reference lists that appear inside body sections are filtered during chunking by `shared/bibliography.py` (dropping runs of three or more consecutive citation-marked entries in addition to Docling `reference` items and bibliography headings). Existing papers ingested before that rule are audited and repaired via `shared/reference_repair.py` and `scripts/repair_reference_leak.py`, which re-chunk affected papers directly from their Docling caches without re-running PDF conversion.
 

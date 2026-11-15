@@ -194,8 +194,8 @@ runs directly from the **Technique transfer** tab in the UI or from the command 
    - an argument about whether your measurements can determine the unknowns;
    - concrete steps, a baseline, a prediction, and the result that would refute it.
 
-   A critic then tries to reject each proposal, and the writer must answer each
-   objection or concede it.
+   A critic then tries to reject each proposal, the writer answers each objection
+   or concedes it, and the critic checks whether each rebuttal actually holds.
 4. **Scoring.** The reward is checked in code, not by asking the model how it
    feels. First come gates that set a proposal aside:
    - evidence that contradicts it;
@@ -205,20 +205,24 @@ runs directly from the **Technique transfer** tab in the UI or from the command 
    - prior art that already did it.
 
    Then a ten-item depth checklist, and a bonus when OpenAlex and arXiv turn up
-   no prior art. Rebutted objections and mere tuning of the current method cost
-   reward.
+   no prior art. Rebutted objections, partial problem-shape matches, imperfect
+   premise support, weak mechanism overlap, and mere tuning of the current
+   method cost reward.
 
 ```bash
-python scripts/build_cards.py                         # once; resumes where it stopped (uses LanceDB directly)
+python scripts/build_cards.py                         # once; resumes where it stopped (add --prune-stale to drop removed docs)
 python scripts/transfer.py -q "your problem" --show-cards   # bottlenecks and candidate cards only
 python scripts/transfer.py -q "your problem"                # the full run
 ```
 
-- **Where the report goes:** the full run writes a Markdown report and a JSON
-  record to `data/transfer/runs/`.
+- **Where the report goes:** the full run (CLI and UI) writes a Markdown report
+  and a JSON record to `data/transfer/runs/`.
 - **Options:**
   - `--exclude` keeps named documents out of the run.
   - `--before-year` counts only prior art published before that year.
+  - `--bottlenecks` and `--techniques` tune how many bottlenecks and candidate
+    cards are explored; independent seed developments run in parallel
+    (`CITATION_TRANSFER_MAX_WORKERS`, default `3`).
 - **When it won't run:** while the app has a pipeline running, it refuses to start.
 
 **Treat what he proposes as a lead, not a finding.** Each premise is checked
@@ -386,18 +390,18 @@ or the acknowledgement checkbox in the UI.
 | `orchestrate_tasks.py` | command line for the Agent task planner: `plan`, `show`, `run` |
 | `watch.py` | directory watcher: drop a PDF or a draft and the matching stage runs |
 | `research_assistant/agents/` | Agents 0–8, one file each (the pipeline above) |
-| `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, the citation audit |
+| `research_assistant/audit/` | modular citation audit helpers: TEI claim extraction (`extractor.py`), reference resolution (`resolver.py`), and Markdown reports (`report.py`) |
+| `research_assistant/shared/` | what the agents share: model access, ingestion, retrieval, preflight checks, deduplication, reference-leak repair, and the seed citation audit |
 | `research_assistant/shared/lance_store.py` | LanceDB storage adapter: zero-copy vector search, Tantivy FTS, cosine metric, prefiltering, and file compaction |
 | `research_assistant/shared/docling_extract.py` | Docling multi-modal parser: layout detection, vector figure cropping, Markdown tables, and OCR routing |
 | `research_assistant/shared/ocr.py` | Optical Character Recognition layer: EasyOCR (MPS/GPU) and Vision LLM |
 | `research_assistant/shared/batch_uploader.py` | staging, directory scanning, ZIP extraction, and online URL/DOI fetching |
-| `research_assistant/ui/corpus_tab.py` | Corpus library tab: batch file/folder ingestion and corpus inspector |
-| `research_assistant/ui/transfer_tab.py` | Technique transfer tab: cross-disciplinary transfer proposal generation, card browsing, and prior-art critique |
+| `research_assistant/ui/` | Streamlit tab modules (`audit_tab.py`, `draft_tab.py`, `idea_tab.py`, `chat_tab.py`, `corpus_tab.py`, `transfer_tab.py`, `help_tab.py`), sidebar status, and preflight checks |
 | `research_assistant/judgement/` | the claim–evidence judge, source assessor, reliability policy, and the judge's evaluation set |
-| `research_assistant/eval/` | evaluation of the citer, scored against a paper's own citations |
-| `research_assistant/tasks/` | the Agent task planner (Pipeline 2): `models`, `extractor`, `critic`, `iteration`, `retrieval`, `harness`, `roles`, `runner`, `workspace`, `ui` |
-| `research_assistant/transfer/` | borrowing from other fields: technique cards, bottlenecks, transfers, the critic, scoring and reports |
-| `scripts/` | operator tools: Docling rebuild (`rebuild_corpus_docling.py`), evaluation, labelling, and technique-transfer commands |
+| `research_assistant/eval/` | evaluation of the citer and technique transfer, scored against gold sets and retrodiction cases |
+| `research_assistant/tasks/` | the Agent task planner (Pipeline 2): `models`, `extractor`, `critic`, `iteration`, `retrieval`, `harness`, `roles`, `runner`, `sandbox`, `workspace`, `ui` |
+| `research_assistant/transfer/` | borrowing from other fields: technique cards, `ChunkStore` lookup, strict reply validation, bottlenecks, transfers, rebuttal checks, scoring, and run persistence |
+| `scripts/` | operator tools: Docling rebuild (`rebuild_corpus_docling.py`), deduplication (`dedupe_store.py`, `dedupe_corpus_pdfs.py`, `build_paper_index.py`), reference repair (`repair_reference_leak.py`), evaluation, labelling, and technique-transfer commands (`build_cards.py`, `review_cards.py`, `transfer.py`, `evaluate_transfer.py`) |
 | `notebooks/` | `pipeline.ipynb`, a test bench that runs Agents 0–8 on one paper |
 | `deploy/` | `local.sh`, which starts GROBID and the app on this machine only |
 | `tests/` | the test suite |

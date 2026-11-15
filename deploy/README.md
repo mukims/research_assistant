@@ -36,71 +36,9 @@ deploy/local.sh down            # stop the GROBID container
 `tests/test_deploy_scripts.py` runs `local.sh` under bash against stubbed `docker`,
 `curl` and Python; nothing real is started or removed.
 
-## Migrating to index v3 on another machine
+## Rebuilding or Migrating to Index v3 (Docling & LanceDB)
 
-The migration (`scripts/migrate_to_v3.py`) re-ingests every paper the v1 and v2 manifests name. It
-runs anywhere with Python 3.10-3.12, Ollama 0.36+, Docker (for GROBID) and a summary model; it reads
-your old data and writes only the new index. The time is an estimate, not a measurement: about 50 s per paper with a fresh GROBID call in trials, much less where a usable
-GROBID output is reused, so plan on several hours for 874 papers. It resumes where it stopped.
-
-**1. Get the code.** Check out the `feat/v3-gemma-images` branch (or the merged result).
-
-**2. On the old machine, export the labels, then copy the old data, inputs only** (2.46 GB; no Chroma
-store, no `.env`):
-
-```bash
-PYTHONPATH=. python scripts/export_old_labels.py        # writes data/migration_labels.json
-rsync -a --prune-empty-dirs \
-  --include='/ingested.json' --include='/ingested_v2.json' --include='/downloaded.json' \
-  --include='/migration_labels.json' \
-  --include='/pulled_pdfs/***' --include='/raw/***' --include='/raw_pdfs/***' \
-  --exclude='*' data/ USER@HOST:migration-source/
-```
-
-A paper's label is its `\cite{}` key. `export_old_labels.py` reads it from the old Chroma store, read-only
-(plain `sqlite3`, immutable; it refuses a store whose app is still running) and the migration prefers it
-to `downloaded.json`, where a few papers hold a journal abbreviation instead of the title. The export also
-lists papers that are in the old index but in neither manifest (hand-added ones); the migration includes them.
-Without the file, labels fall back to `downloaded.json` and then to file names. `raw/grobid_output/` lets the migration reuse GROBID output that has figure
-boxes and re-read the rest.
-
-**3. Prepare the machine** (installs and starts, never deletes; `--check-only` shows what is missing):
-
-```bash
-deploy/migrate_setup.sh --check-only
-deploy/migrate_setup.sh                       # venv + requirements, Ollama model, GROBID on 127.0.0.1:8070
-source .venv-migrate/bin/activate
-```
-
-It does not choose a summary model for you: put `GEMINI_API_KEY=...` in `.env`, or `ollama pull gemma4:e2b`.
-Do not set `CITATION_EMBED_MODEL` in `.env` or `<data>/.env`; it overrides the `embeddinggemma-2` default
-and the migration refuses to start.
-
-**4. Run it**, with the new index written under `CITATION_DATA_DIR`:
-
-```bash
-export CITATION_DATA_DIR=$HOME/marvin-data PYTHONPATH=.
-python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --dry-run   # counts, labels, GROBID cache
-python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --limit 3   # trial
-python scripts/migrate_to_v3.py --from-data-dir ~/migration-source            # everything
-python scripts/migrate_to_v3.py --from-data-dir ~/migration-source --verify    # complete?
-```
-
-It stops, and says why, if GROBID stops answering or a batch contains a paper GROBID could not read. Such a
-paper is neither stored nor marked (a text-only copy would end up beside the real one on a retry), so after
-`docker start grobid` the same command picks up exactly where it stopped. Then use `CITATION_DATA_DIR` the
-same way for the app.
-
-**Keep the figure crops** (`<data>/images/`): a future embedder re-embeds them from there.
-
-**Same model build everywhere.** `embeddinggemma-2:latest` is a moving name. A new index records the
-build digest of the machine that made it and warns when another machine's build differs, because
-vectors from one build queried with another retrieve slightly worse without any error. The setup script
-prints the digest; pull the same build on any machine that will query this index.
-
-`tests/test_deploy_scripts.py` also runs `migrate_setup.sh` under stubs (a copy in a throwaway project root).
-
-## Rebuilding the Corpus with Docling & LanceDB
+> **Note:** The legacy `scripts/migrate_to_v3.py` and `scripts/export_old_labels.py` helpers from the early Chroma-to-v3 transition have been retired; index v3 now runs on **LanceDB** + **Docling** via `scripts/rebuild_corpus_docling.py`. `deploy/migrate_setup.sh` remains available as a machine pre-flight/setup helper (Python 3.10–3.12 virtualenv, Ollama `embeddinggemma-2` pull, and Docker GROBID startup; pass `--check-only` to inspect without modifying anything).
 
 To rebuild or refresh the corpus into LanceDB with multi-modal Docling extraction, clean figure crops, and zero-day MVCC table compaction:
 
@@ -114,6 +52,7 @@ python scripts/rebuild_corpus_docling.py --batch-size 10 --no-ocr
 
 - **Resumes automatically**: Uses `data/ingested_docling.json` (or `data/ingested_v3.json`) to skip already-ingested papers.
 - **Deduplication**: Reconciles files against `data/corpus_dedupe.json`, ignoring quarantined and alias duplicates.
-- **Compaction**: Automatically executes zero-day table compaction (`cleanup_older_than=timedelta(seconds=0)`) every 10 batches and upon completion, keeping LanceDB disk usage under ~800 MB.
-- **Tantivy FTS**: Refreshes full-text search indexes on `text` and `citation_source` upon completion.
+- **Compaction**: Automatically executes zero-day table compaction (`cleanup_older_than=timedelta(seconds=0)`) every 10 batches and upon completion, keeping LanceDB disk usage compact.
+- **Tantivy FTS**: Keeps full-text search indexes on `text` and `citation_source` intact across ingest batches and refreshes them upon completion.
+- **Same model build everywhere**: `embeddinggemma-2` embeddings are tied to the index version; do not override `CITATION_EMBED_MODEL` in `.env` or `data/.env` when opening an existing v3 store.
 

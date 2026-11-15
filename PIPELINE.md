@@ -130,6 +130,10 @@ research_assistant/                the checkout root
 │   │   ├── agent7_research_chat.py    multi-turn chat over the corpus
 │   │   ├── agent8_verifier.py         cited draft → claim–evidence audit
 │   │   └── grobid_controller.py       agent-level re-export of shared/grobid_manager
+│   ├── audit/                  modular citation audit helpers (used by shared/seed_audit)
+│   │   ├── extractor.py        TEI claim & bibliography extraction
+│   │   ├── resolver.py         reference matching, query contextualization, summary attachment
+│   │   └── report.py           verdict explanations, badges, and Markdown scorecard generation
 │   ├── judgement/
 │   │   ├── judge.py            claim–evidence rubric used by Agent 8 and the seed audit
 │   │   ├── prompt.md           the rubric prompt (frozen; only {{CONTEXT_BLOCK}} is filled)
@@ -140,34 +144,42 @@ research_assistant/                the checkout root
 │   │   └── cases/              labelled examples: cases.jsonl (in-prompt), human.jsonl, transforms.jsonl
 │   ├── eval/
 │   │   ├── citer_gold.py  citer_metrics.py   the citer's evaluation: a paper's own citations as ground truth
-│   │   └── cases/              gold sets, one jsonl per seed paper
+│   │   ├── transfer_cases.py  transfer_metrics.py  retrodiction cases and scoring for technique transfer
+│   │   └── cases/              gold sets, one jsonl per seed paper, plus transfer_retro.jsonl
 │   ├── tasks/                  the Agent task planner (Pipeline 2); its tab is tasks/ui.py
 │   │   ├── extractor.py        paper methods → task graph (GROBID TEI, or PyMuPDF text)
 │   │   ├── retrieval.py        evidence for four facets from the corpus
 │   │   ├── iteration.py  critic.py   proposer–critic loop, at most three turns
 │   │   ├── graph.py            DAG checks, topological waves, Mermaid / Markdown / Antigravity export
 │   │   ├── roles.py  prompts.py  models.py   the six agent roles, their prompts, the data classes
-│   │   └── runner.py  harness.py   dry-run or autonomous execution, acceptance tests, scorecard
+│   │   ├── runner.py  harness.py  sandbox.py  workspace.py  ui.py
+│   │   │                       wave execution, acceptance tests, stripped env, paper workspaces, Labs sub-tab
 │   ├── transfer/               cross-disciplinary technique transfer (Pipeline 3); tab is ui/transfer_tab.py
-│   │   ├── models.py           Card, Bottleneck, Proposal, Objection, Transfer, RunResult schemas
-│   │   ├── stages.py           candidate card selection, problem grounding, bottleneck abstraction
-│   │   ├── engine.py           end-to-end orchestration, proposal generation, and multi-turn critic
-│   │   ├── critic.py           adversarial domain critic, counter-arguments, concession handling
-│   │   ├── scoring.py          deterministic depth rubric, gating criteria, refutation checks
+│   │   ├── models.py  deps.py  Card, Passage, Premise, Bottleneck, MappingRow, Transfer, RunResult, Deps, TransferSettings
+│   │   ├── cards.py            technique card extraction, CardStore/CardIndex search, and stale-card pruning
+│   │   ├── chunk_store.py      ChunkStore protocol (LanceChunkStore / SequenceChunkStore) for fast chunk & neighbour lookup
+│   │   ├── premises.py         premise grounding against ChunkStore and the claim–evidence judge
+│   │   ├── prompts.py  replies.py  transfer/critique/revise/verify_rebuttal prompts and strict nested JSON validators
+│   │   ├── stages.py           grounding, bottleneck abstraction, candidate card search, isolated development, critique & rebuttal check
+│   │   ├── engine.py           parallel seed development (ThreadPoolExecutor), TransferEngine, call accounting
+│   │   ├── scoring.py          gates, 10-item depth checklist, calibrated reward (premise/shape/mechanism/tune penalties)
 │   │   ├── prior_art.py        arXiv and OpenAlex novelty verification and date bounds
-│   │   └── render.py           executive Markdown reports, Mermaid methodology trees, JSON export
+│   │   ├── render.py  store.py  executive Markdown reports, Mermaid trees, and atomic JSON/Markdown persistence
+│   │   └── review.py           card review sheet generation and Gate F1 scoring
 │   ├── ui/                     the Streamlit UI that app.py lays out, one module per concern
-│   │   ├── audit_tab.py  idea_tab.py  transfer_tab.py  draft_tab.py  chat_tab.py  corpus_tab.py  help_tab.py
-│   │   ├── common.py       auth, the cached search index, helpers every tab shares
-│   │   ├── results.py      one finished run: trace, seed, shortlist, notes, synthesis
-│   │   ├── audit.py        the citation-audit report and the job that produces it
-│   │   ├── jobs.py         background runs: start, resolve, adopt, show progress
-│   │   └── status.py  grobid.py   the sidebar widgets (the planner tab is tasks/ui.py)
+│   │   ├── layout.py  common.py  tab order, auth, cached search index, shared helpers
+│   │   ├── audit_tab.py  draft_tab.py  idea_tab.py  chat_tab.py  corpus_tab.py  transfer_tab.py  help_tab.py
+│   │   ├── results.py  audit.py  jobs.py  status.py  grobid.py  preflight.py
+│   │   │                       finished runs, audit report/jobs, sidebar widgets, first-run preflight checks
 │   └── shared/
 │       ├── llm.py              backend-agnostic chat / chat_stream / embeddings (timeouts, JSON schemas, client pool)
 │       ├── lance_store.py      LanceDB adapter: zero-copy cosine search, Tantivy FTS, prefiltering, compaction
 │       ├── docling_extract.py  Docling multi-modal parser: layout detection, vector figure cropping, Markdown tables, OCR routing
-│       ├── ingestion.py        process → upsert → mark → index
+│       ├── ingestion.py        process → upsert → mark → index (with two-layer dedupe & paper_index integration)
+│       ├── paper_index.py  paper_header.py  dedupe_sweep.py  store_dedupe.py
+│       │                       canonical paper index, pre-parse header extraction, sweep & store duplicate cleanup
+│       ├── bibliography.py  reference_repair.py
+│       │                       unlabelled reference-run detection and Docling-cache chunk repair
 │       ├── tokenize.py         NFKC normalisation, English Snowball stemming, stopword removal
 │       ├── extract.py          PDF → Document: Docling/GROBID full-text TEI with PyMuPDF fallback
 │       ├── chunking.py         sentence windows packed within sections (preserves math/quantitative text)
@@ -175,14 +187,18 @@ research_assistant/                the checkout root
 │       ├── ingest_v2.py        PDF → corpus entries: extract, chunk, caption, crop, embed the image
 │       ├── ocr.py              Optical Character Recognition: local EasyOCR (MPS/CUDA) and Vision LLM
 │       ├── batch_uploader.py   multi-PDF / ZIP upload, directory scanning, and online identifier staging
+│       ├── draft_input.py      safe decoding of uploaded .txt / .md / .tex drafts
+│       ├── academic_apis.py    unified rate-limited Crossref / OpenAlex / arXiv / Unpaywall clients
+│       ├── pdf_metadata.py     lightweight PDF header/title/DOI/arXiv metadata extraction
+│       ├── preflight.py        first-run dependency & model checks
 │       ├── seed_audit.py       seed paper's own citations → claims → judged against the corpus (UI tab 1)
 │       ├── claim_text.py       GROBID paragraph → judgeable sentences, citation roles, context
 │       ├── run_jobs.py         pipeline runs as server-side jobs that outlive the browser session
 │       ├── pipeline_status.py  file-based progress, persistent cancellation ledger, and event history
 │       ├── chat_context.py     the mechanics of a research-chat turn (pure)
 │       ├── grobid_manager.py   GROBID lifecycle: start / stop / health (Docker, JAR or remote)
-│       ├── manifest.py         what has been ingested (data/ingested.json, abstract_only tracking)
-│       ├── search.py           hybrid BM25 + dense with Reciprocal Rank Fusion
+│       ├── manifest.py         what has been ingested (data/ingested_v3.json, abstract_only tracking)
+│       ├── search.py           hybrid BM25/Tantivy + dense with Reciprocal Rank Fusion
 │       ├── retrieve.py         two-stage retrieval (summary shortlist → deep chunk search)
 │       ├── fetch.py            stream-a-PDF-to-disk-with-validation
 │       ├── source_key.py       deterministic identity for a reference / document
@@ -192,14 +208,17 @@ research_assistant/                the checkout root
 ├── scripts/                        operator CLIs (run as PYTHONPATH=. python scripts/<name>.py)
 │   ├── rebuild_corpus_docling.py   rebuild corpus into LanceDB with Docling extraction, figure crops, and zero-day compaction
 │   ├── dedupe_corpus_pdfs.py       content-hash deduplication, alias mapping, and quarantine manifest generation
+│   ├── dedupe_store.py             detect and clean up duplicate PDFs/stubs in the LanceDB store
+│   ├── build_paper_index.py        backfill/build data/paper_index.json from PDFs on disk and manifests
+│   ├── repair_reference_leak.py    dry-run and repair stored papers whose text chunks contain reference lists
 │   ├── evaluate_judge.py           judge / verifier evaluation on the held-out set; --compare two runs
 │   ├── evaluate_citer.py           citer evaluation against the seed papers' own citations
 │   ├── evaluate_transfer.py        transfer evaluation and retrodiction benchmark runner
-│   ├── build_cards.py              extract invariant technique cards from ingested corpus
+│   ├── build_cards.py              extract invariant technique cards from ingested corpus (--prune-stale drops removed docs)
+│   ├── review_cards.py             generate Gate F1 card review sheets (--sheet) and score ratings (--score)
+│   ├── build_case_corpus.py        populate isolated case corpora for technique-transfer retrodiction benchmarks
 │   ├── transfer.py                 CLI for technique transfer pipeline (proposals, critic, reports)
 │   ├── judge_harvest.py  judge_label.py  judge_bench.py
-│   ├── export_old_labels.py        the \cite label each paper has in the old Chroma store, read-only (for the migration)
-│   ├── migrate_to_v3.py            re-ingest every paper the old indexes hold into index v3 (runbook in its docstring)
 │   ├── index_stats.py              chunk-length distribution of the active index
 │   └── synth_compare.py            research_answer in both synthesis modes, side by side
 ├── notebooks/                      pipeline.ipynb: Agents 0-8 on one paper, swapping embedding and inference models
@@ -319,7 +338,7 @@ export UNPAYWALL_EMAIL="you@example.com"   # Unpaywall requires a contact addres
 python -m research_assistant.agents.agent2_fetcher          # -> pulled_pdfs/, downloaded.json, failed_downloads.json
 
 # 3. Ingest the downloaded PDFs into the search index
-python -m research_assistant.agents.agent3_ingestor         # -> physics_vectordb/, bm25_index.pkl
+python -m research_assistant.agents.agent3_ingestor         # -> data/lancedb/ (or legacy physics_vectordb/)
 python -m research_assistant.agents.agent3_ingestor --workers 4 --force   # parallel parse, re-ingest everything
 
 # 4. Ask for a citation for one sentence of draft text
@@ -338,8 +357,9 @@ python -m research_assistant.agents.agent7_research_chat
 python watch.py
 ```
 
-Or the Streamlit UI (four interactive agents across five tabs — the fifth
-tab is documentation, not an agent — with a browser front-end):
+Or the Streamlit UI (seven top-level tabs, with Labs housing the experimental
+Agent task planner and Technique transfer workspaces, and the seventh tab
+rendering `HOW_TO_USE.md`):
 
 ```bash
 streamlit run app.py
@@ -350,7 +370,8 @@ streamlit run app.py
 - `config.py` is the single place for model names, directory paths, and every
   tunable (chunking thresholds, rate limits, RRF constant, batch sizes).
 - Writes are anchored to `CITATION_DATA_DIR` (default: `<project>/data`);
-  code is anchored to the installed package, so scripts can be run from
+  task-planner workspaces default to `CITATION_WORKSPACE_DIR` (`<project>/workspace_runs`).
+  Code is anchored to the installed package, so scripts can be run from
   anywhere.
 - Storage: `CITATION_USE_LANCEDB` (`true` default: LanceDB disk-backed zero-copy vector store with cosine metric and Tantivy full-text search), `CITATION_LANCEDB_PATH` (default `<data>/lancedb`).
 - Backend: `LLM_BACKEND`, `EMBED_BACKEND`, `OPENAI_BASE_URL`, `OPENAI_API_KEY` /
@@ -360,7 +381,8 @@ streamlit run app.py
   `CITATION_CHUNK_MAX_CHARS`, `GROBID_FULLTEXT_TIMEOUT`, `CITATION_OCR_MODEL_DIR`.
 - Index: `CITATION_INDEX_VERSION` (3 default; 1 and 2 open the older read-only indexes and
   need their own `CITATION_EMBED_MODEL`). A collection records its embedder and refuses a different one.
-- Retrieval: `CITATION_DOC_SELECT_K` (stage-1 shortlist size),
+- Retrieval: `CITATION_DOC_SELECT_K` (stage-1 summary shortlist size, default `6`),
+  `CITATION_DOC_FLAT_K` (extra papers from whole-corpus hybrid hits, default `6`),
   `CITATION_DOC_GATE` (LLM relevance gate, default on),
   `CITATION_GATE_BATCHED` (batched relevance gate, default on),
   `CITATION_SYNTHESIS_MODE` (`map_reduce` default, or `single`),
@@ -370,8 +392,8 @@ streamlit run app.py
 - Agent 0: `CITATION_SEARCH_PROVIDERS` (default `arxiv,openalex,semanticscholar`,
   tried in order), `OPENALEX_MAILTO`, `S2_API_KEY` (optional Semantic Scholar
   key — the keyless pool is heavily rate-limited).
-- Verifier: `CITATION_JUDGEMENT_MODEL`, `CITATION_JUDGEMENT_TOP_K` (default 3, expands to 6), `CITATION_JUDGEMENT_ESCALATE_TOP_K`, `CITATION_JUDGEMENT_NEIGHBOUR_WINDOW`, `CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS`.
-- Technique Transfer: `CITATION_TRANSFER_CRITIC_MODEL`, `CITATION_TRANSFER_TEMPERATURE`.
+- Verifier: `CITATION_JUDGEMENT_MODEL`, `CITATION_JUDGEMENT_TOP_K` (default 3, expands to 6), `CITATION_JUDGEMENT_ESCALATE_TOP_K`, `CITATION_JUDGEMENT_NEIGHBOUR_WINDOW`, `CITATION_JUDGEMENT_EVIDENCE_MAX_CHARS`, `CITATION_AUDIT_MAX_CLAIMS` (default `100`), `CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD` (default `0.90`).
+- Technique Transfer: `CITATION_TRANSFER_CRITIC_MODEL`, `CITATION_TRANSFER_TEMPERATURE`, `CITATION_TRANSFER_BOTTLENECK_TEMPERATURE`, `CITATION_TRANSFER_MAX_WORKERS` (default `3`), `CITATION_TRANSFER_CONTESTED_PENALTY`, `CITATION_TRANSFER_PARTIAL_SHAPE_PENALTY`, `CITATION_TRANSFER_TUNE_PENALTY`.
 - Misc: `UNPAYWALL_EMAIL`, `CITATION_LOG_DIR`, `CITATION_LOG_FILE=0`.
 
 ## Pipeline 2: Scientific Paper-to-Agent Task Decomposition & Replication
@@ -533,17 +555,17 @@ python orchestrate_tasks.py run plan.json --mode simulation --report-out report.
 
 | Module | Location | Responsibilities |
 |---|---|---|
-| **Transfer Engine** | `research_assistant.transfer.engine` | Orchestrates end-to-end card matching, proposal drafting, multi-turn critic debates, and report compilation. |
-| **Card Indexing & Mining** | `research_assistant.transfer.stages` | Extracts invariant `Card` structures from corpus papers; abstracts target bottlenecks across 3 tiers (specific, mid, broad) with domain-specific nouns removed. |
-| **Data Models** | `research_assistant.transfer.models` | Dataclasses for `Card`, `Bottleneck`, `Proposal`, `Objection`, `Transfer`, and `RunResult`. |
-| **Adversarial Critic** | `research_assistant.transfer.critic` | Generates rigorous domain-specific objections (scale breakdown, gauge freedom, noise sensitivity); enforces concession of fatal flaws. |
-| **Scoring & Prior Art** | `research_assistant.transfer.scoring`, `prior_art.py` | Applies a 10-point structural depth rubric; queries arXiv and OpenAlex APIs to verify novelty; penalizes trivial parameter tuning. |
-| **Renderer & Reports** | `research_assistant.transfer.render` | Generates formatted Markdown dossiers, Mermaid derivation trees, and structured JSON results saved to `data/transfer/runs/`. |
+| **Transfer Engine & Deps** | `research_assistant.transfer.engine`, `deps.py` | Orchestrates grounding, candidate card search, parallel seed development (`ThreadPoolExecutor`, `TRANSFER_MAX_WORKERS`), `TransferEngine`, and call accounting. |
+| **Card Indexing & ChunkStore** | `research_assistant.transfer.cards`, `chunk_store.py` | Builds, stores, prunes, and searches invariant `Card` structures (`CardStore`, `CardIndex`); `ChunkStore` (`LanceChunkStore` / `SequenceChunkStore`) decouples chunk and neighbour lookups from offset scans. |
+| **Stages, Premises & Replies** | `research_assistant.transfer.stages`, `premises.py`, `prompts.py`, `replies.py` | Problem grounding, 3-tier bottleneck abstraction, isolated transfer development, adversarial critique, revision, critic rebuttal verification (`verify_rebuttals`), premise checking, and strict nested JSON reply validation (`ReplyValidationError`). |
+| **Data Models** | `research_assistant.transfer.models` | Dataclasses for `Passage`, `Premise`, `Bottleneck`, `Card`, `MappingRow`, `Identifiability`, `Step`, `Critique`, `PriorArt`, `Scores`, `Transfer`, and `RunResult`. |
+| **Scoring & Prior Art** | `research_assistant.transfer.scoring`, `prior_art.py` | Enforces set-aside gates, evaluates the 10-item `DEPTH_CHECKS` rubric, calibrates reward by `premise_quality`, `shape_factor`, `mechanism_overlap`, contested/tune penalties, and queries arXiv/OpenAlex prior art. |
+| **Renderer, Store & Review** | `research_assistant.transfer.render`, `store.py`, `review.py` | Generates Markdown dossiers and Mermaid trees, atomically saves JSON + Markdown runs to `data/transfer/runs/`, and generates/scores Gate F1 card review sheets. |
 
 ### CLI Usage
 
 ```bash
-# 1. Extract technique cards across the corpus (once; resumes incrementally)
+# 1. Extract technique cards across the corpus (once; resumes incrementally; --prune-stale drops removed docs)
 python scripts/build_cards.py
 
 # 2. Search candidate cards and bottlenecks for a query
@@ -552,7 +574,10 @@ python scripts/transfer.py -q "inverse problem parameter recovery under correlat
 # 3. Execute full transfer run with adversarial critique and prior art verification
 python scripts/transfer.py -q "inverse problem parameter recovery under correlated noise"
 
-# 4. Evaluate transfer accuracy against retrodiction benchmarks
+# 4. Generate or score Gate F1 card review sheets
+python scripts/review_cards.py --sheet
+
+# 5. Evaluate transfer accuracy against retrodiction benchmarks
 python scripts/evaluate_transfer.py --retrieval-only
 ```
 
