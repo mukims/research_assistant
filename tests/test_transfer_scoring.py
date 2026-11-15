@@ -1,7 +1,7 @@
 import unittest
 
 from research_assistant import config
-from research_assistant.transfer import scoring
+from research_assistant.transfer import models, scoring
 from tests.transfer_fixtures import good_transfer, premise
 
 
@@ -123,3 +123,61 @@ class TestScoring(unittest.TestCase):
         scoring.score_transfer(t3, b, c)  # set_aside = "shape_mismatch", reward 0.0
         ranked = scoring.rank([t2, t3, t1])
         self.assertEqual([t.id for t in ranked], ["T1", "T2", "T3"])
+
+    def test_normalise_verdict_strips_boolean_suffixes(self):
+        self.assertEqual(scoring.normalise_verdict("overdetermined_false"), "overdetermined")
+        self.assertEqual(scoring.normalise_verdict("under-determined_true"), "underdetermined")
+        self.assertEqual(scoring.normalise_verdict("determined"), "determined")
+
+    def test_rejected_rebuttal_marks_core_assumption_breaks(self):
+        t, b, c = good_transfer()
+        t.mapping = [
+            models.MappingRow("a", "b", "c", "holds", True),
+            models.MappingRow("d", "e", "f", "holds", True),
+        ]
+        t.critique.rows = [{"row": 0, "status": "breaks", "reason": "violates bound"}]
+        t.critique.objections = [
+            {
+                "text": "row 0 breaks: violates bound",
+                "row": 0,
+                "answered": True,
+                "response": "Hand-wavy claim.",
+                "conceded": False,
+                "rebuttal_accepted": False,
+                "rebuttal_reason": "Does not refute violation.",
+            }
+        ]
+        s = scoring.score_transfer(t, b, c)
+        self.assertEqual(s.set_aside, "core_assumption_breaks")
+        self.assertEqual(s.reward, 0.0)
+
+    def test_premise_quality_shape_factor_and_mechanism_overlap_spread_scores(self):
+        t_full, b, c = good_transfer()
+        t_partial, _, _ = good_transfer()
+        t_partial.premises = [
+            premise("Partially supports", "C1", "doc", 0),
+        ]
+        t_partial.critique.shape_match = "partial"
+        c_overlap = models.Card(
+            card_id=c.card_id,
+            document=c.document,
+            citation=c.citation,
+            name=c.name,
+            problem_solved=c.problem_solved,
+            context=c.context,
+            inputs=c.inputs,
+            outputs=c.outputs,
+            assumptions=c.assumptions,
+            evidence=c.evidence,
+            mechanism=["kronecker factored eigenbasis preconditioner"],
+        )
+        t_partial.summary = "Unrelated summary phrasing."
+        t_partial.steps = [models.Step("Compute", "arbitrary input", "arbitrary output", "unrelated_op")]
+
+        s_full = scoring.score_transfer(t_full, b, c)
+        s_partial = scoring.score_transfer(t_partial, b, c_overlap)
+        self.assertEqual(s_full.premise_quality, 1.0)
+        self.assertLess(s_partial.premise_quality, s_full.premise_quality)
+        self.assertAlmostEqual(s_partial.shape_factor, 1.0 - config.TRANSFER_PARTIAL_SHAPE_PENALTY)
+        self.assertLess(s_partial.mechanism_overlap, 1.0)
+        self.assertLess(s_partial.reward, s_full.reward)

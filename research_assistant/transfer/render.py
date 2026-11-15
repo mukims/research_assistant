@@ -152,8 +152,15 @@ def render_markdown(result: RunResult) -> str:
         for o in t.critique.objections:
             ans_str = "answered" if o.get("answered") else "unanswered"
             conc_str = ", conceded" if o.get("conceded") else ""
+            ver_str = ""
+            if o.get("rebuttal_accepted") is True:
+                ver_str = ", rebuttal verified"
+            elif o.get("rebuttal_accepted") is False:
+                ver_str = ", rebuttal rejected"
             lines.append(f"- **Objection:** {o['text']}")
-            lines.append(f"  - **Response ({ans_str}{conc_str}):** {o.get('response', '')}")
+            lines.append(f"  - **Response ({ans_str}{conc_str}{ver_str}):** {o.get('response', '')}")
+            if o.get("rebuttal_reason"):
+                lines.append(f"  - **Critic check:** {o['rebuttal_reason']}")
         lines.append("")
 
         # Prior art

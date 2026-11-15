@@ -7,6 +7,7 @@ from typing import Callable
 
 from research_assistant import config
 from research_assistant.transfer.cards import CardIndex
+from research_assistant.transfer.chunk_store import ChunkStore
 from research_assistant.transfer.models import PriorArt
 
 
@@ -26,6 +27,7 @@ class Deps:
     cards: CardIndex
     cancelled: Callable[[], bool] = lambda: False
     progress: Callable[[int, int, str], None] = lambda d, t, label: None
+    chunk_store: ChunkStore | None = None
 
 
 @dataclass
@@ -41,3 +43,5 @@ class TransferSettings:
     bottleneck_temperature: float = config.TRANSFER_BOTTLENECK_TEMPERATURE
     exclude_documents: frozenset = frozenset()
     prior_art_before_year: int | None = None
+    verify_rebuttals: bool = True
+    max_workers: int = config.TRANSFER_MAX_WORKERS

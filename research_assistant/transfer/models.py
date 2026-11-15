@@ -141,6 +141,9 @@ class Scores:
     reward: float
     set_aside: str | None = None
     contested: int = 0  # core rows whose break the reviser rebutted
+    premise_quality: float = 1.0
+    shape_factor: float = 1.0
+    mechanism_overlap: float = 1.0
 
 
 @dataclass

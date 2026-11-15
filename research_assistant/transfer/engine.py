@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -11,15 +13,26 @@ from research_assistant import config
 from research_assistant.judgement.judge import judge
 from research_assistant.shared import llm, pipeline_status, retrieve
 from research_assistant.shared.db import load_search_resources
+from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
 from research_assistant.shared.search import hybrid_search
 from research_assistant.transfer.cards import CardStore
+from research_assistant.transfer.chunk_store import chunk_store_for
 from research_assistant.transfer.deps import Deps, TransferSettings
 from research_assistant.transfer.models import Card, RunResult, Transfer, new_run_id
 from research_assistant.transfer.premises import PremiseChecker
 from research_assistant.transfer.prior_art import PriorArtClient
 from research_assistant.transfer.scoring import rank, score_transfer
-from research_assistant.transfer.stages import candidate_cards, develop, ground
+from research_assistant.transfer.stages import (
+    Seed,
+    candidate_cards,
+    develop,
+    develop_isolated,
+    ground,
+    merge_developed,
+)
+
+logger = get_logger("transfer")
 
 
 class BusyError(RuntimeError):
@@ -90,6 +103,7 @@ def live_deps(search_resources=None, card_dir=None) -> Deps:
         prior_art=prior_art_client.check,
         texts=texts,
         metadatas=metadatas,
+        chunk_store=chunk_store_for(texts, metadatas),
         cards=cards_index,
         cancelled=pipeline_status.is_cancel_requested,
     )
@@ -117,34 +131,46 @@ def run_best_of_n(
         settings = TransferSettings()
 
     start_time = time.time()
+    calls_lock = threading.Lock()
     calls = {"llm": 0, "critic": 0, "judge": 0, "embed": 0, "prior_art": 0}
+    logger.info(
+        "Starting technique transfer run for query=%r (bottlenecks=%d, techniques=%d, cards_per_query=%d)",
+        query,
+        settings.bottlenecks,
+        settings.techniques_per_bottleneck,
+        settings.cards_per_query,
+    )
+
+    def _inc(key: str) -> None:
+        with calls_lock:
+            calls[key] += 1
 
     def counting_chat(msgs: list[dict], temperature: float = 0.7) -> str:
-        calls["llm"] += 1
+        _inc("llm")
         return deps.chat(msgs, temperature)
 
     def counting_gate(q: str, shortlist: list[dict]) -> list[dict]:
-        calls["llm"] += 1
+        _inc("llm")
         return deps.gate(q, shortlist)
 
     def counting_critic(msgs: list[dict]) -> str:
-        calls["critic"] += 1
+        _inc("critic")
         return deps.critic(msgs)
 
     def counting_judge(claim: str, evidence: str) -> dict:
-        calls["judge"] += 1
+        _inc("judge")
         return deps.judge(claim, evidence)
 
     def counting_embed_query(text: str) -> list[float]:
-        calls["embed"] += 1
+        _inc("embed")
         return deps.embed_query(text)
 
     def counting_embed_docs(texts: list[str]) -> list[list[float]]:
-        calls["embed"] += 1
+        _inc("embed")
         return deps.embed_documents(texts)
 
     def counting_prior_art(tech: str, quant: list[str], summary: str, before_year: int | None = None):
-        calls["prior_art"] += 1
+        _inc("prior_art")
         return deps.prior_art(tech, quant, summary, before_year)
 
     wrapped_deps = dataclasses.replace(
@@ -158,7 +184,12 @@ def run_best_of_n(
         prior_art=counting_prior_art,
     )
 
-    checker = PremiseChecker(wrapped_deps.judge, wrapped_deps.texts, wrapped_deps.metadatas)
+    checker = PremiseChecker(
+        wrapped_deps.judge,
+        wrapped_deps.texts,
+        wrapped_deps.metadatas,
+        chunk_store=wrapped_deps.chunk_store,
+    )
 
     # 1. Grounding
     grounding = ground(query, wrapped_deps, settings, checker)
@@ -170,24 +201,50 @@ def run_best_of_n(
     deps.progress(1, total_progress, "Grounding bottlenecks")
     deps.progress(2, total_progress, "Retrieving candidate technique cards")
 
-    # 3. Develop each seed
+    # 3. Develop each seed (in parallel across independent seeds when max_workers > 1)
     transfers: list[Transfer] = []
     card_map: dict[str, Card] = {}
     bottleneck_map = {b.id: b for b in grounding.bottlenecks}
     bottleneck_counts: dict[str, int] = {}
-
+    work: list[tuple[int, Seed, int]] = []
     for idx, seed in enumerate(seeds, start=1):
         b_id = seed.bottleneck_id
         bottleneck_counts[b_id] = bottleneck_counts.get(b_id, 0) + 1
-        n = bottleneck_counts[b_id]
-        t = develop(seed, n, grounding, wrapped_deps, settings, checker)
-        if t is not None:
+        work.append((idx, seed, bottleneck_counts[b_id]))
+
+    completed: dict[int, tuple] = {}
+    if settings.max_workers <= 1 or len(work) <= 1:
+        for idx, seed, n in work:
+            completed[idx] = develop_isolated(seed, n, grounding, wrapped_deps, settings, checker)
+            deps.progress(2 + idx, total_progress, f"Developing transfer {seed.bottleneck_id}.T{n}")
+    else:
+        workers = min(settings.max_workers, len(work))
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_map = {
+                pool.submit(develop_isolated, seed, n, grounding, wrapped_deps, settings, checker): (idx, seed, n)
+                for idx, seed, n in work
+            }
+            try:
+                for future in as_completed(future_map):
+                    idx, seed, n = future_map[future]
+                    completed[idx] = future.result()
+                    done_count += 1
+                    deps.progress(2 + done_count, total_progress, f"Developing transfer {seed.bottleneck_id}.T{n}")
+            except Exception:
+                for pending in future_map:
+                    pending.cancel()
+                raise
+
+    for idx, seed, n in work:
+        t, new_passages, new_warnings = completed[idx]
+        merged = merge_developed(grounding, t, new_passages, new_warnings)
+        if merged is not None:
             card_map[seed.card.card_id] = seed.card
-            b_obj = bottleneck_map.get(b_id)
+            b_obj = bottleneck_map.get(seed.bottleneck_id)
             if b_obj is not None:
-                score_transfer(t, b_obj, seed.card)
-            transfers.append(t)
-        deps.progress(2 + idx, total_progress, f"Developing transfer {b_id}.T{n}")
+                score_transfer(merged, b_obj, seed.card)
+            transfers.append(merged)
 
     ranked_transfers = rank(transfers)
 
@@ -206,7 +263,7 @@ def run_best_of_n(
 
     cards_used = {t.card_id: card_map[t.card_id] for t in ranked_transfers if t.card_id in card_map}
 
-    return RunResult(
+    result = RunResult(
         run_id=new_run_id(query),
         query=query,
         search="best_of_n",
@@ -226,6 +283,14 @@ def run_best_of_n(
         seconds=round(time.time() - start_time, 2),
         warnings=run_warnings,
     )
+    logger.info(
+        "Completed technique transfer run %s in %.2fs (%d transfers, %d warnings)",
+        result.run_id,
+        result.seconds,
+        len(result.transfers),
+        len(result.warnings),
+    )
+    return result
 
 
 class TransferEngine:
@@ -251,6 +316,9 @@ class TransferEngine:
         progress_cb: Callable[[int, int, str], None] | None = None,
     ) -> RunResult:
         ensure_idle()
+        # Only past the busy guard: a cancel pending against another live run is not stale,
+        # and clearing it here would un-stop that run. With no run active, it is.
+        pipeline_status.clear_cancel_request()
         deps = self.get_deps()
         if progress_cb is not None:
             deps = dataclasses.replace(deps, progress=progress_cb)
@@ -266,7 +334,13 @@ class TransferEngine:
             kw["techniques_per_bottleneck"] = techniques_per_bottleneck
 
         settings = TransferSettings(**kw)
-        return run_best_of_n(query, deps, settings)
+        with pipeline_status.track_stage(
+            "transfer",
+            f"Technique transfer: {query[:60]}",
+            total_steps=1,
+            mark_idle_on_exit=True,
+        ):
+            return run_best_of_n(query, deps, settings)
 
 
 def default_engine() -> TransferEngine:

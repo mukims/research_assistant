@@ -96,23 +96,8 @@ class LanceSequenceProxy:
             raise IndexError(f"Index {idx} out of range")
         r = self._cache_data[offset]
         if self.field_name == "metadata":
-            m = {
-                "document": r.get("document", ""),
-                "citation_source": r.get("citation_source", ""),
-                "stored_form": r.get("stored_form", ""),
-                "section": r.get("section", ""),
-                "seq": r.get("seq", 0),
-                "page": r.get("page", 1),
-                "type": r.get("stored_form", ""),
-                "tier": r.get("tier", "full_text"),
-            }
-            if r.get("metadata_json"):
-                try:
-                    import json
-                    m.update(json.loads(r["metadata_json"]))
-                except Exception:
-                    pass
-            return m
+            from research_assistant.shared.lance_store import row_to_metadata
+            return row_to_metadata(r)
         return r.get("text", "")
 
 

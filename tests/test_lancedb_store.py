@@ -291,6 +291,48 @@ class TestLanceDBStore(unittest.TestCase):
         res = q_table.get(ids=["chk_bad_1"])
         self.assertEqual(res["ids"], ["chk_bad_1"])
 
+    def test_resolve_chunk_and_card_passages_use_direct_lance_lookup(self):
+        from research_assistant.shared.db import LanceSequenceProxy
+        from research_assistant.transfer.cards import select_card_passages
+        from research_assistant.transfer.premises import resolve_chunk
+
+        # Add a caption and figure_image sharing seq=99 on paper_a.pdf
+        self.table_adapter.add(
+            ids=["chk_fig_99", "chk_cap_99"],
+            documents=["[Figure image]", "Figure 1: Dispersion curve."],
+            metadatas=[
+                {"document": "paper_a.pdf", "stored_form": "figure_image", "section": "caption", "seq": 99},
+                {"document": "paper_a.pdf", "stored_form": "caption", "section": "caption", "seq": 99},
+            ],
+            embeddings=[[0.1] * 768, [0.1] * 768],
+        )
+
+        proxy_text = LanceSequenceProxy(self.table_adapter, "text", cache_size=2)
+        proxy_meta = LanceSequenceProxy(self.table_adapter, "metadata", cache_size=2)
+
+        with patch.object(proxy_meta, "_fetch_chunk", side_effect=AssertionError("should not scan table")):
+            resolved = resolve_chunk(proxy_text, proxy_meta, "paper_b.pdf", 2, position=2)
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved[0], 2)
+            self.assertIn("Cooper pairs", resolved[1])
+            self.assertEqual(resolved[2]["document"], "paper_b.pdf")
+
+            # figure_image alone at seq=1 is excluded from evidence
+            self.assertIsNone(resolve_chunk(proxy_text, proxy_meta, "paper_b.pdf", 1, position=1))
+
+            # Must skip figure_image and return the caption sharing seq=99
+            cap = resolve_chunk(proxy_text, proxy_meta, "paper_a.pdf", 99, position=99)
+            self.assertIsNotNone(cap)
+            self.assertEqual(cap[1], "Figure 1: Dispersion curve.")
+            self.assertEqual(cap[2]["stored_form"], "caption")
+
+            # Missing seq returns None without scanning
+            self.assertIsNone(resolve_chunk(proxy_text, proxy_meta, "paper_b.pdf", 999))
+
+            passages = select_card_passages("paper_a.pdf", "Paper A", proxy_text, proxy_meta)
+            self.assertEqual(len(passages), 3)
+            self.assertTrue(all(p.document == "paper_a.pdf" for p in passages))
+
 
 if __name__ == "__main__":
     unittest.main()

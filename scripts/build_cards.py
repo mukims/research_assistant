@@ -27,12 +27,53 @@ from research_assistant.transfer.cards import CardStore, build_all
 from research_assistant.transfer.premises import PremiseChecker
 
 
+def _load_doc_map(metadatas) -> dict[str, str]:
+    """Collect unique {document: citation} without triggering a full LanceDB offset scan."""
+    doc_map: dict[str, str] = {}
+    table_adapter = getattr(metadatas, "table_adapter", None)
+    if table_adapter is not None and hasattr(table_adapter, "table"):
+        try:
+            arrow_tbl = table_adapter.table.to_arrow(columns=["document", "citation_source"])
+            docs = arrow_tbl.column("document").to_pylist()
+            cits = arrow_tbl.column("citation_source").to_pylist()
+            for doc, cit in zip(docs, cits):
+                if doc and doc not in doc_map:
+                    doc_map[doc] = cit or doc
+            if doc_map:
+                return doc_map
+        except Exception:
+            pass
+
+    if os.path.exists(config.INGESTED_MANIFEST_PATH):
+        try:
+            with open(config.INGESTED_MANIFEST_PATH, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            if isinstance(manifest, dict):
+                for doc, entry in manifest.items():
+                    if isinstance(entry, dict):
+                        cit = entry.get("citation_source") or entry.get("citation") or doc
+                    else:
+                        cit = doc
+                    doc_map[doc] = cit
+                if doc_map:
+                    return doc_map
+        except Exception:
+            pass
+
+    for meta in metadatas:
+        doc = meta.get("document")
+        if doc and doc not in doc_map:
+            doc_map[doc] = meta.get("citation_source") or doc
+    return doc_map
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build technique cards from indexed corpus.")
     parser.add_argument("--documents", nargs="*", default=None, help="Specific document IDs to process.")
     parser.add_argument("--sample", type=int, default=None, help="Sample N documents randomly.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for sampling.")
     parser.add_argument("--limit", type=int, default=None, help="Limit total documents to process.")
+    parser.add_argument("--prune-stale", action="store_true", help="Remove cards whose documents are no longer in the active corpus.")
 
     args = parser.parse_args(argv)
 
@@ -47,11 +88,12 @@ def main(argv=None) -> int:
     collection, bm25, texts, metadatas = load_search_resources()
 
     # Collect unique documents and their citation sources
-    doc_map: dict[str, str] = {}
-    for meta in metadatas:
-        doc = meta.get("document")
-        if doc and doc not in doc_map:
-            doc_map[doc] = meta.get("citation_source") or doc
+    doc_map = _load_doc_map(metadatas)
+
+    if args.prune_stale:
+        store = CardStore(TRANSFER_DIR)
+        kept, removed = store.prune(set(doc_map.keys()))
+        print(f"Pruned stale cards: kept {kept}, removed {removed}.")
 
     all_docs = list(doc_map.items())
 

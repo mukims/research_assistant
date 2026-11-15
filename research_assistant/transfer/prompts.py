@@ -209,7 +209,7 @@ Prediction: {prediction}
 Refuting result: {refuting_result}
 
 Rules:
-1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); set identifiability to null if the verdict is right, otherwise to exactly one word, determined, underdetermined or overdetermined, and put your reasons in the objections; list your strongest objections.
+1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); set identifiability to null if the verdict is right, otherwise to exactly one of the three words "determined", "underdetermined", or "overdetermined" (never add suffixes or prose), and put your reasons in the objections; list your strongest objections.
 2. kind says what the transfer does to the current method (the baseline): replace it with a different method, augment it with a new component, or tune it (its parameters, ordering, implementation or hardware use) while the method stays the same.
 3. Reply with the JSON object only.
 
@@ -243,8 +243,9 @@ Objections from critic:
 {objections}
 
 Rules:
-1. Each response addresses one objection by its 0-based index. Rebut it by saying why the assumption holds in the target problem, or what change to the transfer enforces it; restating the claim is not a rebuttal. Concede only when the transfer cannot work on this point whatever is changed: a conceded objection on a core row rejects the transfer.
-2. Reply with the JSON object only.
+1. Each response addresses one objection by its 0-based index. Rebut it by saying why the assumption holds in the target problem, or what change within the source technique's mechanism (or cited passages) enforces it; restating the claim or inventing an unrelated method not on the source card is not a valid rebuttal. Concede only when the transfer cannot work on this point whatever is changed: a conceded objection on a core row rejects the transfer.
+2. If your rebuttals change the mapping, steps, prediction, title, or summary, include the updated fields (`revised_mapping`, `revised_steps`, `revised_prediction`, `revised_summary`, `revised_title`) in the JSON object; omit any field that did not change.
+3. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:
 {{
@@ -253,6 +254,56 @@ Format your response as a JSON object matching this schema:
       "objection": 0,
       "response": "Detailed technical response",
       "concede": false
+    }}
+  ],
+  "revised_mapping": [
+    {{
+      "source_role": "Role in source technique",
+      "target_role": "Mapped role in target problem",
+      "assumption": "Assumption underlying this role",
+      "status": "holds",
+      "core": true,
+      "note": "Optional updated note"
+    }}
+  ],
+  "revised_steps": [
+    {{
+      "action": "Updated action",
+      "input": "Input data or structure",
+      "output": "Output data or structure",
+      "tool": "Tool or method used"
+    }}
+  ],
+  "revised_prediction": "Optional updated prediction",
+  "revised_summary": "Optional updated summary",
+  "revised_title": "Optional updated title"
+}}
+"""
+
+
+VERIFY_REBUTTAL_USER = """TASK: verify_rebuttal
+Review the reviser's rebuttals to broken mapping-row objections.
+
+Transfer title: {title}
+Source technique: {card_name}
+Source mechanism:
+{card_mechanism}
+
+Broken-row objections and rebuttals:
+{rebuttals}
+
+Rules:
+1. A rebuttal resolves a broken row ONLY if it stays within the source technique's mechanism (or cited passages) and shows why the assumption holds or can be enforced without inventing an unrelated method.
+2. Restating the claim, hand-waving, or swapping in a different method not on the source card means resolved=false.
+3. Reply with the JSON object only.
+
+Format your response as a JSON object matching this schema:
+{{
+  "verdicts": [
+    {{
+      "objection": 0,
+      "resolved": true,
+      "reason": "Brief justification"
     }}
   ]
 }}

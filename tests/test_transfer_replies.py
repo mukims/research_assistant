@@ -46,3 +46,54 @@ class TestReplies(unittest.TestCase):
         got, w = replies.resolve_premises(items, P, limit=1)
         self.assertEqual([(p.key, p.document, p.chunk_index) for p in got], [("C2", "b.pdf", 9)])
         self.assertEqual(len(w), 3)
+
+    def test_validation_error_retries_with_schema_hint_and_succeeds(self):
+        sent = []
+
+        def call(msgs):
+            sent.append(msgs)
+            if len(sent) == 1:
+                return (
+                    '{"title": "x", "summary": "s", "mapping": "bad", '
+                    '"identifiability": {}, "steps": [], "premises": [], "prediction": "p"}'
+                )
+            return (
+                '{"title": "Valid", "summary": "S", "mapping": [{"source_role": "a", "target_role": "b"}], '
+                '"identifiability": {"verdict": "determined"}, "steps": [{"action": "s"}], '
+                '"premises": [], "prediction": "decreases by 2x"}'
+            )
+
+        out = replies.ask_json(
+            call,
+            [{"role": "user", "content": "draft"}],
+            ("title", "summary", "mapping", "identifiability", "steps", "premises", "prediction"),
+            validator=replies.validate_transfer_reply,
+        )
+        self.assertEqual(out["title"], "Valid")
+        self.assertEqual(len(sent), 2)
+        self.assertIn("Fix schema error(s):", sent[1][-1]["content"])
+
+    def test_validate_critique_revise_and_verify_rebuttal(self):
+        self.assertEqual(
+            replies.validate_critique_reply(
+                {"shape_match": "yes", "rows": [{"row": 0, "status": "holds"}], "objections": []}
+            ),
+            [],
+        )
+        self.assertTrue(
+            replies.validate_critique_reply({"shape_match": "maybe", "rows": [], "objections": []})
+        )
+        self.assertEqual(
+            replies.validate_revise_reply(
+                {"responses": [{"objection": 0, "response": "Fixed", "concede": False}]}
+            ),
+            [],
+        )
+        self.assertTrue(replies.validate_revise_reply({"responses": ["bad"]}))
+        self.assertEqual(
+            replies.validate_verify_rebuttal_reply({"verdicts": [{"objection": 0, "resolved": True}]}),
+            [],
+        )
+        self.assertTrue(
+            replies.validate_verify_rebuttal_reply({"verdicts": "not-a-list"})
+        )

@@ -67,6 +67,7 @@ VALID_STAGES = {
     "respond",
     "task_planning",
     "task_execution",
+    "transfer",
 }
 
 STAGE_METADATA: dict[str, tuple[int, str]] = {
@@ -79,6 +80,7 @@ STAGE_METADATA: dict[str, tuple[int, str]] = {
     "respond": (5, "Synthesizing answer"),
     "task_planning": (6, "Deconstructing paper into tasks"),
     "task_execution": (7, "Executing agent task graph"),
+    "transfer": (8, "Running cross-disciplinary technique transfer"),
 }
 
 DEFAULT_STATUS: dict[str, Any] = {

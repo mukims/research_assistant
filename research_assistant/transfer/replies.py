@@ -24,8 +24,16 @@ class ReplyParseError(ValueError):
         self.raw = raw
 
 
-def parse_reply(raw: str, required: tuple[str, ...]) -> dict:
-    """Parse a model output string into a dictionary, enforcing required keys."""
+class ReplyValidationError(ReplyParseError):
+    """Raised when a parsed JSON reply fails nested schema or enum validation."""
+
+
+def parse_reply(
+    raw: str,
+    required: tuple[str, ...],
+    validator: Callable[[dict], list[str]] | None = None,
+) -> dict:
+    """Parse a model output string into a dictionary, enforcing required keys and optional schema rules."""
     if not raw or not raw.strip():
         raise ReplyParseError("Empty reply from model", raw=raw)
 
@@ -53,6 +61,11 @@ def parse_reply(raw: str, required: tuple[str, ...]) -> dict:
     if missing:
         raise ReplyParseError(f"Missing required key(s): {missing}", raw=raw)
 
+    if validator is not None:
+        errors = validator(parsed)
+        if errors:
+            raise ReplyValidationError("; ".join(errors), raw=raw)
+
     return parsed
 
 
@@ -60,18 +73,76 @@ def ask_json(
     call: Callable[[list[dict]], str],
     messages: list[dict],
     required: tuple[str, ...],
+    validator: Callable[[dict], list[str]] | None = None,
 ) -> dict:
-    """Call model for a JSON object with one automatic retry on parse failure."""
+    """Call model for a JSON object with one automatic retry on parse or validation failure."""
     raw = call(messages)
     try:
-        return parse_reply(raw, required)
+        return parse_reply(raw, required, validator=validator)
+    except ReplyValidationError as exc:
+        nudge = f"{JSON_NUDGE} Fix schema error(s): {exc}"
+        retry_messages = list(messages) + [
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content": nudge},
+        ]
+        raw_retry = call(retry_messages)
+        return parse_reply(raw_retry, required, validator=validator)
     except ReplyParseError:
         retry_messages = list(messages) + [
             {"role": "assistant", "content": raw},
             {"role": "user", "content": JSON_NUDGE},
         ]
         raw_retry = call(retry_messages)
-        return parse_reply(raw_retry, required)
+        return parse_reply(raw_retry, required, validator=validator)
+
+
+def validate_transfer_reply(parsed: dict) -> list[str]:
+    """Validate nested structure of a TASK: transfer reply."""
+    errors: list[str] = []
+    mapping = parsed.get("mapping")
+    if not isinstance(mapping, list) or not mapping or not all(isinstance(r, dict) for r in mapping):
+        errors.append("'mapping' must be a non-empty list of objects")
+    steps = parsed.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps):
+        errors.append("'steps' must be a list of objects")
+    ident = parsed.get("identifiability")
+    if not isinstance(ident, dict):
+        errors.append("'identifiability' must be an object")
+    premises = parsed.get("premises")
+    if not isinstance(premises, list):
+        errors.append("'premises' must be a list")
+    return errors
+
+
+def validate_critique_reply(parsed: dict) -> list[str]:
+    """Validate nested structure and enums of a TASK: critique reply."""
+    errors: list[str] = []
+    sm = parsed.get("shape_match")
+    if not isinstance(sm, str) or sm.strip().lower() not in ("yes", "partial", "no", "unknown"):
+        errors.append("'shape_match' must be one of 'yes', 'partial', 'no'")
+    if "rows" in parsed and not isinstance(parsed["rows"], list):
+        errors.append("'rows' must be a list")
+    if "objections" in parsed and not isinstance(parsed["objections"], list):
+        errors.append("'objections' must be a list")
+    return errors
+
+
+def validate_revise_reply(parsed: dict) -> list[str]:
+    """Validate nested structure of a TASK: revise reply."""
+    errors: list[str] = []
+    responses = parsed.get("responses")
+    if not isinstance(responses, list) or not all(isinstance(r, dict) for r in responses):
+        errors.append("'responses' must be a list of objects")
+    return errors
+
+
+def validate_verify_rebuttal_reply(parsed: dict) -> list[str]:
+    """Validate nested structure of a TASK: verify_rebuttal reply."""
+    errors: list[str] = []
+    verdicts = parsed.get("verdicts")
+    if not isinstance(verdicts, list) or not all(isinstance(v, dict) for v in verdicts):
+        errors.append("'verdicts' must be a list of objects")
+    return errors
 
 
 def normalise_key(key: str | None) -> str:

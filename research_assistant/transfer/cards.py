@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import threading
 from datetime import datetime, timezone
 from typing import Callable
 
 import numpy as np
 
+from research_assistant import config
 from research_assistant.config import (
     EXCLUDED_FROM_EVIDENCE,
     TRANSFER_CARD_MAX_CHARS,
@@ -17,10 +20,15 @@ from research_assistant.config import (
     TRANSFER_PASSAGE_MAX_CHARS,
 )
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
+from research_assistant.shared.log import get_logger
+from research_assistant.transfer.chunk_store import ChunkStore, chunk_seq, chunk_store_for
 from research_assistant.transfer.models import Card, Passage, card_from_dict, card_to_dict
-from research_assistant.transfer.premises import PremiseChecker, chunk_seq
+from research_assistant.transfer.premises import PremiseChecker
 from research_assistant.transfer.prompts import CARDS_USER, SYSTEM, format_passages
 from research_assistant.transfer.replies import ask_json, resolve_premises
+
+logger = get_logger("transfer")
+_STORE_LOCK = threading.RLock()
 
 
 def select_card_passages(
@@ -29,6 +37,7 @@ def select_card_passages(
     texts: list[str],
     metadatas: list[dict],
     max_chars: int = TRANSFER_CARD_MAX_CHARS,
+    chunk_store: ChunkStore | None = None,
 ) -> list[Passage]:
     """
     Select candidate passages from a document for technique extraction.
@@ -40,23 +49,20 @@ def select_card_passages(
     Excludes figure images, captions, and non-document chunks.
     Stops before character budget is exceeded.
     """
-    doc_indices = []
-    for idx, meta in enumerate(metadatas):
-        if meta.get("document") != document:
-            continue
-        if meta.get("type") in EXCLUDED_FROM_EVIDENCE:
-            continue
-        if meta.get("section") == "caption":
-            continue
-        doc_indices.append(idx)
+    store = chunk_store or chunk_store_for(texts, metadatas)
+    doc_rows = store.get_document_chunks(document)
+    source_texts = [txt for _, txt, _ in doc_rows]
+    source_metas = [meta for _, _, meta in doc_rows]
+    row_positions = [pos for pos, _, _ in doc_rows]
+    doc_indices = list(range(len(doc_rows)))
 
     # 1. abstract chunks
     abstract_indices = [
-        i for i in doc_indices if metadatas[i].get("section") == "abstract"
+        i for i in doc_indices if source_metas[i].get("section") == "abstract"
     ]
     # 2. methods chunks
     methods_indices = [
-        i for i in doc_indices if metadatas[i].get("section") == "methods"
+        i for i in doc_indices if source_metas[i].get("section") == "methods"
     ]
 
     # 3. first chunk under each distinct section_raw not already used
@@ -66,7 +72,7 @@ def select_card_passages(
     for i in doc_indices:
         if i in used:
             continue
-        raw = metadatas[i].get("section_raw") or metadatas[i].get("section") or ""
+        raw = source_metas[i].get("section_raw") or source_metas[i].get("section") or ""
         if raw and raw not in seen_headings:
             seen_headings.add(raw)
             heading_indices.append(i)
@@ -77,17 +83,19 @@ def select_card_passages(
     total_chars = 0
     key_counter = 1
 
-    for idx in candidate_indices:
-        txt = texts[idx]
+    for i in candidate_indices:
+        txt = source_texts[i]
         if total_chars + len(txt) > max_chars:
             break
-        meta = metadatas[idx]
+        meta = source_metas[i]
+        pos = row_positions[i]
+        seq = chunk_seq(meta, pos)
         sec = meta.get("section_raw") or meta.get("section") or "other"
         passages.append(
             Passage(
                 key=f"C{key_counter}",
-                chunk_index=idx,
-                seq=chunk_seq(meta, idx),
+                chunk_index=pos,
+                seq=seq,
                 document=document,
                 citation=citation,
                 section=sec,
@@ -176,6 +184,24 @@ def build_card(
     return cards, warnings
 
 
+def card_search_text(card: Card) -> str:
+    """Build composite text for embedding and lexical matching of a technique card."""
+    parts = [card.problem_solved.strip()]
+    if card.inputs:
+        parts.append(f"Inputs: {card.inputs.strip()}")
+    if card.outputs:
+        parts.append(f"Outputs: {card.outputs.strip()}")
+    if card.mechanism:
+        mech = "; ".join(s.strip() for s in card.mechanism if s.strip())
+        if mech:
+            parts.append(f"Mechanism: {mech}")
+    return "\n".join(p for p in parts if p)
+
+
+def _search_tokens(text: str) -> set[str]:
+    return {w.lower() for w in re.findall(r"[a-zA-Z0-9]{3,}", text or "")}
+
+
 class CardIndex:
     """In-memory index of technique cards and their problem_solved vectors."""
 
@@ -189,8 +215,9 @@ class CardIndex:
         k: int,
         exclude_documents: frozenset[str] = frozenset(),
         verified_only: bool = True,
+        query_text: str = "",
     ) -> list[tuple[Card, float]]:
-        """Search cards by vector cosine similarity."""
+        """Search cards by dense cosine similarity, blended with lexical overlap when query_text is set."""
         results: list[tuple[Card, float]] = []
         if len(self.cards) == 0 or len(self.vectors) == 0:
             return results
@@ -199,6 +226,8 @@ class CardIndex:
         v_norm = np.linalg.norm(vec)
         if v_norm == 0:
             v_norm = 1.0
+
+        q_tokens = _search_tokens(query_text) if query_text else set()
 
         for idx, c in enumerate(self.cards):
             if c.document in exclude_documents:
@@ -212,6 +241,10 @@ class CardIndex:
                 c_norm = 1.0
 
             sim = float(np.dot(card_vec, vec) / (c_norm * v_norm))
+            if q_tokens:
+                c_tokens = _search_tokens(card_search_text(c))
+                lex = len(q_tokens & c_tokens) / len(q_tokens) if c_tokens else 0.0
+                sim = 0.85 * sim + 0.15 * lex
             results.append((c, sim))
 
         results.sort(key=lambda x: x[1], reverse=True)
@@ -227,6 +260,7 @@ class CardStore:
         self.jsonl_path = os.path.join(directory, "cards.jsonl")
         self.npy_path = os.path.join(directory, "cards.npy")
         self.manifest_path = os.path.join(directory, "manifest.json")
+        self.meta_path = os.path.join(directory, "cards_meta.json")
 
     def done_documents(self) -> set[str]:
         if not os.path.exists(self.manifest_path):
@@ -238,48 +272,119 @@ class CardStore:
         except Exception:
             return set()
 
-    def append(self, document: str, cards: list[Card], vectors: np.ndarray) -> None:
-        """Append cards and vectors for a document, updating manifest atomically."""
-        existing_index = self.load()
-        all_cards = list(existing_index.cards) + list(cards)
+    def load_meta(self) -> dict:
+        if not os.path.exists(self.meta_path):
+            return {}
+        try:
+            with open(self.meta_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
-        if len(existing_index.vectors) > 0 and len(vectors) > 0:
-            all_vectors = np.vstack([existing_index.vectors, vectors])
-        elif len(vectors) > 0:
-            all_vectors = np.asarray(vectors, dtype=float)
-        elif len(existing_index.vectors) > 0:
-            all_vectors = existing_index.vectors
-        else:
-            dim = vectors.shape[1] if vectors.ndim == 2 else 0
-            all_vectors = np.empty((0, dim), dtype=float)
+    def save_meta(self, meta: dict) -> None:
+        atomic_write_json(self.meta_path, meta)
 
-        manifest = {}
-        if os.path.exists(self.manifest_path):
-            try:
-                with open(self.manifest_path, "r", encoding="utf-8") as fh:
-                    manifest = json.load(fh)
-            except Exception:
-                manifest = {}
+    def check_embedder(self) -> None:
+        """Validate stored card vectors match configured EMBED_MODEL (mirroring db.check_embedder)."""
+        meta = self.load_meta()
+        stored = meta.get("embedder")
+        if isinstance(stored, str) and stored and stored != config.EMBED_MODEL:
+            raise RuntimeError(
+                f"CardStore at {self.directory!r} was embedded with {stored!r} but "
+                f"CITATION_EMBED_MODEL is {config.EMBED_MODEL!r}. Set CITATION_EMBED_MODEL={stored} "
+                "or rebuild cards."
+            )
 
-        manifest[document] = {
-            "cards": len(cards),
-            "at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # Write cards.jsonl
-        lines = [json.dumps(card_to_dict(c)) + "\n" for c in all_cards]
+    def _write_all_locked(self, cards: list[Card], vectors: np.ndarray, manifest: dict) -> None:
+        lines = [json.dumps(card_to_dict(c)) + "\n" for c in cards]
         with atomic_write(self.jsonl_path) as fh:
             fh.write("".join(lines))
 
-        # Write cards.npy
         temp_npy = os.path.join(self.directory, "cards_tmp.npy")
-        np.save(temp_npy, all_vectors)
+        np.save(temp_npy, vectors)
         os.replace(temp_npy, self.npy_path)
 
-        # Write manifest.json
         atomic_write_json(self.manifest_path, manifest)
 
-    def load(self) -> CardIndex:
+    def save_all(self, cards: list[Card], vectors: np.ndarray, manifest: dict) -> None:
+        """Atomically overwrite cards, vectors, and manifest."""
+        with _STORE_LOCK:
+            self._write_all_locked(cards, vectors, manifest)
+
+    def prune(self, keep_documents: set[str]) -> tuple[int, int]:
+        """Remove cards and manifest entries whose document is not in keep_documents.
+
+        Returns (kept_cards, removed_cards).
+        """
+        with _STORE_LOCK:
+            index = self.load(check_model=False)
+            kept_cards: list[Card] = []
+            kept_indices: list[int] = []
+            for idx, c in enumerate(index.cards):
+                if c.document in keep_documents:
+                    kept_cards.append(c)
+                    if idx < len(index.vectors):
+                        kept_indices.append(idx)
+
+            removed = len(index.cards) - len(kept_cards)
+            if kept_indices and len(index.vectors) > 0:
+                kept_vectors = index.vectors[kept_indices]
+            elif len(index.vectors.shape) == 2:
+                kept_vectors = np.empty((0, index.vectors.shape[1]), dtype=float)
+            else:
+                kept_vectors = np.empty((0, 0), dtype=float)
+
+            manifest = {}
+            if os.path.exists(self.manifest_path):
+                try:
+                    with open(self.manifest_path, "r", encoding="utf-8") as fh:
+                        raw_manifest = json.load(fh)
+                    if isinstance(raw_manifest, dict):
+                        manifest = {
+                            k: v for k, v in raw_manifest.items()
+                            if k in keep_documents
+                        }
+                except Exception:
+                    manifest = {}
+
+            self._write_all_locked(kept_cards, kept_vectors, manifest)
+            return len(kept_cards), removed
+
+    def append(self, document: str, cards: list[Card], vectors: np.ndarray) -> None:
+        """Append cards and vectors for a document, updating manifest atomically."""
+        with _STORE_LOCK:
+            existing_index = self.load(check_model=False)
+            all_cards = list(existing_index.cards) + list(cards)
+
+            if len(existing_index.vectors) > 0 and len(vectors) > 0:
+                all_vectors = np.vstack([existing_index.vectors, vectors])
+            elif len(vectors) > 0:
+                all_vectors = np.asarray(vectors, dtype=float)
+            elif len(existing_index.vectors) > 0:
+                all_vectors = existing_index.vectors
+            else:
+                dim = vectors.shape[1] if vectors.ndim == 2 else 0
+                all_vectors = np.empty((0, dim), dtype=float)
+
+            manifest = {}
+            if os.path.exists(self.manifest_path):
+                try:
+                    with open(self.manifest_path, "r", encoding="utf-8") as fh:
+                        manifest = json.load(fh)
+                except Exception:
+                    manifest = {}
+
+            manifest[document] = {
+                "cards": len(cards),
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            self._write_all_locked(all_cards, all_vectors, manifest)
+
+    def load(self, check_model: bool = True) -> CardIndex:
+        if check_model:
+            self.check_embedder()
         cards: list[Card] = []
         if os.path.exists(self.jsonl_path):
             with open(self.jsonl_path, "r", encoding="utf-8") as fh:
@@ -342,12 +447,19 @@ def build_all(
         all_warnings.extend(warnings)
 
         if new_cards:
-            vecs = embed_documents([c.problem_solved for c in new_cards])
+            vecs = embed_documents([card_search_text(c) for c in new_cards])
             vecs_arr = np.asarray(vecs, dtype=float)
             norms = np.linalg.norm(vecs_arr, axis=1, keepdims=True)
             norms[norms == 0.0] = 1.0
             vecs_norm = vecs_arr / norms
             store.append(doc, new_cards, vecs_norm)
+            if vecs_norm.ndim == 2 and vecs_norm.shape[1] > 0:
+                meta = store.load_meta()
+                if not meta:
+                    store.save_meta({
+                        "embedder": config.EMBED_MODEL,
+                        "embedding_dim": int(vecs_norm.shape[1]),
+                    })
         else:
             store.append(doc, [], np.empty((0, 0), dtype=float))
 

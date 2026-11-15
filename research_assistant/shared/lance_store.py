@@ -149,6 +149,31 @@ def list_table_names(conn) -> list[str]:
         return []
 
 
+def row_to_metadata(row: dict) -> dict:
+    """Convert a LanceDB paper chunk row into the standard metadata dictionary."""
+    meta = {
+        "document": row.get("document", ""),
+        "citation_source": row.get("citation_source", ""),
+        "stored_form": row.get("stored_form", "text_chunk"),
+        "section": row.get("section", ""),
+        "seq": row.get("seq", 0),
+        "page": row.get("page", 1),
+        "page_first": row.get("page_first", row.get("page", 1)),
+        "page_last": row.get("page_last", row.get("page", 1)),
+        "type": row.get("stored_form", "text_chunk"),
+        "tier": row.get("tier", "full_text"),
+        "content_hash": row.get("content_hash", ""),
+    }
+    if row.get("metadata_json"):
+        try:
+            extra = json.loads(row["metadata_json"])
+            if isinstance(extra, dict):
+                meta.update(extra)
+        except Exception:
+            pass
+    return meta
+
+
 class LanceTableAdapter:
     """
     Adapter wrapping a LanceDB table to provide both modern native search
@@ -269,31 +294,11 @@ class LanceTableAdapter:
         hits = vec_q.limit(top_k).to_list()
         results = []
         for h in hits:
-            meta = {
-                "document": h.get("document", ""),
-                "citation_source": h.get("citation_source", ""),
-                "stored_form": h.get("stored_form", "text_chunk"),
-                "section": h.get("section", ""),
-                "seq": h.get("seq", 0),
-                "page": h.get("page", 1),
-                "page_first": h.get("page_first", h.get("page", 1)),
-                "page_last": h.get("page_last", h.get("page", 1)),
-                "type": h.get("stored_form", "text_chunk"),
-                "tier": h.get("tier", "full_text"),
-                "content_hash": h.get("content_hash", ""),
-            }
-            if h.get("metadata_json"):
-                try:
-                    extra = json.loads(h["metadata_json"])
-                    if isinstance(extra, dict):
-                        meta.update(extra)
-                except Exception:
-                    pass
             results.append({
                 "chunk_id": h.get("chunk_id") or h.get("summary_id", ""),
                 "chunk_index": int(h.get("seq", 0)),
                 "text": h.get("text") or h.get("summary", ""),
-                "metadata": meta,
+                "metadata": row_to_metadata(h),
                 "score": float(h.get("_distance", 0.0)),
                 "_distance": float(h.get("_distance", 0.0)),
             })
@@ -380,36 +385,59 @@ class LanceTableAdapter:
         results = []
         for cid, rrf_score in ranked:
             h = lookup[cid]
-            meta = {
-                "document": h.get("document", ""),
-                "citation_source": h.get("citation_source", ""),
-                "stored_form": h.get("stored_form", "text_chunk"),
-                "section": h.get("section", ""),
-                "seq": h.get("seq", 0),
-                "page": h.get("page", 1),
-                "page_first": h.get("page_first", h.get("page", 1)),
-                "page_last": h.get("page_last", h.get("page", 1)),
-                "type": h.get("stored_form", "text_chunk"),
-                "tier": h.get("tier", "full_text"),
-                "content_hash": h.get("content_hash", ""),
-            }
-            if h.get("metadata_json"):
-                try:
-                    extra = json.loads(h["metadata_json"])
-                    if isinstance(extra, dict):
-                        meta.update(extra)
-                except Exception:
-                    pass
-
             results.append({
                 "chunk_id": cid,
                 "chunk_index": int(h.get("seq", 0)),
                 "text": h.get("text", ""),
-                "metadata": meta,
+                "metadata": row_to_metadata(h),
                 "rrf_score": round(rrf_score, 5),
             })
 
         return results
+
+    def find_chunk_by_seq(
+        self,
+        document: str,
+        seq: int,
+        exclude_types: Optional[set] = None,
+    ) -> Optional[tuple[int, str, dict]]:
+        """Look up a single chunk by (document, seq) directly via SQL filter."""
+        if not document:
+            return None
+        doc_esc = document.replace("'", "''")
+        conds = [f"document = '{doc_esc}'", f"seq = {int(seq)}"]
+        if exclude_types:
+            quoted = ", ".join(f"'{t.replace(chr(39), chr(39)*2)}'" for t in sorted(exclude_types))
+            conds.append(f"stored_form NOT IN ({quoted})")
+        where_sql = " AND ".join(conds)
+        try:
+            rows = self.table.search().where(where_sql).limit(5).to_list()
+        except Exception as e:
+            logger.warning("Chunk lookup by seq failed for %s seq=%s: %s", document, seq, e)
+            return None
+        if not rows:
+            return None
+        # Captions and figure_image placeholders can share seq; prefer prose chunks.
+        rows.sort(key=lambda r: 0 if r.get("stored_form") == "text_chunk" else 1)
+        row = rows[0]
+        return int(row.get("seq", seq)), row.get("text", ""), row_to_metadata(row)
+
+    def find_document_chunks(
+        self,
+        document: str,
+        exclude_types: Optional[set] = None,
+    ) -> list[tuple[int, str, dict]]:
+        """Fetch all matching chunks for a document ordered by seq."""
+        if not document:
+            return []
+        where_sql = self._build_where_sql({document}, exclude_types=exclude_types)
+        try:
+            rows = self.table.search().where(where_sql).limit(10000).to_list()
+        except Exception as e:
+            logger.warning("Document chunk fetch failed for %s: %s", document, e)
+            return []
+        rows.sort(key=lambda r: int(r.get("seq", 0)))
+        return [(int(r.get("seq", 0)), r.get("text", ""), row_to_metadata(r)) for r in rows]
 
     def get_neighbours(
         self,

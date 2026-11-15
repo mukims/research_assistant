@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import re
 
-from research_assistant.config import TRANSFER_CONTESTED_PENALTY, TRANSFER_PRIOR_ART_BONUS, TRANSFER_TUNE_PENALTY
+from research_assistant.config import (
+    TRANSFER_CONTESTED_PENALTY,
+    TRANSFER_PARTIAL_SHAPE_PENALTY,
+    TRANSFER_PRIOR_ART_BONUS,
+    TRANSFER_TUNE_PENALTY,
+)
 from research_assistant.transfer.models import (
     Bottleneck,
     Card,
@@ -71,7 +76,10 @@ def final_rows(transfer: Transfer) -> list[MappingRow]:
         rebutted = {
             o.get("row")
             for o in transfer.critique.objections
-            if isinstance(o, dict) and o.get("answered") and not o.get("conceded")
+            if isinstance(o, dict)
+            and o.get("answered")
+            and not o.get("conceded")
+            and o.get("rebuttal_accepted") is not False
         }
         for cr in transfer.critique.rows:
             if not isinstance(cr, dict):
@@ -100,11 +108,14 @@ _VERDICTS = {
 def normalise_verdict(text) -> str | None:
     """One of determined, underdetermined, overdetermined, or None for anything else.
 
-    Models write "under-determined", "Undetermined" or "indeterminate" for the same verdict.
+    Models write "under-determined", "Undetermined", "indeterminate", or append a
+    boolean suffix like "overdetermined_false" for the same verdict.
     """
     if isinstance(text, dict):
         text = text.get("verdict", "")
-    return _VERDICTS.get(re.sub(r"[^a-z]", "", str(text or "").lower()))
+    cleaned = str(text or "").strip().lower()
+    cleaned = re.sub(r"(?:[_\-\s]+(?:false|true))$", "", cleaned)
+    return _VERDICTS.get(re.sub(r"[^a-z]", "", cleaned))
 
 
 def final_identifiability(transfer: Transfer) -> str:
@@ -237,6 +248,36 @@ def reward(depth: float, prior_art_status: str) -> float:
     return depth
 
 
+def _premise_quality(transfer: Transfer) -> float:
+    """Weighted premise quality in [0.5, 1.0]: 1.0 when all premises are fully Supported."""
+    if not transfer.premises:
+        return 0.5
+    avg_credit = sum(p.credit for p in transfer.premises) / len(transfer.premises)
+    return 0.5 + 0.5 * avg_credit
+
+
+def _shape_factor(transfer: Transfer) -> float:
+    """Penalty factor when the critic finds only a partial shape match."""
+    if transfer.critique and transfer.critique.shape_match.strip().lower() == "partial":
+        return max(0.0, 1.0 - TRANSFER_PARTIAL_SHAPE_PENALTY)
+    return 1.0
+
+
+def _mechanism_overlap(transfer: Transfer, card: Card) -> float:
+    """Alignment between card.mechanism operations and transfer steps/summary in [0.85, 1.0]."""
+    if not card.mechanism:
+        return 1.0
+    mech_words = content_words(" ".join(card.mechanism))
+    if not mech_words:
+        return 1.0
+    transfer_text = " ".join(
+        [transfer.summary]
+        + [f"{s.action} {s.input} {s.output} {s.tool}" for s in transfer.steps]
+    )
+    overlap = len(mech_words & content_words(transfer_text)) / len(mech_words)
+    return 0.85 + 0.15 * min(1.0, overlap / 0.25)
+
+
 def score_transfer(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> Scores:
     """Score a transfer: compute depth checklist, check gates, and calculate reward."""
     checks = depth_checks(transfer, bottleneck, card)
@@ -244,14 +285,32 @@ def score_transfer(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> Sc
     depth = passed_count / len(DEPTH_CHECKS)
     set_aside = set_aside_reason(transfer, bottleneck, card)
     contested = sum(1 for r in final_rows(transfer) if r.core and r.status == "contested")
+    premise_q = round(_premise_quality(transfer), 4)
+    shape_f = round(_shape_factor(transfer), 4)
+    mech_f = round(_mechanism_overlap(transfer, card), 4)
     if set_aside is not None:
         rew = 0.0
     else:
-        rew = reward(depth, transfer.prior_art.status) * max(0.0, 1.0 - TRANSFER_CONTESTED_PENALTY * contested)
+        rew = (
+            reward(depth, transfer.prior_art.status)
+            * max(0.0, 1.0 - TRANSFER_CONTESTED_PENALTY * contested)
+            * premise_q
+            * shape_f
+            * mech_f
+        )
         # A transfer that only tunes the current method is worth less than one that changes it.
         if transfer.critique and transfer.critique.kind == "tune":
             rew *= 1.0 - TRANSFER_TUNE_PENALTY
-    scores = Scores(depth=depth, checks=checks, reward=rew, set_aside=set_aside, contested=contested)
+    scores = Scores(
+        depth=depth,
+        checks=checks,
+        reward=rew,
+        set_aside=set_aside,
+        contested=contested,
+        premise_quality=premise_q,
+        shape_factor=shape_f,
+        mechanism_overlap=mech_f,
+    )
     transfer.scores = scores
     return scores
 

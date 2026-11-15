@@ -1,7 +1,8 @@
+import dataclasses
 import json
 import unittest
 
-from research_assistant.transfer import stages
+from research_assistant.transfer import cards, stages
 from research_assistant.transfer.deps import TransferSettings
 from research_assistant.transfer.premises import PremiseChecker
 from tests.transfer_fixtures import world
@@ -238,3 +239,90 @@ class TestDevelop(unittest.TestCase):
         seed.card.evidence.seq = 7                    # per-document seq, not a position in the corpus
         idx, text, meta = stages.resolve_card_evidence(deps, seed.card)
         self.assertEqual((idx, text, meta["document"]), (len(deps.texts) - 1, "right chunk", doc))
+
+    def test_revise_updates_mapping_steps_and_prediction(self):
+        revise = json.dumps({
+            "responses": [{"objection": 0, "response": "Updated mapping row and prediction.", "concede": False}],
+            "revised_mapping": [{
+                "source_role": "rho",
+                "target_role": "revised target",
+                "assumption": "N >= 16",
+                "status": "holds",
+                "core": True,
+            }],
+            "revised_steps": [{
+                "action": "Run revised pipeline",
+                "input": "disorder samples",
+                "output": "tight bound",
+                "tool": "chebyshev_moments",
+            }],
+            "revised_prediction": "Error drops threefold with L <= 32",
+            "revised_summary": "Revised surrogate summary",
+            "revised_title": "Revised Chebyshev Surrogate",
+        })
+        deps, log, g, seeds, s, ch = self._go(replies={("revise", 1): revise})
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)
+        self.assertEqual(t.title, "Revised Chebyshev Surrogate")
+        self.assertEqual(t.summary, "Revised surrogate summary")
+        self.assertEqual(t.prediction, "Error drops threefold with L <= 32")
+        self.assertEqual([(m.source_role, m.target_role) for m in t.mapping], [("rho", "revised target")])
+        self.assertEqual([(st.action, st.tool) for st in t.steps], [("Run revised pipeline", "chebyshev_moments")])
+
+    def test_verify_rebuttals_accepts_and_rejects_broken_row_responses(self):
+        revise = json.dumps({"responses": [
+            {"objection": 0, "response": "Irrelevant defense.", "concede": False},
+        ]})
+        deps, log, g, seeds, s, ch = self._go(replies={("revise", 1): revise})
+        s.verify_rebuttals = True
+
+        def critic_call(msgs):
+            user_prompt = msgs[-1]["content"]
+            if "TASK: verify_rebuttal" in user_prompt:
+                return json.dumps({"verdicts": [{"objection": 0, "resolved": False, "reason": "Still fails 2D boundary case."}]})
+            return json.dumps({
+                "shape_match": "yes",
+                "rows": [{"row": 0, "status": "breaks", "reason": "2D has no order"}],
+                "objections": [],
+            })
+
+        deps.critic = critic_call
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)
+        self.assertFalse(t.critique.objections[0]["rebuttal_accepted"])
+        self.assertIn("2D boundary", t.critique.objections[0]["rebuttal_reason"])
+
+        # Now accept when critic returns resolved=True
+        def critic_accept(msgs):
+            user_prompt = msgs[-1]["content"]
+            if "TASK: verify_rebuttal" in user_prompt:
+                return json.dumps({"verdicts": [{"objection": 0, "resolved": True, "reason": "Valid reformulation without long-range order."}]})
+            return json.dumps({
+                "shape_match": "yes",
+                "rows": [{"row": 0, "status": "breaks", "reason": "2D has no order"}],
+                "objections": [],
+            })
+
+        deps2, _, g2, seeds2, s2, ch2 = self._go(replies={("revise", 1): revise})
+        s2.verify_rebuttals = True
+        deps2.critic = critic_accept
+        t2 = stages.develop(seeds2[0], 1, g2, deps2, s2, ch2)
+        self.assertTrue(t2.critique.objections[0]["rebuttal_accepted"])
+
+    def test_candidate_cards_deduplicates_duplicate_paper_titles(self):
+        from tests.transfer_fixtures import card
+        c1 = card("paper_v1.pdf", True)
+        c1.card_id = "card_v1"
+        c1.citation = "Same Technique Paper (2024)"
+        c2 = card("paper_v2.pdf", True)
+        c2.card_id = "card_v2"
+        c2.citation = "same technique paper (2024)!"
+        c3 = card("other.pdf", True)
+        c3.card_id = "card_other"
+        c3.citation = "Distinct Method Paper (2024)"
+
+        deps, _, g, _, s, _ = self._go()
+        s = dataclasses.replace(s, bottlenecks=1, techniques_per_bottleneck=2)
+        g.bottlenecks = g.bottlenecks[:1]
+        idx = cards.CardIndex([c1, c2, c3], [[1.0, 0.0], [0.99, 0.1], [0.9, 0.2]])
+        deps = dataclasses.replace(deps, cards=idx)
+        seeds, _ = stages.candidate_cards(g, deps, s)
+        self.assertEqual([sd.card.card_id for sd in seeds], ["card_v1", "card_other"])

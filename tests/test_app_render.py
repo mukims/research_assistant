@@ -682,3 +682,51 @@ class TestAuditTabSynthesisModel(unittest.TestCase):
         self.assertEqual(ra.call_args.kwargs["model"], "m")
         self.assertEqual(ra.call_args.kwargs["backend"], "ollama")
         self.assertIs(ra.call_args.kwargs["on_progress"], progress)
+
+
+def _transfer_tab_script():
+    from research_assistant.ui.transfer_tab import render_transfer_tab
+    render_transfer_tab()
+
+
+class TestTransferTabUI(unittest.TestCase):
+    def test_starter_prefill_submits_and_renders_result_without_warnings(self):
+        from unittest.mock import MagicMock, patch
+        from streamlit.testing.v1 import AppTest
+        from tests.transfer_fixtures import sample_result
+
+        sample = sample_result()
+        mock_eng = MagicMock()
+        mock_eng.run.return_value = sample
+
+        with patch("research_assistant.transfer.engine.default_engine", return_value=mock_eng), \
+             patch("research_assistant.ui.transfer_tab._render_live_pipeline_status"):
+            at = _run_app_test(AppTest.from_function(_transfer_tab_script))
+            # Click first starter button to prefill query
+            at.button[0].click()
+            _run_app_test(at)
+            self.assertEqual(at.text_input[0].value, "Inverse problem parameter recovery under correlated noise")
+
+            # Submit the form; query must remain intact and engine.run must be called
+            at.button[-1].click()
+            _run_app_test(at)
+            self.assertTrue(mock_eng.run.called)
+            self.assertEqual(
+                mock_eng.run.call_args.args[0],
+                "Inverse problem parameter recovery under correlated noise",
+            )
+            self.assertEqual([e.value for e in at.exception], [])
+            self.assertEqual([w.value for w in at.warning], [])
+            self.assertEqual([e.value for e in at.error], [])
+            self.assertIn("latest_transfer_result", at.session_state)
+
+    def test_empty_submit_shows_warning(self):
+        from unittest.mock import patch
+        from streamlit.testing.v1 import AppTest
+
+        with patch("research_assistant.ui.transfer_tab._render_live_pipeline_status"):
+            at = _run_app_test(AppTest.from_function(_transfer_tab_script))
+            at.button[-1].click()
+            _run_app_test(at)
+            self.assertEqual([e.value for e in at.exception], [])
+            self.assertTrue(any("enter a target problem" in w.value.lower() for w in at.warning))

@@ -21,16 +21,25 @@ from research_assistant.transfer.models import (
     Step,
     Transfer,
 )
-from research_assistant.transfer.premises import PremiseChecker, chunk_seq, resolve_chunk, resolve_premise
+from research_assistant.transfer.chunk_store import chunk_seq
+from research_assistant.transfer.premises import PremiseChecker, resolve_chunk, resolve_premise
 from research_assistant.transfer.prompts import (
     BOTTLENECKS_USER,
     CRITIQUE_USER,
     REVISE_USER,
     SYSTEM,
     TRANSFER_USER,
+    VERIFY_REBUTTAL_USER,
     format_passages,
 )
-from research_assistant.transfer.replies import ask_json, resolve_premises
+from research_assistant.transfer.replies import (
+    ask_json,
+    resolve_premises,
+    validate_critique_reply,
+    validate_revise_reply,
+    validate_transfer_reply,
+    validate_verify_rebuttal_reply,
+)
 
 
 class CorpusCoverageError(RuntimeError):
@@ -265,29 +274,41 @@ def candidate_cards(
     warnings: list[str] = []
 
     for b in grounding.bottlenecks:
-        best_by_card: dict[str, tuple[Card, float, str, int]] = {}
+        if deps.cancelled():
+            raise pipeline_status.PipelineCancelledError("Technique transfer stopped by user")
+        best_by_paper: dict[str, tuple[Card, float, str, int]] = {}
 
         for level in ("specific", "mid", "broad", "inverse"):
             generic_text = b.generic.get(level, "")
             if not generic_text:
                 continue
             query_vec = deps.embed_query(generic_text)
-            hits = deps.cards.search(
-                query_vec,
-                settings.cards_per_query,
-                exclude_documents=exclude,
-            )
+            try:
+                hits = deps.cards.search(
+                    query_vec,
+                    settings.cards_per_query,
+                    exclude_documents=exclude,
+                    query_text=generic_text,
+                )
+            except TypeError:
+                hits = deps.cards.search(
+                    query_vec,
+                    settings.cards_per_query,
+                    exclude_documents=exclude,
+                )
             for rank_idx, (card_obj, score) in enumerate(hits, start=1):
-                cid = card_obj.card_id
-                if cid not in best_by_card or score > best_by_card[cid][1]:
-                    best_by_card[cid] = (card_obj, score, level, rank_idx)
+                # Deduplicate by normalized paper title so duplicate PDFs of the same
+                # paper cannot occupy multiple top-k slots for the same bottleneck.
+                paper_key = _title_key(card_obj.citation) or card_obj.document
+                if paper_key not in best_by_paper or score > best_by_paper[paper_key][1]:
+                    best_by_paper[paper_key] = (card_obj, score, level, rank_idx)
 
-        if not best_by_card:
+        if not best_by_paper:
             mid_text = b.generic.get("mid", "")
             warnings.append(f"corpus gap for {b.id}: no verified card matches '{mid_text}'")
             continue
 
-        sorted_candidates = sorted(best_by_card.values(), key=lambda x: round(x[1], 8), reverse=True)
+        sorted_candidates = sorted(best_by_paper.values(), key=lambda x: round(x[1], 8), reverse=True)
         top_candidates = sorted_candidates[: settings.techniques_per_bottleneck]
 
         for card_obj, score, level, rank_idx in top_candidates:
@@ -312,30 +333,43 @@ def resolve_card_evidence(deps: Deps, card: Card) -> tuple[int, str, dict] | Non
     ev = card.evidence
     if ev.document != card.document:
         ev = replace(ev, document=card.document)
-    return resolve_premise(deps.texts, deps.metadatas, ev)
+    return resolve_premise(deps.texts, deps.metadatas, ev, chunk_store=deps.chunk_store)
 
 
-def develop(
+def _check_cancelled(deps: Deps) -> None:
+    if deps.cancelled():
+        raise pipeline_status.PipelineCancelledError("Technique transfer stopped by user")
+
+
+def develop_isolated(
     seed: Seed,
     n: int,
     grounding: Grounding,
     deps: Deps,
     settings: TransferSettings,
     checker: PremiseChecker,
-) -> Transfer | None:
-    """
-    Stage S3–S5: Write, judge, critique, and revise one technique transfer.
-    """
-    if deps.cancelled():
-        raise pipeline_status.PipelineCancelledError("Technique transfer stopped by user")
+) -> tuple[Transfer | None, dict[str, Passage], list[str]]:
+    """Thread-safe Stage S3-S5 runner that returns (transfer, new_passages, new_warnings) without mutating grounding."""
+    _check_cancelled(deps)
 
     transfer_id = f"{seed.bottleneck_id}.T{n}"
     bottleneck = next((b for b in grounding.bottlenecks if b.id == seed.bottleneck_id), None)
     if bottleneck is None:
-        grounding.warnings.append(f"{transfer_id}: bottleneck {seed.bottleneck_id} not found")
-        return None
+        return None, {}, [f"{transfer_id}: bottleneck {seed.bottleneck_id} not found"]
 
     card = seed.card
+    base_passages = dict(grounding.passages)
+    new_passages: dict[str, Passage] = {}
+    new_warnings: list[str] = []
+
+    def _next_key() -> str:
+        idx = len(base_passages) + len(new_passages) + 1
+        while f"C{idx}" in base_passages or f"C{idx}" in new_passages:
+            idx += 1
+        return f"C{idx}"
+
+    def _find_existing(doc: str, seq_val: int) -> Passage | None:
+        return _passage_of(base_passages, doc, seq_val) or _passage_of(new_passages, doc, seq_val)
 
     # Source passages:
     # 1. Card evidence chunk comes first. If it cannot be found it is reported, never replaced:
@@ -345,7 +379,7 @@ def develop(
 
     resolved = resolve_card_evidence(deps, card)
     if resolved is None:
-        grounding.warnings.append(
+        new_warnings.append(
             f"{transfer_id}: card evidence not found in {card.document}; premise unverified"
         )
     else:
@@ -353,11 +387,11 @@ def develop(
         # The resolved row's own seq: a card saved before seq existed carries only a position.
         ev_seq = chunk_seq(resolved_meta, resolved_chunk_idx)
         seen_chunks.add(_passage_key(card.document, ev_seq))
-        existing = _passage_of(grounding.passages, card.document, ev_seq)
+        existing = _find_existing(card.document, ev_seq)
         if existing:
             p_ev = existing
         else:
-            k = f"C{len(grounding.passages) + 1}"
+            k = _next_key()
             p_ev = Passage(
                 key=k,
                 chunk_index=resolved_chunk_idx,
@@ -368,7 +402,7 @@ def develop(
                 text=resolved_text,
                 role="source",
             )
-            grounding.passages[k] = p_ev
+            new_passages[k] = p_ev
         source_passages.append(p_ev)
 
     # 2. Search for additional source passages
@@ -387,14 +421,21 @@ def develop(
         if _passage_key(card.document, seq) in seen_chunks:
             continue
         seen_chunks.add(_passage_key(card.document, seq))
-        existing = _passage_of(grounding.passages, card.document, seq)
+        existing = _find_existing(card.document, seq)
         if existing:
             p_src = existing
         else:
-            k = f"C{len(grounding.passages) + 1}"
+            k = _next_key()
             text = hit.get("text")
             if text is None:
-                found = resolve_chunk(deps.texts, deps.metadatas, card.document, seq, position=c_idx)
+                found = resolve_chunk(
+                    deps.texts,
+                    deps.metadatas,
+                    card.document,
+                    seq,
+                    position=c_idx,
+                    chunk_store=deps.chunk_store,
+                )
                 text = found[1] if found else ""
             p_src = Passage(
                 key=k,
@@ -406,7 +447,7 @@ def develop(
                 text=text,
                 role="source",
             )
-            grounding.passages[k] = p_src
+            new_passages[k] = p_src
         source_passages.append(p_src)
 
     # 3. Prompt passages:
@@ -414,8 +455,8 @@ def develop(
     near_passages: list[Passage] = []
     seen_near_keys: set[str] = set()
     for p in bottleneck.premises:
-        if p.key in grounding.passages and p.key not in seen_near_keys:
-            near_passages.append(grounding.passages[p.key])
+        if p.key in base_passages and p.key not in seen_near_keys:
+            near_passages.append(base_passages[p.key])
             seen_near_keys.add(p.key)
 
     prompt_passages: list[Passage] = near_passages + source_passages
@@ -459,15 +500,17 @@ def develop(
         {"role": "user", "content": user_prompt},
     ]
 
+    _check_cancelled(deps)
     try:
         reply_dict = ask_json(
             lambda msgs: deps.chat(msgs, settings.temperature),
             messages,
             required=required_fields,
+            validator=validate_transfer_reply,
         )
     except Exception:
-        grounding.warnings.append(f"{transfer_id}: the model's reply was not usable JSON; skipped")
-        return None
+        new_warnings.append(f"{transfer_id}: the model's reply was not usable JSON; skipped")
+        return None, new_passages, new_warnings
 
     transfer_warnings: list[str] = []
 
@@ -518,8 +561,14 @@ def develop(
     ]
 
     critique = Critique()
+    _check_cancelled(deps)
     try:
-        crit_dict = ask_json(deps.critic, critique_messages, required=("shape_match",))
+        crit_dict = ask_json(
+            deps.critic,
+            critique_messages,
+            required=("shape_match",),
+            validator=validate_critique_reply,
+        )
         crit_objections_raw = crit_dict.get("objections", [])
         crit_objections = []
         for obj in crit_objections_raw:
@@ -564,6 +613,7 @@ def develop(
 
     # 6. Revision: REVISE_USER goes to deps.chat with the objections
     if critique.objections:
+        _check_cancelled(deps)
         objections_text = "\n".join(f"{i}. {o['text']}" for i, o in enumerate(critique.objections))
         revise_prompt = REVISE_USER.format(
             title=reply_dict.get("title", ""),
@@ -579,6 +629,7 @@ def develop(
                 lambda msgs: deps.chat(msgs, settings.temperature),
                 revise_messages,
                 required=("responses",),
+                validator=validate_revise_reply,
             )
             for item in rev_dict.get("responses", []):
                 idx = item.get("objection")
@@ -590,10 +641,14 @@ def develop(
             # Apply revisions to transfer fields if supplied by the reviser
             rev_mapping = rev_dict.get("mapping") or rev_dict.get("revised_mapping")
             if rev_mapping and isinstance(rev_mapping, list):
-                mapping_list = rev_mapping
+                valid_rows = [r for r in rev_mapping if isinstance(r, dict)]
+                if valid_rows:
+                    mapping_list = valid_rows
             rev_steps = rev_dict.get("steps") or rev_dict.get("revised_steps")
             if rev_steps and isinstance(rev_steps, list):
-                steps_list = rev_steps
+                valid_steps = [s for s in rev_steps if isinstance(s, dict)]
+                if valid_steps:
+                    steps_list = valid_steps
             rev_pred = rev_dict.get("prediction") or rev_dict.get("revised_prediction")
             if rev_pred and isinstance(rev_pred, str):
                 reply_dict["prediction"] = rev_pred
@@ -606,7 +661,45 @@ def develop(
         except Exception as err:
             transfer_warnings.append(f"revision failed for {transfer_id}: {err}")
 
+    # 6b. Verify rebuttals to broken mapping rows with the critic
+    broken_rebuttals = [
+        (i, o)
+        for i, o in enumerate(critique.objections)
+        if o.get("row") is not None and o.get("answered") and not o.get("conceded")
+    ]
+    if settings.verify_rebuttals and broken_rebuttals:
+        rebuttals_text = "\n".join(
+            f"{i}. [Row {o['row']}] Objection: {o['text']}\n   Rebuttal: {o.get('response', '')}"
+            for i, o in broken_rebuttals
+        )
+        verify_prompt = VERIFY_REBUTTAL_USER.format(
+            title=reply_dict.get("title", ""),
+            card_name=card.name,
+            card_mechanism=card_mechanism_str,
+            rebuttals=rebuttals_text,
+        )
+        verify_messages = [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": verify_prompt},
+        ]
+        try:
+            ver_dict = ask_json(
+                deps.critic,
+                verify_messages,
+                required=("verdicts",),
+                validator=validate_verify_rebuttal_reply,
+            )
+            for item in ver_dict.get("verdicts", []):
+                idx = item.get("objection")
+                if isinstance(idx, int) and 0 <= idx < len(critique.objections):
+                    if critique.objections[idx].get("row") is not None:
+                        critique.objections[idx]["rebuttal_accepted"] = bool(item.get("resolved", False))
+                        critique.objections[idx]["rebuttal_reason"] = str(item.get("reason", ""))
+        except Exception as err:
+            transfer_warnings.append(f"rebuttal verification skipped for {transfer_id}: {err}")
+
     # 7. Prior art
+    _check_cancelled(deps)
     summary = reply_dict.get("summary", "")
     try:
         prior_art = deps.prior_art(
@@ -651,7 +744,7 @@ def develop(
         if isinstance(s, dict)
     ]
 
-    return Transfer(
+    transfer = Transfer(
         id=transfer_id,
         bottleneck_id=seed.bottleneck_id,
         card_id=card.card_id,
@@ -674,5 +767,52 @@ def develop(
         scores=None,
         warnings=transfer_warnings,
     )
+    return transfer, new_passages, new_warnings
+
+
+def merge_developed(
+    grounding: Grounding,
+    transfer: Transfer | None,
+    new_passages: dict[str, Passage],
+    new_warnings: list[str],
+) -> Transfer | None:
+    """Merge thread-local passages and warnings into grounding with collision-free canonical keys."""
+    grounding.warnings.extend(new_warnings)
+    key_remap: dict[str, str] = {}
+    for old_key, p in new_passages.items():
+        existing = _passage_of(grounding.passages, p.document, p.seq) if p.seq is not None else None
+        if existing is not None:
+            key_remap[old_key] = existing.key
+            continue
+        if old_key not in grounding.passages:
+            canonical = old_key
+        else:
+            idx = len(grounding.passages) + 1
+            while f"C{idx}" in grounding.passages:
+                idx += 1
+            canonical = f"C{idx}"
+        key_remap[old_key] = canonical
+        grounding.passages[canonical] = replace(p, key=canonical)
+
+    if transfer is not None and key_remap:
+        for prem in transfer.premises:
+            if prem.key in key_remap:
+                prem.key = key_remap[prem.key]
+    return transfer
+
+
+def develop(
+    seed: Seed,
+    n: int,
+    grounding: Grounding,
+    deps: Deps,
+    settings: TransferSettings,
+    checker: PremiseChecker,
+) -> Transfer | None:
+    """Stage S3-S5: Write, judge, critique, and revise one technique transfer."""
+    transfer, new_passages, new_warnings = develop_isolated(
+        seed, n, grounding, deps, settings, checker
+    )
+    return merge_developed(grounding, transfer, new_passages, new_warnings)
 
 

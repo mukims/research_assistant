@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from research_assistant import config
 from research_assistant.transfer import cards, models, premises
 from tests.transfer_fixtures import card
 
@@ -227,3 +228,36 @@ class TestCardRecords(unittest.TestCase):
         d = models.card_to_dict(card("a.pdf", True))
         del d["mechanism"]
         self.assertEqual(models.card_from_dict(d).mechanism, [])
+
+    def test_card_store_prune_removes_stale_documents(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = cards.CardStore(d)
+            store.append("keep.pdf", [card("keep.pdf", True)], np.array([[1.0, 0.0]]))
+            store.append("stale.pdf", [card("stale.pdf", True)], np.array([[0.0, 1.0]]))
+            kept, removed = store.prune({"keep.pdf"})
+            self.assertEqual((kept, removed), (1, 1))
+            self.assertEqual(store.done_documents(), {"keep.pdf"})
+            idx = store.load(check_model=False)
+            self.assertEqual([c.document for c in idx.cards], ["keep.pdf"])
+
+    def test_card_store_check_embedder_rejects_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = cards.CardStore(d)
+            store.save_meta({"embedder": config.EMBED_MODEL})
+            store.check_embedder()
+            store.save_meta({"embedder": "different-embed-model"})
+            with self.assertRaisesRegex(RuntimeError, "mismatch|was embedded with"):
+                store.check_embedder()
+
+    def test_card_index_hybrid_search_boosts_lexical_match(self):
+        c1 = card("a.pdf", True)
+        c1.card_id = "c1"
+        c1.name = "Spectral Estimator"
+        c1.summary = "Computes Chebyshev spectral density moments"
+        c2 = card("b.pdf", True)
+        c2.card_id = "c2"
+        c2.name = "Monte Carlo"
+        c2.summary = "Random walk sampler"
+        idx = cards.CardIndex([c1, c2], [[0.5, 0.5], [0.5, 0.5]])
+        hits = idx.search([0.5, 0.5], k=2, query_text="chebyshev spectral density")
+        self.assertEqual(hits[0][0].card_id, "c1")

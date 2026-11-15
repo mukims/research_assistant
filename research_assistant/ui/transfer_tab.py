@@ -6,9 +6,12 @@ import os
 import streamlit as st
 
 from research_assistant import config
+from research_assistant.shared.log import get_logger
 from research_assistant.transfer.models import RunResult, result_from_dict, result_to_dict
 from research_assistant.transfer.render import render_markdown, render_tree
 from research_assistant.ui.status import _render_live_pipeline_status
+
+logger = get_logger("transfer_tab")
 
 
 TRANSFER_EXAMPLES = [
@@ -37,12 +40,14 @@ def render_transfer_tab():
                 st.session_state["transfer_prefilled_query"] = starter
                 st.rerun()
 
-    prefill = st.session_state.pop("transfer_prefilled_query", "")
+    prefill = st.session_state.pop("transfer_prefilled_query", None)
+    if prefill is not None:
+        st.session_state["transfer_query_input"] = prefill
 
     with st.form("transfer_form"):
         query = st.text_input(
             "Target Problem or Bottleneck",
-            value=prefill,
+            key="transfer_query_input",
             placeholder="e.g. recovering continuous parameters from noisy spectra",
             help="Describe the physical problem, bottleneck, or mathematical challenge.",
         )
@@ -57,11 +62,14 @@ def render_transfer_tab():
 
         run_btn = st.form_submit_button("🚀 Find Cross-Disciplinary Transfers", type="primary", use_container_width=True)
 
-    if run_btn and query.strip():
+    if run_btn and not query.strip():
+        st.warning("Please enter a target problem or bottleneck.")
+    elif run_btn and query.strip():
         with st.status(f"Searching technique transfers for '{query}'…", expanded=True) as status_box:
             st.write("🔍 Identifying candidate problem cards & source methodologies…")
             try:
                 from research_assistant.transfer.engine import default_engine
+                from research_assistant.transfer import store
 
                 def on_progress(done: int, total: int, label: str):
                     status_box.write(f"⚙️ [{done}/{total}] {label}")
@@ -75,9 +83,15 @@ def render_transfer_tab():
                     prior_art_before_year=int(before_year) if before_year else None,
                     progress_cb=on_progress,
                 )
+                try:
+                    saved_path = store.save_result(result)
+                    logger.info("Saved technique transfer run %s to %s", result.run_id, saved_path)
+                except Exception as save_exc:
+                    logger.warning("Could not persist technique transfer run %s: %s", result.run_id, save_exc)
                 st.session_state["latest_transfer_result"] = result_to_dict(result)
                 status_box.update(label="✅ Technique transfer search complete!", state="complete", expanded=False)
             except Exception as exc:
+                logger.exception("Transfer engine execution error for query %r: %s", query.strip(), exc)
                 status_box.update(label=f"❌ Transfer search failed: {exc}", state="error")
                 st.error(f"Transfer engine execution error: {exc}")
 
@@ -98,8 +112,8 @@ def render_transfer_tab():
             with t_tab_tree:
                 mermaid_tree = render_tree(result)
                 st.markdown("#### Methodology Search Tree")
-                from research_assistant.tasks.ui import render_mermaid
-                render_mermaid(mermaid_tree, height=500)
+                from research_assistant.tasks.ui import _render_mermaid_interactive
+                _render_mermaid_interactive(mermaid_tree, height=500)
 
             with t_tab_json:
                 st.json(saved_result_dict)

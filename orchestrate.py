@@ -463,7 +463,8 @@ def main():
         args.query, workers=args.workers, force=args.force, ask=args.ask,
         seed_url=args.seed_url, seed_file=args.seed_file,
         audit_citations=args.audit_citations,
-    ))
+    )
+    )
 
 
 if __name__ == "__main__":
