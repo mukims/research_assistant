@@ -42,3 +42,6 @@ scripts/compile_interview_guide.py
 
 # Design specs, plans and notes: kept on the maintainer's machine, not in the repository
 notimportant/
+
+# Local implementation plans (kept on disk, not in the repo)
+docs/superpowers/plans/
