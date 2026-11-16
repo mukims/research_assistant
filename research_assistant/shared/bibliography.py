@@ -5,9 +5,8 @@ A *reference mark* is a citation fingerprint (volume, page (year); an arXiv id; 
 A paragraph is a *reference entry* when it is short and carries a mark, or carries several
 marks at any length (entries Docling merged into one item). A *run* is a stretch of entries,
 plus short year-bearing continuations of entries Docling split, and only runs of at least
-three entries are treated as a reference list. Calibrated on the Docling cache on 2026-11-07
-(docs/superpowers/plans/2026-11-07-reference-leak.md); change the thresholds only with a new
-calibration.
+three entries are treated as a reference list. Calibrated on the Docling cache on 2026-11-07;
+change the thresholds only with a new calibration.
 """
 
 from __future__ import annotations
