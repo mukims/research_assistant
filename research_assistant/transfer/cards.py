@@ -203,6 +203,53 @@ _SEARCH_STOPWORDS = frozenset({
     "those", "only", "also", "more", "most", "some", "other", "within", "without",
 })
 
+_OPERATOR_CLASSES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "spectral_matrix_operator": (
+        frozenset({"chebyshev", "krylov", "lanczos", "resolvent", "eigenvalue", "diagonalis", "diagonaliz"}),
+        frozenset({"matrix", "sparse", "spectrum", "spectral", "trace", "invert", "inversion", "polynomial", "operator", "hamiltonian", "quadratic", "moment"}),
+    ),
+    "high_dim_state_ansatz": (
+        frozenset({"boltzmann", "rbm", "ansatz", "wavefunction", "contrastive", "bipartite", "entanglement"}),
+        frozenset({"exponential", "amplitude", "markov", "partition", "variational", "latent", "factoriz", "tensor", "sampling", "distribution", "probability", "spin"}),
+    ),
+    "inverse_parameter_recovery": (
+        frozenset({"autoencoder", "auto-encoder", "deconvol", "ill-posed", "illposed", "tomograph", "identifi", "random forest"}),
+        frozenset({"inverse", "invert", "infer", "recover", "reconstruct", "posterior", "bayesian", "unobserved", "hidden", "cause", "effect", "surrogate", "regression", "parameter", "measured", "observable", "response", "uncertainty"}),
+    ),
+    "combinatorial_optimization": (
+        frozenset({"annealing", "evolutionary", "multi-fidelity", "genetic", "branch-and-bound"}),
+        frozenset({"discrete", "relaxation", "branch", "schedule", "escalation", "candidat", "heuristic"}),
+    ),
+    "sequential_dynamics": (
+        frozenset({"autoregressive", "recurrent", "time-series", "timeseries"}),
+        frozenset({"trajectory", "forecast", "propagat", "evolution", "differential", "stochastic", "sequential", "temporal"}),
+    ),
+}
+
+
+def math_signature(text: str) -> set[str]:
+    """Classify text into canonical mathematical/operator problem classes."""
+    if not text:
+        return set()
+    low = text.lower()
+    words = set(re.findall(r"[a-z0-9\-]{3,}", low))
+    matched: set[str] = set()
+    for cls_name, (strong_terms, support_terms) in _OPERATOR_CLASSES.items():
+        if any(any(w.startswith(st) for w in words) for st in strong_terms):
+            matched.add(cls_name)
+            continue
+        support_hits = sum(1 for st in support_terms if any(w.startswith(st) for w in words))
+        if support_hits >= 2:
+            matched.add(cls_name)
+    return matched
+
+
+def card_math_signature(card: Card) -> set[str]:
+    """Return canonical mathematical/operator classes for a technique card."""
+    return math_signature(
+        f"{card.name} {card.problem_solved} {card.inputs} {card.outputs} {' '.join(card.mechanism)}"
+    )
+
 
 def card_search_text(card: Card) -> str:
     """Build composite text for embedding and lexical matching of a technique card."""
@@ -256,6 +303,7 @@ class CardIndex:
             v_norm = 1.0
 
         q_tokens = _search_tokens(query_text) if query_text else set()
+        q_sig = math_signature(query_text) if query_text else set()
 
         for idx, c in enumerate(self.cards):
             if c.document in exclude_documents:
@@ -273,6 +321,10 @@ class CardIndex:
                 c_tokens = _search_tokens(card_search_text(c))
                 lex = len(q_tokens & c_tokens) / len(q_tokens) if c_tokens else 0.0
                 sim = 0.85 * sim + 0.15 * lex
+                if q_sig:
+                    c_sig = card_math_signature(c)
+                    if q_sig & c_sig:
+                        sim += 0.08
             results.append((c, sim))
 
         results.sort(key=lambda x: x[1], reverse=True)

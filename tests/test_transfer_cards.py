@@ -306,3 +306,20 @@ class TestCardRecords(unittest.TestCase):
             self.assertEqual(summary, {"total": 2, "repaired": 2, "already_linked": 0, "unresolved": 0})
             reloaded = store.load(check_model=False).cards
             self.assertEqual([c.evidence.seq for c in reloaded], [4, 2])
+
+    def test_math_signature_boosts_matching_operator_class_in_card_search(self):
+        c_matrix = card("matrix.pdf", True)
+        c_matrix.card_id = "c_matrix"
+        c_matrix.name = "Chebyshev Kernel Polynomial Expansion"
+        c_matrix.problem_solved = "Approximate spectral trace of a large sparse matrix"
+        c_distract = card("distract.pdf", True)
+        c_distract.card_id = "c_distract"
+        c_distract.name = "Hierarchical Softmax Tree"
+        c_distract.problem_solved = "Approximate categorical word probabilities"
+        idx = cards.CardIndex([c_distract, c_matrix], [[0.6, 0.4], [0.6, 0.4]])
+        hits = idx.search(
+            [0.6, 0.4],
+            k=2,
+            query_text="compute eigenvalues and spectral density of sparse matrix operators",
+        )
+        self.assertEqual(hits[0][0].card_id, "c_matrix")

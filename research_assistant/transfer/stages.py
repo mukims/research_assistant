@@ -197,8 +197,8 @@ def ground(
             current_method=current_method,
             generic={lvl: generic[lvl].strip() for lvl in levels} | inverse_form(item),
             premises=resolved_p,
-            # Anything but an explicit false keeps the identifiability gate on.
-            inference=item.get("inference") is not False,
+            # Anything but an explicit false or an explicit forward-problem statement keeps the identifiability gate on.
+            inference=_is_inference_bottleneck(query, statement, item.get("inference")),
         )
         bottlenecks.append(b)
         all_premises_to_check.extend(resolved_p)
@@ -213,6 +213,26 @@ def ground(
         bottlenecks=bottlenecks,
         warnings=warnings,
     )
+
+
+_FORWARD_PROBLEM_RE = re.compile(
+    r"\b(forward\s+problem|forward\s+simulation|forward\s+solver|accelerat\w*\s+the\s+forward)\b",
+    re.IGNORECASE,
+)
+_INVERSE_CUE_RE = re.compile(
+    r"\b(inverse|invert|infer\w*|recover\w*|reconstruct\w*|identifi\w*|deconvol\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_inference_bottleneck(query: str, statement: str, raw_flag: Any) -> bool:
+    """Determine whether a bottleneck is an inverse/inference problem subject to identifiability gating."""
+    if raw_flag is False:
+        return False
+    combined = f"{query} {statement}"
+    if _FORWARD_PROBLEM_RE.search(combined) and not _INVERSE_CUE_RE.search(statement):
+        return False
+    return True
 
 
 def inverse_form(item: dict) -> dict[str, str]:
@@ -240,6 +260,39 @@ def _is_baseline_echo(card_name: str, current_method: str) -> bool:
     if len(c_key) < 6 or len(m_key) < 6:
         return False
     return c_key == m_key or c_key in m_key
+
+
+_GENERIC_DOMAIN_STOPWORDS = frozenset({
+    "method", "methods", "model", "models", "system", "systems", "problem", "problems",
+    "data", "based", "using", "approach", "analysis", "theory", "study", "network",
+    "networks", "learning", "algorithm", "algorithms", "function", "functions", "state",
+    "states", "large", "scale", "high", "low", "fast", "new", "from", "with", "for",
+    "citation", "context", "paper", "source", "target",
+})
+
+
+def _domain_echo_factor(card: Card, near: list[dict], quantities: list[str]) -> float:
+    """Discount factor in [0.85, 1.0] when card's application context/citation echoes the target domain."""
+    near_text = " ".join(str(r.get("citation", "")) for r in near) + " " + " ".join(quantities)
+    target_domain_words = {
+        w.lower()
+        for w in re.findall(r"[a-zA-Z]{5,}", near_text)
+        if w.lower() not in _GENERIC_DOMAIN_STOPWORDS
+    }
+    if len(target_domain_words) < 2:
+        return 1.0
+    card_domain_text = f"{card.citation} {card.context}"
+    card_domain_words = {
+        w.lower()
+        for w in re.findall(r"[a-zA-Z]{5,}", card_domain_text)
+        if w.lower() not in _GENERIC_DOMAIN_STOPWORDS
+    }
+    shared = len(target_domain_words & card_domain_words)
+    if shared >= 3:
+        return 0.85
+    if shared == 2:
+        return 0.92
+    return 1.0
 
 
 def copies_of(near: list[dict], cards: list[Card]) -> set[str]:
@@ -308,11 +361,12 @@ def candidate_cards(
             for rank_idx, (card_obj, score) in enumerate(hits, start=1):
                 if _is_baseline_echo(card_obj.name, b.current_method):
                     continue
+                adj_score = score * _domain_echo_factor(card_obj, grounding.near, b.quantities)
                 # Deduplicate by normalized paper title so duplicate PDFs of the same
                 # paper cannot occupy multiple top-k slots for the same bottleneck.
                 paper_key = _title_key(card_obj.citation) or card_obj.document
-                if paper_key not in best_by_paper or score > best_by_paper[paper_key][1]:
-                    best_by_paper[paper_key] = (card_obj, score, level, rank_idx)
+                if paper_key not in best_by_paper or adj_score > best_by_paper[paper_key][1]:
+                    best_by_paper[paper_key] = (card_obj, adj_score, level, rank_idx)
 
         if not best_by_paper:
             mid_text = b.generic.get("mid", "")

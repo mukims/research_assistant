@@ -229,11 +229,14 @@ def depth_checks(transfer: Transfer, bottleneck: Bottleneck, card: Card) -> dict
         and any(p.document != card.document and (p.accepted or p.partial) for p in transfer.premises)
     )
 
-    # 10. Objections answered: at least one objection, each answered or conceded in >= 5 words
+    # 10. Objections answered: at least one objection, each answered or conceded in >= 5 words,
+    #     and any critic-verified rebuttal was not rejected
     checks["objections_answered"] = (
         bool(transfer.critique and transfer.critique.objections)
         and all(
-            bool(o.get("answered")) and len(str(o.get("response", "")).split()) >= 5
+            bool(o.get("answered"))
+            and len(str(o.get("response", "")).split()) >= 5
+            and o.get("rebuttal_accepted") is not False
             for o in transfer.critique.objections
         )
     )

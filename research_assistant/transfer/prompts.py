@@ -209,7 +209,7 @@ Prediction: {prediction}
 Refuting result: {refuting_result}
 
 Rules:
-1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason; say whether the problem shapes match (yes, partial, no); set identifiability to null if the verdict is right, otherwise to exactly one of the three words "determined", "underdetermined", or "overdetermined" (never add suffixes or prose), and put your reasons in the objections; list your strongest objections.
+1. You are reviewing this transfer to reject it if you can. For each mapping row say holds, breaks or enforce, with a reason (use enforce when an assumption does not hold raw in the target domain but can be satisfied via a concrete mathematical transformation, rescaling, encoding, or regularization; reserve breaks only when the assumption fails fundamentally and cannot be bridged); say whether the problem shapes match (yes, partial, no); set identifiability to null if the verdict is right, otherwise to exactly one of the three words "determined", "underdetermined", or "overdetermined" (never add suffixes or prose), and put your reasons in the objections; list your strongest objections.
 2. kind says what the transfer does to the current method (the baseline): replace it with a different method, augment it with a new component, or tune it (its parameters, ordering, implementation or hardware use) while the method stays the same.
 3. Reply with the JSON object only.
 
@@ -243,7 +243,7 @@ Objections from critic:
 {objections}
 
 Rules:
-1. Each response addresses one objection by its 0-based index. Rebut it by saying why the assumption holds in the target problem, or what change within the source technique's mechanism (or cited passages) enforces it; restating the claim or inventing an unrelated method not on the source card is not a valid rebuttal. Concede only when the transfer cannot work on this point whatever is changed: a conceded objection on a core row rejects the transfer.
+1. Each response addresses one objection by its 0-based index. Rebut it by saying why the assumption holds in the target problem, or by specifying a concrete mathematical bridge / domain adaptation (such as operator rescaling, complex phase splitting, coordinate transformation, or regularization) that enforces the assumption within the source technique's framework; restating the claim or abandoning the source card's core algorithm for an unrelated method is not a valid rebuttal. Concede only when the transfer cannot work on this point whatever mathematical bridge is applied: a conceded objection on a core row rejects the transfer.
 2. If your rebuttals change the mapping, steps, prediction, metric, identifiability, title, or summary, include the updated fields (`revised_mapping`, `revised_steps`, `revised_prediction`, `revised_metric`, `revised_identifiability`, `revised_summary`, `revised_title`) in the JSON object; omit any field that did not change.
 3. Reply with the JSON object only.
 
@@ -301,8 +301,8 @@ Broken-row objections and rebuttals:
 {rebuttals}
 
 Rules:
-1. A rebuttal resolves a broken row ONLY if it stays within the source technique's mechanism (or cited passages) and shows why the assumption holds or can be enforced without inventing an unrelated method.
-2. Restating the claim, hand-waving, or swapping in a different method not on the source card means resolved=false.
+1. A rebuttal resolves a broken row if it either shows why the assumption already holds in the target domain OR specifies a concrete mathematical bridge / domain transformation (e.g. operator rescaling, complex phase parameterization, regularization, or representation encoding) that adapts the target problem to satisfy the source technique's mechanism without discarding the source card's core algorithm.
+2. Restating the claim, hand-waving without a concrete transformation, or swapping in a completely unrelated method not based on the source card means resolved=false.
 3. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:

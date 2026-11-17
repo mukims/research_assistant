@@ -41,6 +41,21 @@ class TestGround(unittest.TestCase):
         g = stages.ground("q", deps, TransferSettings(), PremiseChecker(deps.judge, deps.texts, deps.metadatas))
         self.assertEqual([b.inference for b in g.bottlenecks], [False, True])     # missing means inference
 
+    def test_explicit_forward_problem_query_defaults_inference_to_false(self):
+        reply = json.dumps({"bottlenecks": [
+            {"statement": "Cubic matrix scaling in forward transport simulation", "quantities": ["conductance"],
+             "current_method": "RGF", "generic": {"specific": "a", "mid": "b", "broad": "c"},
+             "premises": [{"claim": "bottleneck fact one", "key": "C1"}]},
+        ]})
+        deps, _ = world(replies={("bottlenecks", 1): reply})
+        g = stages.ground(
+            "Accelerating the forward problem in quantum transport",
+            deps,
+            TransferSettings(),
+            PremiseChecker(deps.judge, deps.texts, deps.metadatas),
+        )
+        self.assertFalse(g.bottlenecks[0].inference)
+
     def test_only_an_inference_bottleneck_keeps_its_inverse_form(self):
         reply = json.dumps({"bottlenecks": [
             {"statement": "Inversion", "quantities": ["q"], "current_method": "m", "inference": True,
@@ -366,3 +381,27 @@ class TestDevelop(unittest.TestCase):
         deps = dataclasses.replace(deps, cards=idx)
         seeds, _ = stages.candidate_cards(g, deps, s)
         self.assertEqual([sd.card.card_id for sd in seeds], ["card_novel"])
+
+    def test_candidate_cards_discounts_same_domain_echo_in_favor_of_cross_domain_card(self):
+        from tests.transfer_fixtures import card
+        c_same_domain = card("same_domain.pdf", True)
+        c_same_domain.card_id = "card_same"
+        c_same_domain.name = "Tight-Binding Defect Solver"
+        c_same_domain.citation = "Disordered Graphene Nanoribbons Conductance Transport"
+        c_same_domain.context = "disordered graphene nanoribbons conductance transport"
+        c_cross_domain = card("cross_domain.pdf", True)
+        c_cross_domain.card_id = "card_cross"
+        c_cross_domain.name = "Variational Autoencoder Surrogate"
+        c_cross_domain.citation = "Acoustic Seismology Inversion"
+        c_cross_domain.context = "seismic waveform inversion in geophysics"
+
+        deps, _, g, _, s, _ = self._go()
+        s = dataclasses.replace(s, bottlenecks=1, techniques_per_bottleneck=2)
+        g.bottlenecks = g.bottlenecks[:1]
+        g.near = [{"document": "n0", "citation": "Disordered Graphene Nanoribbons Conductance Transport"}]
+        g.bottlenecks[0].quantities = ["conductance", "nanoribbons"]
+        # Give same_domain slightly higher raw vector score (0.95 vs 0.90), which the 0.85 domain discount reverses
+        idx = cards.CardIndex([c_same_domain, c_cross_domain], [[0.95, 0.312], [0.90, 0.435]])
+        deps = dataclasses.replace(deps, cards=idx)
+        seeds, _ = stages.candidate_cards(g, deps, s)
+        self.assertEqual(seeds[0].card.card_id, "card_cross")

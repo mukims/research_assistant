@@ -95,7 +95,12 @@ def run_retrieval_case(case: Case, deps: Deps) -> dict[str, Any]:
     """Run F2 retrieval evaluation for a single case using card embeddings and search."""
     query_vec = deps.embed_query(case.generic)
     exclude = set(case.exclude_documents)
-    results = deps.cards.search(query_vec, k=50, exclude_documents=exclude, verified_only=True)
+    try:
+        results = deps.cards.search(
+            query_vec, k=50, exclude_documents=exclude, verified_only=True, query_text=case.generic
+        )
+    except TypeError:
+        results = deps.cards.search(query_vec, k=50, exclude_documents=exclude, verified_only=True)
     seeds = [
         {
             "card_document": c.document,

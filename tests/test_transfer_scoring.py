@@ -150,6 +150,7 @@ class TestScoring(unittest.TestCase):
         s = scoring.score_transfer(t, b, c)
         self.assertEqual(s.set_aside, "core_assumption_breaks")
         self.assertEqual(s.reward, 0.0)
+        self.assertFalse(s.checks["objections_answered"])
 
     def test_premise_quality_shape_factor_and_mechanism_overlap_spread_scores(self):
         t_full, b, c = good_transfer()
