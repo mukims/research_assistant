@@ -33,7 +33,15 @@ def _load_doc_map(metadatas) -> dict[str, str]:
     table_adapter = getattr(metadatas, "table_adapter", None)
     if table_adapter is not None and hasattr(table_adapter, "table"):
         try:
-            arrow_tbl = table_adapter.table.to_arrow(columns=["document", "citation_source"])
+            if hasattr(table_adapter.table, "search"):
+                arrow_tbl = (
+                    table_adapter.table.search()
+                    .select(["document", "citation_source"])
+                    .limit(1_000_000)
+                    .to_arrow()
+                )
+            else:
+                arrow_tbl = table_adapter.table.to_arrow(columns=["document", "citation_source"])
             docs = arrow_tbl.column("document").to_pylist()
             cits = arrow_tbl.column("citation_source").to_pylist()
             for doc, cit in zip(docs, cits):
@@ -74,6 +82,7 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=None, help="Random seed for sampling.")
     parser.add_argument("--limit", type=int, default=None, help="Limit total documents to process.")
     parser.add_argument("--prune-stale", action="store_true", help="Remove cards whose documents are no longer in the active corpus.")
+    parser.add_argument("--repair-links", action="store_true", help="Re-link card evidence seq numbers against the active corpus store without LLM calls.")
 
     args = parser.parse_args(argv)
 
@@ -94,6 +103,17 @@ def main(argv=None) -> int:
         store = CardStore(TRANSFER_DIR)
         kept, removed = store.prune(set(doc_map.keys()))
         print(f"Pruned stale cards: kept {kept}, removed {removed}.")
+
+    if args.repair_links:
+        store = CardStore(TRANSFER_DIR)
+        rep = store.repair_evidence_links(texts=texts, metadatas=metadatas)
+        print(
+            f"Repaired card evidence links: {rep['repaired']} repaired, "
+            f"{rep['already_linked']} already linked, {rep['unresolved']} unresolved "
+            f"(of {rep['total']} total cards)."
+        )
+        if args.documents is None and args.sample is None and args.limit is None:
+            return 0
 
     all_docs = list(doc_map.items())
 

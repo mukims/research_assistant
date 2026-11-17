@@ -268,6 +268,26 @@ class TestDevelop(unittest.TestCase):
         self.assertEqual([(m.source_role, m.target_role) for m in t.mapping], [("rho", "revised target")])
         self.assertEqual([(st.action, st.tool) for st in t.steps], [("Run revised pipeline", "chebyshev_moments")])
 
+    def test_revise_remaps_critic_broken_row_index_when_rows_shift(self):
+        from research_assistant.transfer.scoring import final_rows
+        revise = json.dumps({
+            "responses": [{"objection": 0, "response": "Prepended a new setup row and conceded the broken row.", "concede": True}],
+            "revised_mapping": [
+                {"source_role": "new_prep_role", "target_role": "new_target", "assumption": "a0", "status": "holds", "core": False},
+                {"source_role": "molecular graph", "target_role": "Hamiltonian matrix", "assumption": "a1", "status": "holds", "core": True},
+            ],
+        })
+        deps, log, g, seeds, s, ch = self._go(replies={("revise", 1): revise})
+        deps.critic = lambda m: json.dumps({
+            "shape_match": "yes",
+            "rows": [{"row": 0, "status": "breaks", "reason": "molecular graph fails"}],
+            "objections": [],
+        })
+        t = stages.develop(seeds[0], 1, g, deps, s, ch)
+        f_rows = final_rows(t)
+        self.assertEqual(f_rows[0].status, "holds")
+        self.assertEqual(f_rows[1].status, "breaks")
+
     def test_verify_rebuttals_accepts_and_rejects_broken_row_responses(self):
         revise = json.dumps({"responses": [
             {"objection": 0, "response": "Irrelevant defense.", "concede": False},

@@ -38,6 +38,22 @@ class TestSelect(unittest.TestCase):
             2,
         )
 
+    def test_formalism_section_headings_promoted_when_no_methods_section_exists(self):
+        texts = ["abs", "intro1", "intro2", "form1", "form2", "res1"]
+        metas = [
+            {"document": "d", "type": "text_chunk", "section": s, "section_raw": r}
+            for s, r in [
+                ("abstract", ""),
+                ("introduction", "1. Introduction"),
+                ("introduction", "1. Introduction"),
+                ("other", "2. Theoretical Formalism and Algorithm"),
+                ("other", "2. Theoretical Formalism and Algorithm"),
+                ("results", "3. Results"),
+            ]
+        ]
+        got = cards.select_card_passages("d", "D", texts, metas, max_chars=10_000)
+        self.assertEqual([p.text for p in got], ["abs", "form1", "form2", "intro1", "res1"])
+
 
 class TestBuild(unittest.TestCase):
     def test_a_technique_whose_evidence_does_not_resolve_is_dropped_and_the_rest_verified(self):
@@ -261,3 +277,32 @@ class TestCardRecords(unittest.TestCase):
         idx = cards.CardIndex([c1, c2], [[0.5, 0.5], [0.5, 0.5]])
         hits = idx.search([0.5, 0.5], k=2, query_text="chebyshev spectral density")
         self.assertEqual(hits[0][0].card_id, "c1")
+
+    def test_repair_evidence_links_populates_seq_by_verbatim_span_and_overlap(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = cards.CardStore(d)
+            c1 = card("a.pdf", True)
+            c1.evidence.seq = None
+            c1.evidence.chunk_index = 999  # stale pre-Docling global position
+            c1.evidence.supporting_span = "Chebyshev moments are damped with the Jackson kernel"
+            c2 = card("b.pdf", True)
+            c2.evidence.seq = None
+            c2.evidence.chunk_index = 888
+            c2.evidence.supporting_span = "Contrastive divergence approximates the partition gradient"
+            store.append("a.pdf", [c1], np.array([[1.0, 0.0]]))
+            store.append("b.pdf", [c2], np.array([[0.0, 1.0]]))
+
+            texts = [
+                "Introductory background text",
+                "In our implementation, Chebyshev moments are damped with the Jackson kernel for stability.",
+                "Contrastive-divergence sampling approximates intractable partition function gradients.",
+            ]
+            metas = [
+                {"document": "a.pdf", "type": "text_chunk", "section": "intro", "seq": 0},
+                {"document": "a.pdf", "type": "text_chunk", "section": "methods", "seq": 4},
+                {"document": "b.pdf", "type": "text_chunk", "section": "methods", "seq": 2},
+            ]
+            summary = store.repair_evidence_links(texts=texts, metadatas=metas)
+            self.assertEqual(summary, {"total": 2, "repaired": 2, "already_linked": 0, "unresolved": 0})
+            reloaded = store.load(check_model=False).cards
+            self.assertEqual([c.evidence.seq for c in reloaded], [4, 2])

@@ -341,24 +341,14 @@ def _check_cancelled(deps: Deps) -> None:
         raise pipeline_status.PipelineCancelledError("Technique transfer stopped by user")
 
 
-def develop_isolated(
-    seed: Seed,
-    n: int,
-    grounding: Grounding,
+def _gather_source_passages(
+    card: Card,
+    base_passages: dict[str, Passage],
     deps: Deps,
     settings: TransferSettings,
-    checker: PremiseChecker,
-) -> tuple[Transfer | None, dict[str, Passage], list[str]]:
-    """Thread-safe Stage S3-S5 runner that returns (transfer, new_passages, new_warnings) without mutating grounding."""
-    _check_cancelled(deps)
-
-    transfer_id = f"{seed.bottleneck_id}.T{n}"
-    bottleneck = next((b for b in grounding.bottlenecks if b.id == seed.bottleneck_id), None)
-    if bottleneck is None:
-        return None, {}, [f"{transfer_id}: bottleneck {seed.bottleneck_id} not found"]
-
-    card = seed.card
-    base_passages = dict(grounding.passages)
+    transfer_id: str,
+) -> tuple[list[Passage], dict[str, Passage], list[str]]:
+    """Collect the card's primary evidence passage and additional search passages from its paper."""
     new_passages: dict[str, Passage] = {}
     new_warnings: list[str] = []
 
@@ -371,7 +361,6 @@ def develop_isolated(
     def _find_existing(doc: str, seq_val: int) -> Passage | None:
         return _passage_of(base_passages, doc, seq_val) or _passage_of(new_passages, doc, seq_val)
 
-    # Source passages:
     # 1. Card evidence chunk comes first. If it cannot be found it is reported, never replaced:
     #    citing some other chunk of the paper would misattribute the evidence.
     source_passages: list[Passage] = []
@@ -450,8 +439,302 @@ def develop_isolated(
             new_passages[k] = p_src
         source_passages.append(p_src)
 
-    # 3. Prompt passages:
-    # Passages behind bottleneck premises, then source passages
+    return source_passages, new_passages, new_warnings
+
+
+def _run_critique(
+    reply_dict: dict[str, Any],
+    mapping_list: list[dict],
+    steps_list: list[dict],
+    ident_dict: dict[str, Any],
+    deps: Deps,
+    transfer_id: str,
+    transfer_warnings: list[str],
+) -> Critique:
+    """Run adversarial critique (Stage S4) on a proposed transfer."""
+    mapping_str = "\n".join(
+        f"Row {i}: source_role='{r.get('source_role')}', target_role='{r.get('target_role')}', "
+        f"assumption='{r.get('assumption')}', status='{r.get('status')}', core={r.get('core')}, note='{r.get('note', '')}'"
+        for i, r in enumerate(mapping_list)
+        if isinstance(r, dict)
+    )
+    steps_str = "\n".join(
+        f"Step {i+1}: action='{s.get('action')}', input='{s.get('input')}', output='{s.get('output')}', tool='{s.get('tool')}'"
+        for i, s in enumerate(steps_list)
+        if isinstance(s, dict)
+    )
+
+    critique_prompt = CRITIQUE_USER.format(
+        title=reply_dict.get("title", ""),
+        summary=reply_dict.get("summary", ""),
+        mapping=mapping_str,
+        measurements=ident_dict.get("measurements", ""),
+        unknowns=ident_dict.get("unknowns", ""),
+        symmetries=", ".join(ident_dict.get("symmetries", [])) if isinstance(ident_dict.get("symmetries"), list) else str(ident_dict.get("symmetries", "")),
+        identifiability_verdict=ident_dict.get("verdict", ""),
+        identifiability_argument=ident_dict.get("argument", ""),
+        steps=steps_str,
+        baseline=reply_dict.get("baseline", ""),
+        metric=reply_dict.get("metric", ""),
+        prediction=reply_dict.get("prediction", ""),
+        refuting_result=reply_dict.get("refuting_result", ""),
+    )
+
+    critique_messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": critique_prompt},
+    ]
+
+    _check_cancelled(deps)
+    try:
+        crit_dict = ask_json(
+            deps.critic,
+            critique_messages,
+            required=("shape_match",),
+            validator=validate_critique_reply,
+        )
+        crit_objections_raw = crit_dict.get("objections", [])
+        crit_objections = []
+        for obj in crit_objections_raw:
+            text = obj if isinstance(obj, str) else (obj.get("text", "") if isinstance(obj, dict) else str(obj))
+            crit_objections.append({
+                "text": text,
+                "row": None,
+                "answered": False,
+                "response": "",
+                "conceded": False,
+            })
+        # Each row the critic breaks is also an objection, so the reviser must
+        # rebut it or concede it; scoring reads the answer by its row.
+        for cr in crit_dict.get("rows", []):
+            if not isinstance(cr, dict) or str(cr.get("status", "")).strip().lower() != "breaks":
+                continue
+            idx = cr.get("row")
+            if not (isinstance(idx, int) and 0 <= idx < len(mapping_list) and isinstance(mapping_list[idx], dict)):
+                continue
+            row = mapping_list[idx]
+            crit_objections.append({
+                "text": (
+                    f"Mapping row {idx} ({row.get('source_role', '')} -> {row.get('target_role', '')}) "
+                    f"breaks: {cr.get('reason', '')}"
+                ),
+                "row": idx,
+                "answered": False,
+                "response": "",
+                "conceded": False,
+            })
+        kind = str(crit_dict.get("kind", "")).strip().lower()
+        return Critique(
+            shape_match=crit_dict.get("shape_match", "unknown"),
+            kind=kind if kind in ("replace", "augment", "tune") else "unknown",
+            rows=crit_dict.get("rows", []),
+            identifiability=crit_dict.get("identifiability"),
+            objections=crit_objections,
+        )
+    except Exception as err:
+        transfer_warnings.append(f"critic failed for {transfer_id}: {err}")
+        return Critique()
+
+
+def _remap_critic_rows_after_revision(
+    old_mapping: list[dict],
+    new_mapping: list[dict],
+    critique: Critique,
+) -> None:
+    """Remap critic row indices if revised_mapping reordered, inserted, or dropped rows."""
+    # Map each old row index to its matching index in new_mapping by (source_role, target_role) or source_role
+    old_to_new: dict[int, int] = {}
+    for old_idx, old_row in enumerate(old_mapping):
+        if not isinstance(old_row, dict):
+            continue
+        s_role = str(old_row.get("source_role", "")).strip().lower()
+        t_role = str(old_row.get("target_role", "")).strip().lower()
+        matched_idx = next(
+            (
+                new_idx
+                for new_idx, nr in enumerate(new_mapping)
+                if isinstance(nr, dict)
+                and str(nr.get("source_role", "")).strip().lower() == s_role
+                and str(nr.get("target_role", "")).strip().lower() == t_role
+            ),
+            None,
+        )
+        if matched_idx is None and s_role:
+            matched_idx = next(
+                (
+                    new_idx
+                    for new_idx, nr in enumerate(new_mapping)
+                    if isinstance(nr, dict)
+                    and str(nr.get("source_role", "")).strip().lower() == s_role
+                ),
+                None,
+            )
+        if matched_idx is not None:
+            old_to_new[old_idx] = matched_idx
+
+    for cr in critique.rows:
+        if isinstance(cr, dict) and isinstance(cr.get("row"), int):
+            r_idx = cr["row"]
+            if r_idx in old_to_new:
+                cr["row"] = old_to_new[r_idx]
+            elif r_idx >= len(new_mapping):
+                cr["row"] = -1
+
+    for obj in critique.objections:
+        if isinstance(obj, dict) and isinstance(obj.get("row"), int):
+            r_idx = obj["row"]
+            if r_idx in old_to_new:
+                obj["row"] = old_to_new[r_idx]
+            elif r_idx >= len(new_mapping):
+                obj["row"] = -1
+
+
+def _run_revision(
+    reply_dict: dict[str, Any],
+    critique: Critique,
+    mapping_list: list[dict],
+    steps_list: list[dict],
+    ident_dict: dict[str, Any],
+    deps: Deps,
+    settings: TransferSettings,
+    transfer_id: str,
+    transfer_warnings: list[str],
+) -> tuple[list[dict], list[dict], dict[str, Any]]:
+    """Run revision (Stage S5a) over critic objections and return updated (mapping_list, steps_list, ident_dict)."""
+    if not critique.objections:
+        return mapping_list, steps_list, ident_dict
+
+    _check_cancelled(deps)
+    objections_text = "\n".join(f"{i}. {o['text']}" for i, o in enumerate(critique.objections))
+    revise_prompt = REVISE_USER.format(
+        title=reply_dict.get("title", ""),
+        summary=reply_dict.get("summary", ""),
+        objections=objections_text,
+    )
+    revise_messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": revise_prompt},
+    ]
+    try:
+        rev_dict = ask_json(
+            lambda msgs: deps.chat(msgs, settings.temperature),
+            revise_messages,
+            required=("responses",),
+            validator=validate_revise_reply,
+        )
+        for item in rev_dict.get("responses", []):
+            idx = item.get("objection")
+            if isinstance(idx, int) and 0 <= idx < len(critique.objections):
+                critique.objections[idx]["answered"] = True
+                critique.objections[idx]["response"] = item.get("response", "")
+                critique.objections[idx]["conceded"] = bool(item.get("concede", False))
+
+        # Apply revisions to transfer fields if supplied by the reviser
+        rev_mapping = rev_dict.get("mapping") or rev_dict.get("revised_mapping")
+        if rev_mapping and isinstance(rev_mapping, list):
+            valid_rows = [r for r in rev_mapping if isinstance(r, dict)]
+            if valid_rows:
+                _remap_critic_rows_after_revision(mapping_list, valid_rows, critique)
+                mapping_list = valid_rows
+        rev_steps = rev_dict.get("steps") or rev_dict.get("revised_steps")
+        if rev_steps and isinstance(rev_steps, list):
+            valid_steps = [s for s in rev_steps if isinstance(s, dict)]
+            if valid_steps:
+                steps_list = valid_steps
+        rev_pred = rev_dict.get("prediction") or rev_dict.get("revised_prediction")
+        if rev_pred and isinstance(rev_pred, str):
+            reply_dict["prediction"] = rev_pred
+        rev_summary = rev_dict.get("summary") or rev_dict.get("revised_summary")
+        if rev_summary and isinstance(rev_summary, str):
+            reply_dict["summary"] = rev_summary
+        rev_title = rev_dict.get("title") or rev_dict.get("revised_title")
+        if rev_title and isinstance(rev_title, str):
+            reply_dict["title"] = rev_title
+        rev_metric = rev_dict.get("metric") or rev_dict.get("revised_metric")
+        if rev_metric and isinstance(rev_metric, str):
+            reply_dict["metric"] = rev_metric
+        rev_ident = rev_dict.get("identifiability") or rev_dict.get("revised_identifiability")
+        if isinstance(rev_ident, dict) and rev_ident:
+            ident_dict = {**ident_dict, **rev_ident}
+    except Exception as err:
+        transfer_warnings.append(f"revision failed for {transfer_id}: {err}")
+
+    return mapping_list, steps_list, ident_dict
+
+
+def _verify_broken_rebuttals(
+    reply_dict: dict[str, Any],
+    card: Card,
+    critique: Critique,
+    card_mechanism_str: str,
+    deps: Deps,
+    settings: TransferSettings,
+    transfer_id: str,
+    transfer_warnings: list[str],
+) -> None:
+    """Ask the critic (Stage S5b) whether broken-row rebuttals hold within the source mechanism."""
+    broken_rebuttals = [
+        (i, o)
+        for i, o in enumerate(critique.objections)
+        if o.get("row") is not None and o.get("answered") and not o.get("conceded")
+    ]
+    if not (settings.verify_rebuttals and broken_rebuttals):
+        return
+
+    rebuttals_text = "\n".join(
+        f"{i}. [Row {o['row']}] Objection: {o['text']}\n   Rebuttal: {o.get('response', '')}"
+        for i, o in broken_rebuttals
+    )
+    verify_prompt = VERIFY_REBUTTAL_USER.format(
+        title=reply_dict.get("title", ""),
+        card_name=card.name,
+        card_mechanism=card_mechanism_str,
+        rebuttals=rebuttals_text,
+    )
+    verify_messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": verify_prompt},
+    ]
+    try:
+        ver_dict = ask_json(
+            deps.critic,
+            verify_messages,
+            required=("verdicts",),
+            validator=validate_verify_rebuttal_reply,
+        )
+        for item in ver_dict.get("verdicts", []):
+            idx = item.get("objection")
+            if isinstance(idx, int) and 0 <= idx < len(critique.objections):
+                if critique.objections[idx].get("row") is not None:
+                    critique.objections[idx]["rebuttal_accepted"] = bool(item.get("resolved", False))
+                    critique.objections[idx]["rebuttal_reason"] = str(item.get("reason", ""))
+    except Exception as err:
+        transfer_warnings.append(f"rebuttal verification skipped for {transfer_id}: {err}")
+
+
+def develop_isolated(
+    seed: Seed,
+    n: int,
+    grounding: Grounding,
+    deps: Deps,
+    settings: TransferSettings,
+    checker: PremiseChecker,
+) -> tuple[Transfer | None, dict[str, Passage], list[str]]:
+    """Thread-safe Stage S3-S5 runner that returns (transfer, new_passages, new_warnings) without mutating grounding."""
+    _check_cancelled(deps)
+
+    transfer_id = f"{seed.bottleneck_id}.T{n}"
+    bottleneck = next((b for b in grounding.bottlenecks if b.id == seed.bottleneck_id), None)
+    if bottleneck is None:
+        return None, {}, [f"{transfer_id}: bottleneck {seed.bottleneck_id} not found"]
+
+    card = seed.card
+    base_passages = dict(grounding.passages)
+    source_passages, new_passages, new_warnings = _gather_source_passages(
+        card, base_passages, deps, settings, transfer_id
+    )
+
+    # 3. Prompt passages: passages behind bottleneck premises, then source passages
     near_passages: list[Passage] = []
     seen_near_keys: set[str] = set()
     for p in bottleneck.premises:
@@ -521,182 +804,26 @@ def develop_isolated(
     transfer_warnings.extend(p_warnings)
     judged_premises = checker.check_all(resolved)
 
-    # 5. Critique: CRITIQUE_USER goes to deps.critic
     mapping_list = reply_dict.get("mapping", [])
-    mapping_str = "\n".join(
-        f"Row {i}: source_role='{r.get('source_role')}', target_role='{r.get('target_role')}', "
-        f"assumption='{r.get('assumption')}', status='{r.get('status')}', core={r.get('core')}, note='{r.get('note', '')}'"
-        for i, r in enumerate(mapping_list)
-        if isinstance(r, dict)
-    )
     ident_dict = reply_dict.get("identifiability", {})
     if not isinstance(ident_dict, dict):
         ident_dict = {}
     steps_list = reply_dict.get("steps", [])
-    steps_str = "\n".join(
-        f"Step {i+1}: action='{s.get('action')}', input='{s.get('input')}', output='{s.get('output')}', tool='{s.get('tool')}'"
-        for i, s in enumerate(steps_list)
-        if isinstance(s, dict)
+
+    # 5. Critique
+    critique = _run_critique(
+        reply_dict, mapping_list, steps_list, ident_dict, deps, transfer_id, transfer_warnings
     )
 
-    critique_prompt = CRITIQUE_USER.format(
-        title=reply_dict.get("title", ""),
-        summary=reply_dict.get("summary", ""),
-        mapping=mapping_str,
-        measurements=ident_dict.get("measurements", ""),
-        unknowns=ident_dict.get("unknowns", ""),
-        symmetries=", ".join(ident_dict.get("symmetries", [])) if isinstance(ident_dict.get("symmetries"), list) else str(ident_dict.get("symmetries", "")),
-        identifiability_verdict=ident_dict.get("verdict", ""),
-        identifiability_argument=ident_dict.get("argument", ""),
-        steps=steps_str,
-        baseline=reply_dict.get("baseline", ""),
-        metric=reply_dict.get("metric", ""),
-        prediction=reply_dict.get("prediction", ""),
-        refuting_result=reply_dict.get("refuting_result", ""),
+    # 6. Revision
+    mapping_list, steps_list, ident_dict = _run_revision(
+        reply_dict, critique, mapping_list, steps_list, ident_dict, deps, settings, transfer_id, transfer_warnings
     )
-
-    critique_messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": critique_prompt},
-    ]
-
-    critique = Critique()
-    _check_cancelled(deps)
-    try:
-        crit_dict = ask_json(
-            deps.critic,
-            critique_messages,
-            required=("shape_match",),
-            validator=validate_critique_reply,
-        )
-        crit_objections_raw = crit_dict.get("objections", [])
-        crit_objections = []
-        for obj in crit_objections_raw:
-            text = obj if isinstance(obj, str) else (obj.get("text", "") if isinstance(obj, dict) else str(obj))
-            crit_objections.append({
-                "text": text,
-                "row": None,
-                "answered": False,
-                "response": "",
-                "conceded": False,
-            })
-        # Each row the critic breaks is also an objection, so the reviser must
-        # rebut it or concede it; scoring reads the answer by its row.
-        for cr in crit_dict.get("rows", []):
-            if not isinstance(cr, dict) or str(cr.get("status", "")).strip().lower() != "breaks":
-                continue
-            idx = cr.get("row")
-            if not (isinstance(idx, int) and 0 <= idx < len(mapping_list) and isinstance(mapping_list[idx], dict)):
-                continue
-            row = mapping_list[idx]
-            crit_objections.append({
-                "text": (
-                    f"Mapping row {idx} ({row.get('source_role', '')} -> {row.get('target_role', '')}) "
-                    f"breaks: {cr.get('reason', '')}"
-                ),
-                "row": idx,
-                "answered": False,
-                "response": "",
-                "conceded": False,
-            })
-        kind = str(crit_dict.get("kind", "")).strip().lower()
-        critique = Critique(
-            shape_match=crit_dict.get("shape_match", "unknown"),
-            kind=kind if kind in ("replace", "augment", "tune") else "unknown",
-            rows=crit_dict.get("rows", []),
-            identifiability=crit_dict.get("identifiability"),
-            objections=crit_objections,
-        )
-    except Exception as err:
-        transfer_warnings.append(f"critic failed for {transfer_id}: {err}")
-        critique = Critique()
-
-    # 6. Revision: REVISE_USER goes to deps.chat with the objections
-    if critique.objections:
-        _check_cancelled(deps)
-        objections_text = "\n".join(f"{i}. {o['text']}" for i, o in enumerate(critique.objections))
-        revise_prompt = REVISE_USER.format(
-            title=reply_dict.get("title", ""),
-            summary=reply_dict.get("summary", ""),
-            objections=objections_text,
-        )
-        revise_messages = [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": revise_prompt},
-        ]
-        try:
-            rev_dict = ask_json(
-                lambda msgs: deps.chat(msgs, settings.temperature),
-                revise_messages,
-                required=("responses",),
-                validator=validate_revise_reply,
-            )
-            for item in rev_dict.get("responses", []):
-                idx = item.get("objection")
-                if isinstance(idx, int) and 0 <= idx < len(critique.objections):
-                    critique.objections[idx]["answered"] = True
-                    critique.objections[idx]["response"] = item.get("response", "")
-                    critique.objections[idx]["conceded"] = bool(item.get("concede", False))
-
-            # Apply revisions to transfer fields if supplied by the reviser
-            rev_mapping = rev_dict.get("mapping") or rev_dict.get("revised_mapping")
-            if rev_mapping and isinstance(rev_mapping, list):
-                valid_rows = [r for r in rev_mapping if isinstance(r, dict)]
-                if valid_rows:
-                    mapping_list = valid_rows
-            rev_steps = rev_dict.get("steps") or rev_dict.get("revised_steps")
-            if rev_steps and isinstance(rev_steps, list):
-                valid_steps = [s for s in rev_steps if isinstance(s, dict)]
-                if valid_steps:
-                    steps_list = valid_steps
-            rev_pred = rev_dict.get("prediction") or rev_dict.get("revised_prediction")
-            if rev_pred and isinstance(rev_pred, str):
-                reply_dict["prediction"] = rev_pred
-            rev_summary = rev_dict.get("summary") or rev_dict.get("revised_summary")
-            if rev_summary and isinstance(rev_summary, str):
-                reply_dict["summary"] = rev_summary
-            rev_title = rev_dict.get("title") or rev_dict.get("revised_title")
-            if rev_title and isinstance(rev_title, str):
-                reply_dict["title"] = rev_title
-        except Exception as err:
-            transfer_warnings.append(f"revision failed for {transfer_id}: {err}")
 
     # 6b. Verify rebuttals to broken mapping rows with the critic
-    broken_rebuttals = [
-        (i, o)
-        for i, o in enumerate(critique.objections)
-        if o.get("row") is not None and o.get("answered") and not o.get("conceded")
-    ]
-    if settings.verify_rebuttals and broken_rebuttals:
-        rebuttals_text = "\n".join(
-            f"{i}. [Row {o['row']}] Objection: {o['text']}\n   Rebuttal: {o.get('response', '')}"
-            for i, o in broken_rebuttals
-        )
-        verify_prompt = VERIFY_REBUTTAL_USER.format(
-            title=reply_dict.get("title", ""),
-            card_name=card.name,
-            card_mechanism=card_mechanism_str,
-            rebuttals=rebuttals_text,
-        )
-        verify_messages = [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": verify_prompt},
-        ]
-        try:
-            ver_dict = ask_json(
-                deps.critic,
-                verify_messages,
-                required=("verdicts",),
-                validator=validate_verify_rebuttal_reply,
-            )
-            for item in ver_dict.get("verdicts", []):
-                idx = item.get("objection")
-                if isinstance(idx, int) and 0 <= idx < len(critique.objections):
-                    if critique.objections[idx].get("row") is not None:
-                        critique.objections[idx]["rebuttal_accepted"] = bool(item.get("resolved", False))
-                        critique.objections[idx]["rebuttal_reason"] = str(item.get("reason", ""))
-        except Exception as err:
-            transfer_warnings.append(f"rebuttal verification skipped for {transfer_id}: {err}")
+    _verify_broken_rebuttals(
+        reply_dict, card, critique, card_mechanism_str, deps, settings, transfer_id, transfer_warnings
+    )
 
     # 7. Prior art
     _check_cancelled(deps)

@@ -29,6 +29,10 @@ from research_assistant.transfer.replies import ask_json, resolve_premises
 
 logger = get_logger("transfer")
 _STORE_LOCK = threading.RLock()
+_METHOD_HEADING_RE = re.compile(
+    r"\b(method|methodology|algorithm|formalism|ansatz|formulation|derivation)\b",
+    re.IGNORECASE,
+)
 
 
 def select_card_passages(
@@ -44,7 +48,7 @@ def select_card_passages(
 
     Order:
       1. abstract chunks
-      2. methods chunks
+      2. methods chunks (or formalism/algorithm section_raw chunks when no section=='methods' exists)
       3. first chunk under each section_raw heading not already seen
     Excludes figure images, captions, and non-document chunks.
     Stops before character budget is exceeded.
@@ -64,6 +68,13 @@ def select_card_passages(
     methods_indices = [
         i for i in doc_indices if source_metas[i].get("section") == "methods"
     ]
+    if not methods_indices:
+        methods_indices = [
+            i
+            for i in doc_indices
+            if i not in abstract_indices
+            and _METHOD_HEADING_RE.search(str(source_metas[i].get("section_raw") or ""))
+        ]
 
     # 3. first chunk under each distinct section_raw not already used
     used = set(abstract_indices) | set(methods_indices)
@@ -351,6 +362,138 @@ class CardStore:
             self._write_all_locked(kept_cards, kept_vectors, manifest)
             return len(kept_cards), removed
 
+    def repair_evidence_links(
+        self,
+        chunk_store: ChunkStore | None = None,
+        texts: list[str] | None = None,
+        metadatas: list[dict] | None = None,
+    ) -> dict[str, int]:
+        """Re-link card evidence seq numbers against the active corpus store without LLM calls.
+
+        Matches each card's supporting_span or claim against its document's chunks using
+        verbatim span verification first, then content-word overlap fallback.
+        Returns {"total": N, "repaired": R, "already_linked": A, "unresolved": U}.
+        """
+        from collections import defaultdict
+        from research_assistant.judgement.judge import _content_words, span_is_verbatim
+
+        with _STORE_LOCK:
+            index = self.load(check_model=False)
+            if not index.cards:
+                return {"total": 0, "repaired": 0, "already_linked": 0, "unresolved": 0}
+
+            store = chunk_store or chunk_store_for(texts or [], metadatas or [])
+            by_doc: dict[str, list[tuple[int, str]]] = defaultdict(list)
+
+            # Fast bulk Arrow projection when backed by a LanceDB table
+            table_adapter = getattr(store, "table_adapter", None)
+            bulk_loaded = False
+            if table_adapter is not None and hasattr(table_adapter, "table"):
+                try:
+                    arrow_tbl = (
+                        table_adapter.table.search()
+                        .select(["document", "seq", "text", "stored_form", "section"])
+                        .limit(1_000_000)
+                        .to_arrow()
+                    )
+                    for doc, seq_val, txt, sf, sec in zip(
+                        arrow_tbl.column("document").to_pylist(),
+                        arrow_tbl.column("seq").to_pylist(),
+                        arrow_tbl.column("text").to_pylist(),
+                        arrow_tbl.column("stored_form").to_pylist(),
+                        arrow_tbl.column("section").to_pylist(),
+                    ):
+                        if sf in EXCLUDED_FROM_EVIDENCE or sec == "caption" or not doc:
+                            continue
+                        by_doc[str(doc)].append((int(seq_val), str(txt or "")))
+                    for doc in by_doc:
+                        by_doc[doc].sort(key=lambda x: x[0])
+                    bulk_loaded = True
+                except Exception:
+                    by_doc.clear()
+
+            if not bulk_loaded:
+                for doc in {c.document for c in index.cards if c.document}:
+                    for pos, txt, meta in store.get_document_chunks(doc):
+                        by_doc[doc].append((chunk_seq(meta, pos), str(txt or "")))
+                    by_doc[doc].sort(key=lambda x: x[0])
+
+            repaired = 0
+            already_linked = 0
+            unresolved = 0
+
+            for c in index.cards:
+                ev = c.evidence
+                ev.document = c.document
+                chunks = by_doc.get(c.document, [])
+                if not chunks:
+                    unresolved += 1
+                    continue
+
+                span = (ev.supporting_span or "").strip()
+                claim = (ev.claim or "").strip()
+                chunk_map = dict(chunks)
+
+                # Check if existing seq already points to a verbatim-matching chunk
+                if ev.seq is not None and ev.seq in chunk_map:
+                    cur_txt = chunk_map[ev.seq]
+                    if (span and span_is_verbatim(span, cur_txt)) or (
+                        claim and span_is_verbatim(claim, cur_txt)
+                    ):
+                        already_linked += 1
+                        continue
+
+                found_seq: int | None = None
+                for seq_val, txt in chunks:
+                    if (span and span_is_verbatim(span, txt)) or (
+                        claim and span_is_verbatim(claim, txt)
+                    ):
+                        found_seq = seq_val
+                        break
+
+                if found_seq is None:
+                    target_words = _content_words(span) | _content_words(claim)
+                    if target_words:
+                        best_seq, best_score = None, 0.0
+                        for seq_val, txt in chunks:
+                            cw = _content_words(txt)
+                            score = len(target_words & cw) / len(target_words)
+                            if score > best_score:
+                                best_score, best_seq = score, seq_val
+                        if best_score > 0.0:
+                            found_seq = best_seq
+
+                if found_seq is None and ev.seq is not None and ev.seq in chunk_map:
+                    already_linked += 1
+                    continue
+
+                if found_seq is not None:
+                    if ev.seq == found_seq:
+                        already_linked += 1
+                    else:
+                        ev.seq = found_seq
+                        ev.chunk_index = found_seq
+                        repaired += 1
+                else:
+                    unresolved += 1
+
+            if repaired > 0:
+                manifest = {}
+                if os.path.exists(self.manifest_path):
+                    try:
+                        with open(self.manifest_path, "r", encoding="utf-8") as fh:
+                            manifest = json.load(fh)
+                    except Exception:
+                        manifest = {}
+                self._write_all_locked(index.cards, index.vectors, manifest)
+
+            return {
+                "total": len(index.cards),
+                "repaired": repaired,
+                "already_linked": already_linked,
+                "unresolved": unresolved,
+            }
+
     def append(self, document: str, cards: list[Card], vectors: np.ndarray) -> None:
         """Append cards and vectors for a document, updating manifest atomically."""
         with _STORE_LOCK:
@@ -425,6 +568,7 @@ def build_all(
     all_warnings: list[str] = []
 
     total_docs = len(documents)
+    c_store = chunk_store_for(texts, metadatas)
     for i, (doc, cit) in enumerate(documents, start=1):
         if cancelled():
             break
@@ -434,7 +578,7 @@ def build_all(
             continue
 
         progress(i, total_docs, f"Building cards for: {doc}")
-        passages = select_card_passages(doc, cit, texts, metadatas, max_chars)
+        passages = select_card_passages(doc, cit, texts, metadatas, max_chars, chunk_store=c_store)
         try:
             new_cards, warnings = build_card(
                 doc, cit, passages, chat=chat, checker=checker
