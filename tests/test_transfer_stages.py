@@ -346,3 +346,23 @@ class TestDevelop(unittest.TestCase):
         deps = dataclasses.replace(deps, cards=idx)
         seeds, _ = stages.candidate_cards(g, deps, s)
         self.assertEqual([sd.card.card_id for sd in seeds], ["card_v1", "card_other"])
+
+    def test_candidate_cards_skips_baseline_echo_matching_current_method(self):
+        from tests.transfer_fixtures import card
+        c_echo = card("echo.pdf", True)
+        c_echo.card_id = "card_echo"
+        c_echo.name = "Recursive Green's Function"
+        c_echo.citation = "Echo Paper (2024)"
+        c_novel = card("novel.pdf", True)
+        c_novel.card_id = "card_novel"
+        c_novel.name = "Kernel Polynomial Method"
+        c_novel.citation = "Novel Paper (2024)"
+
+        deps, _, g, _, s, _ = self._go()
+        s = dataclasses.replace(s, bottlenecks=1, techniques_per_bottleneck=2)
+        g.bottlenecks = g.bottlenecks[:1]
+        g.bottlenecks[0].current_method = "Recursive Green's function method"
+        idx = cards.CardIndex([c_echo, c_novel], [[1.0, 0.0], [0.9, 0.1]])
+        deps = dataclasses.replace(deps, cards=idx)
+        seeds, _ = stages.candidate_cards(g, deps, s)
+        self.assertEqual([sd.card.card_id for sd in seeds], ["card_novel"])

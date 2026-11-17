@@ -233,6 +233,15 @@ def _title_key(title: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (title or "").lower())
 
 
+def _is_baseline_echo(card_name: str, current_method: str) -> bool:
+    """Return True when card_name names the bottleneck's own current_method."""
+    c_key = _title_key(card_name)
+    m_key = _title_key(current_method)
+    if len(c_key) < 6 or len(m_key) < 6:
+        return False
+    return c_key == m_key or c_key in m_key
+
+
 def copies_of(near: list[dict], cards: list[Card]) -> set[str]:
     """Documents that hold another copy of a near paper, matched by title.
 
@@ -297,6 +306,8 @@ def candidate_cards(
                     exclude_documents=exclude,
                 )
             for rank_idx, (card_obj, score) in enumerate(hits, start=1):
+                if _is_baseline_echo(card_obj.name, b.current_method):
+                    continue
                 # Deduplicate by normalized paper title so duplicate PDFs of the same
                 # paper cannot occupy multiple top-k slots for the same bottleneck.
                 paper_key = _title_key(card_obj.citation) or card_obj.document

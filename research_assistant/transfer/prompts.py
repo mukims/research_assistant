@@ -74,7 +74,7 @@ Passages:
 {passages}
 
 Rules:
-1. A bottleneck is what makes this problem expensive, ill-posed or data-starved, as the passages show it. List at most {n}.
+1. A bottleneck is what makes this problem expensive, ill-posed or data-starved, as the passages show it. List at most {n}. Every bottleneck must directly obstruct the goal in Query (do not extract unrelated sub-problems mentioned in the passages).
 2. quantities are the quantities the bottleneck limits, as the field names them.
 3. current_method is how the passages solve it today.
 4. generic restates the bottleneck three ways — specific, mid and broad — naming no material, system, organism or field, so that a paper from another field could match it. For an inference bottleneck, generic.inverse adds one sentence saying what unobserved thing is inferred from what measured thing, naming no material, system, field or method; leave it out otherwise.
@@ -244,7 +244,7 @@ Objections from critic:
 
 Rules:
 1. Each response addresses one objection by its 0-based index. Rebut it by saying why the assumption holds in the target problem, or what change within the source technique's mechanism (or cited passages) enforces it; restating the claim or inventing an unrelated method not on the source card is not a valid rebuttal. Concede only when the transfer cannot work on this point whatever is changed: a conceded objection on a core row rejects the transfer.
-2. If your rebuttals change the mapping, steps, prediction, title, or summary, include the updated fields (`revised_mapping`, `revised_steps`, `revised_prediction`, `revised_summary`, `revised_title`) in the JSON object; omit any field that did not change.
+2. If your rebuttals change the mapping, steps, prediction, metric, identifiability, title, or summary, include the updated fields (`revised_mapping`, `revised_steps`, `revised_prediction`, `revised_metric`, `revised_identifiability`, `revised_summary`, `revised_title`) in the JSON object; omit any field that did not change.
 3. Reply with the JSON object only.
 
 Format your response as a JSON object matching this schema:
@@ -275,6 +275,14 @@ Format your response as a JSON object matching this schema:
     }}
   ],
   "revised_prediction": "Optional updated prediction",
+  "revised_metric": "Optional updated metric",
+  "revised_identifiability": {{
+    "measurements": "Measurements available",
+    "unknowns": "Unknowns to be determined",
+    "symmetries": ["Symmetry 1"],
+    "verdict": "determined",
+    "argument": "Updated argument for why measurements determine unknowns"
+  }},
   "revised_summary": "Optional updated summary",
   "revised_title": "Optional updated title"
 }}

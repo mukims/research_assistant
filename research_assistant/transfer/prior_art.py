@@ -114,6 +114,32 @@ def default_get_text(url: str, params: dict) -> str:
     return resp.text
 
 
+_QUERY_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "into", "when",
+    "where", "which", "over", "under", "between", "through", "using", "used",
+    "via", "such", "than", "each", "both", "all", "any", "are", "was", "were",
+    "in", "on", "of", "to", "by", "as", "at", "an", "or",
+})
+
+
+def _build_prior_art_query(technique_name: str, quantities: list[str]) -> str:
+    """Build a concise search query for OpenAlex and arXiv prior-art lookup."""
+    raw = f"{technique_name} {' '.join(quantities[:2])}".strip()
+    words = raw.split()
+    if len(words) <= 8:
+        return raw
+    tech_tokens = [
+        w for w in re.findall(r"[a-zA-Z0-9\-]+", technique_name)
+        if w.lower() not in _QUERY_STOPWORDS and len(w) >= 3
+    ][:5]
+    quant_tokens = [
+        w for w in re.findall(r"[a-zA-Z0-9\-]+", " ".join(quantities[:2]))
+        if w.lower() not in _QUERY_STOPWORDS and len(w) >= 3
+    ][:3]
+    combined = tech_tokens + [w for w in quant_tokens if w.lower() not in {t.lower() for t in tech_tokens}]
+    return " ".join(combined) if combined else raw
+
+
 class PriorArtClient:
     """Client for checking prior art across OpenAlex and arXiv."""
 
@@ -139,14 +165,14 @@ class PriorArtClient:
         """
         Check literature for prior art combining the technique and quantities.
 
-        1. Query is '{technique_name} {quantities[:2]}'.
+        1. Query is built via _build_prior_art_query(technique_name, quantities[:2]).
         2. Searches OpenAlex and arXiv.
         3. Drops hits with year >= before_year.
         4. Scores hits by cosine similarity between summary and title+abstract.
         5. Assigns status: done_before, partial, not_found, or unchecked.
         """
         try:
-            query = f"{technique_name} {' '.join(quantities[:2])}".strip()
+            query = _build_prior_art_query(technique_name, quantities)
 
             oa_params: dict[str, str | int] = {
                 "search": query,

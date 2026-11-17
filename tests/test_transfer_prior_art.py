@@ -55,3 +55,12 @@ class TestPriorArt(unittest.TestCase):
             prior_art.PriorArtClient(boom, boom, lambda t: [[1.0]] * len(t)).check("x", [], "s").status,
             "unchecked",
         )
+
+    def test_verbose_technique_query_is_distilled_to_concise_keywords(self):
+        q = prior_art._build_prior_art_query(
+            "Empirical risk minimization over compact regression classes in infinite-dimensional spaces",
+            ["electrical conductance spectrum", "impurity disorder concentration"],
+        )
+        self.assertLessEqual(len(q.split()), 8)
+        self.assertIn("Empirical", q)
+        self.assertNotIn("over", q.split())

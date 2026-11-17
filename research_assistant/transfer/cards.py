@@ -195,9 +195,22 @@ def build_card(
     return cards, warnings
 
 
+_SEARCH_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "into", "when",
+    "where", "which", "over", "under", "between", "through", "using", "used",
+    "via", "such", "than", "each", "both", "all", "any", "are", "was", "were",
+    "has", "have", "had", "can", "may", "will", "not", "its", "their", "these",
+    "those", "only", "also", "more", "most", "some", "other", "within", "without",
+})
+
+
 def card_search_text(card: Card) -> str:
     """Build composite text for embedding and lexical matching of a technique card."""
-    parts = [card.problem_solved.strip()]
+    parts = []
+    if card.name:
+        parts.append(card.name.strip())
+    if card.problem_solved:
+        parts.append(card.problem_solved.strip())
     if card.inputs:
         parts.append(f"Inputs: {card.inputs.strip()}")
     if card.outputs:
@@ -210,7 +223,11 @@ def card_search_text(card: Card) -> str:
 
 
 def _search_tokens(text: str) -> set[str]:
-    return {w.lower() for w in re.findall(r"[a-zA-Z0-9]{3,}", text or "")}
+    return {
+        w.lower()
+        for w in re.findall(r"[a-zA-Z0-9]{3,}", text or "")
+        if w.lower() not in _SEARCH_STOPWORDS
+    }
 
 
 class CardIndex:
