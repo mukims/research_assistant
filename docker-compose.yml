@@ -1,0 +1,40 @@
+services:
+  grobid:
+    image: grobid/grobid:0.8.1
+    container_name: grobid
+    ports:
+      - "127.0.0.1:8070:8070"
+    init: true
+    ulimits:
+      core: 0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8070/api/isalive"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  marvin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: marvin-app
+    ports:
+      - "127.0.0.1:${PORT:-8501}:8501"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - GROBID_SERVER=${GROBID_SERVER:-http://grobid:8070}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - CITATION_DATA_DIR=/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./workspace_runs:/app/workspace_runs
+    depends_on:
+      grobid:
+        condition: service_started
+    restart: unless-stopped

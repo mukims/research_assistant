@@ -6,7 +6,64 @@ build-backend = "setuptools.build_meta"
 name = "research-assistant"
 version = "0.1.0"
 description = "Multi-agent pipeline that builds a citable knowledge base from physics papers."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Shardul Mukim"}]
 requires-python = ">=3.10,<3.13"
+
+[project.urls]
+Homepage = "https://github.com/mukims/research_assistant"
+Repository = "https://github.com/mukims/research_assistant"
+
+[project.scripts]
+marvin-orchestrate = "orchestrate:main"
+marvin-tasks = "orchestrate_tasks:main"
+marvin-watch = "watch:main"
+
+[project.optional-dependencies]
+app = [
+    "streamlit==1.65.0",
+    "langgraph==1.2.15",
+    "openai==3.31.0",
+    "huggingface-hub==1.33.0",
+    "ollama==0.6.3",
+    "langchain-ollama==1.1.0",
+    "requests==2.34.2",
+    "grobid-client-python==0.2.0",
+    "beautifulsoup4==4.15.0",
+    "lxml==6.1.3",
+    "PyMuPDF==1.28.2",
+    "numpy==2.2.6",
+    "docling==2.133.0",
+    "lancedb==0.41.0",
+    "pyarrow==25.0.1",
+    "snowballstemmer==3.1.1",
+    "pysbd==0.3.4",
+    "watchdog==6.0.0",
+    "python-dotenv>=1.0",
+]
+test = [
+    "beautifulsoup4==4.15.0",
+    "lxml==6.1.3",
+    "langgraph==1.2.15",
+    "streamlit==1.65.0",
+    "PyMuPDF==1.28.2",
+    "lancedb==0.41.0",
+    "pyarrow==25.0.1",
+    "ollama==0.6.3",
+    "openai==3.31.0",
+    "grobid-client-python==0.2.0",
+    "pytest~=9.1",
+    "numpy~=2.2.6",
+    "requests~=2.32",
+    "watchdog~=6.0",
+    "snowballstemmer~=3.1",
+    "pysbd~=0.3",
+    "python-dotenv>=1.0",
+]
+
+[tool.setuptools]
+py-modules = ["app", "orchestrate", "orchestrate_tasks", "watch"]
 
 [tool.setuptools.packages.find]
 include = ["research_assistant*"]

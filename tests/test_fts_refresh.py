@@ -11,7 +11,10 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import lancedb
+try:
+    import lancedb
+except ImportError:  # CI or light environments without lancedb
+    lancedb = None
 
 from research_assistant.shared import ingestion as ing
 from research_assistant.shared.lance_store import LanceTableAdapter, get_papers_schema
@@ -25,6 +28,7 @@ def _rows(start, n, text="ordinary filler sentence"):
     } for i in range(start, start + n)]
 
 
+@unittest.skipIf(lancedb is None, "lancedb is not installed")
 class TestEnsureFtsIndex(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_fts_")

@@ -10,7 +10,10 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-import lancedb
+try:
+    import lancedb
+except ImportError:  # CI or light environments without lancedb
+    lancedb = None
 
 from research_assistant.shared.lance_store import LanceTableAdapter, get_papers_schema
 
@@ -23,6 +26,7 @@ def _rows(start, n):
     } for i in range(start, start + n)]
 
 
+@unittest.skipIf(lancedb is None, "lancedb is not installed")
 class TestCompactIfFragmented(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_lance_compact_")

@@ -171,7 +171,8 @@ class TestChallengerLanceDBIntegrity(unittest.TestCase):
         table = client.open_table(COLLECTION_NAME)
 
         sample = table.head(5).to_pydict()
-        self.assertEqual(len(sample["id"]), 5)
+        ids = sample.get("chunk_id") or sample.get("id")
+        self.assertEqual(len(ids), 5)
         self.assertEqual(len(sample["text"]), 5)
         self.assertEqual(len(sample["document"]), 5)
         for doc in sample["text"]:
