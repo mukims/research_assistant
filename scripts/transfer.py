@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research_assistant import config
 from research_assistant.shared import pipeline_status
-from research_assistant.transfer import engine, stages, store
+from research_assistant.transfer import engine, scout, stages, store
 from research_assistant.transfer.deps import TransferSettings
 from research_assistant.transfer.premises import PremiseChecker
 
@@ -20,6 +20,9 @@ from research_assistant.transfer.premises import PremiseChecker
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Find cross-disciplinary technique transfers for a research question.")
     parser.add_argument("--query", "-q", required=True, help="Research question or problem statement.")
+    parser.add_argument("--source-topic", "-s", default="", help="Optional source discipline or second topic to bridge techniques from.")
+    parser.add_argument("--scout", action="store_true", help="Enable active LLM-guided discovery (propose external techniques & fetch missing OA papers/cards).")
+    parser.add_argument("--scout-max-papers", type=int, default=config.TRANSFER_SCOUT_MAX_PAPERS, help="Max open-access papers to fetch per scout phase.")
     parser.add_argument("--bottlenecks", type=int, default=config.TRANSFER_BOTTLENECKS, help="Max bottlenecks to identify.")
     parser.add_argument("--techniques", type=int, default=config.TRANSFER_TECHNIQUES_PER_BOTTLENECK, help="Max technique cards per bottleneck.")
     parser.add_argument("--exclude", nargs="*", default=[], help="Documents to exclude from transfer sources and near set.")
@@ -45,25 +48,59 @@ def main(argv=None) -> int:
         techniques_per_bottleneck=args.techniques,
         exclude_documents=frozenset(args.exclude),
         prior_art_before_year=args.before_year,
+        source_topic=args.source_topic.strip(),
+        enable_scout=bool(args.scout),
+        scout_max_papers=args.scout_max_papers,
     )
 
     deps = engine.live_deps()
 
     if args.show_cards:
-        checker = PremiseChecker(deps.judge, deps.texts, deps.metadatas)
+        checker = PremiseChecker(deps.judge, deps.texts, deps.metadatas, chunk_store=deps.chunk_store)
         try:
             grounding = stages.ground(args.query, deps, settings, checker)
-            seeds, warnings = stages.candidate_cards(grounding, deps, settings)
         except stages.CorpusCoverageError as exc:
-            sys.stderr.write(f"{exc}\n")
-            return 3
+            if not settings.enable_scout:
+                sys.stderr.write(f"{exc}\n")
+                return 3
+            t_docs, fb_grounding, _ = scout.scout_target_topic(
+                args.query, deps, settings, existing_docs=scout.known_corpus_documents(deps)
+            )
+            grounding = None
+            if t_docs:
+                deps = scout.reload_live_deps(deps)
+                checker = PremiseChecker(deps.judge, deps.texts, deps.metadatas, chunk_store=deps.chunk_store)
+                try:
+                    grounding = stages.ground(args.query, deps, settings, checker)
+                except stages.CorpusCoverageError:
+                    grounding = None
+            if grounding is None:
+                if fb_grounding is not None:
+                    grounding = fb_grounding
+                else:
+                    sys.stderr.write(f"{exc}\n")
+                    return 3
+
+        leads = []
+        if settings.enable_scout or settings.source_topic:
+            leads, _ = scout.propose_technique_leads(args.query, grounding, deps, settings)
+            if settings.enable_scout and leads:
+                deps, _, _, _ = scout.materialize_leads_into_cards(
+                    leads, deps, settings, existing_docs=scout.known_corpus_documents(deps)
+                )
+
+        seeds, warnings = stages.candidate_cards(grounding, deps, settings, leads=leads)
 
         sys.stdout.write(f"Query: {args.query}\n")
+        if settings.source_topic:
+            sys.stdout.write(f"Source topic: {settings.source_topic}\n")
         for b in grounding.bottlenecks:
             sys.stdout.write(f"\nBottleneck {b.id}: {b.statement}\n")
             sys.stdout.write(f"  specific: {b.generic.get('specific')}\n")
             sys.stdout.write(f"  mid:      {b.generic.get('mid')}\n")
             sys.stdout.write(f"  broad:    {b.generic.get('broad')}\n")
+            for ld in [x for x in leads if x.bottleneck_id == b.id]:
+                sys.stdout.write(f"  * Guidance [{ld.technique_name} / {ld.source_discipline}]: {ld.resolution_guidance}\n")
             b_seeds = [s for s in seeds if s.bottleneck_id == b.id]
             for s in b_seeds:
                 sys.stdout.write(f"  - [{s.level} #{s.rank}] score={s.score:.3f}: {s.card.name} ({s.card.document})\n")

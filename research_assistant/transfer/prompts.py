@@ -128,7 +128,7 @@ Outputs: {card_outputs}
 Assumptions: {card_assumptions}
 Mechanism:
 {card_mechanism}
-
+{llm_guidance_block}
 Passages:
 {passages}
 
@@ -316,5 +316,78 @@ Format your response as a JSON object matching this schema:
   ]
 }}
 """
+
+
+SCOUT_TARGET_USER = """TASK: scout_target
+The local corpus lacks sufficient papers covering the target research problem below.
+Formulate 2 to 3 concise, high-recall scholarly search queries (for arXiv and OpenAlex, 3 to 7 keywords each) to fetch foundational or methodological papers describing this target problem and its core computational/experimental bottlenecks.
+Also provide up to {n} provisional technical bottlenecks so the pipeline can reason about the problem's mathematical structure even if open-access PDFs are scarce.
+
+Target problem: {query}
+
+Rules:
+1. Search queries must use standard scholarly terminology (3 to 7 keywords, no boolean operators or quotes).
+2. Provisional bottlenecks must state what makes the target problem expensive, ill-posed, or intractable, the quantities involved, the standard baseline method, whether it is an inverse/inference problem, and generic restatements (specific, mid, broad) without domain-specific nouns.
+3. Reply with the JSON object only.
+
+Format your response as a JSON object matching this schema:
+{{
+  "search_queries": [
+    "concise scholarly query 1",
+    "concise scholarly query 2"
+  ],
+  "provisional_bottlenecks": [
+    {{
+      "statement": "What makes this problem difficult",
+      "quantities": ["quantity1", "quantity2"],
+      "current_method": "Standard baseline method in this field",
+      "inference": true,
+      "generic": {{
+        "specific": "Restatement without field nouns at specific level",
+        "mid": "Restatement at mid level",
+        "broad": "Restatement at broad level",
+        "inverse": "For an inference bottleneck: infer unobserved X from measured Y"
+      }}
+    }}
+  ]
+}}
+"""
+
+
+SCOUT_TECHNIQUES_USER = """TASK: scout_techniques
+Suggest concrete cross-disciplinary techniques that can resolve the target bottlenecks below, explain how each technique resolves the bottleneck, and provide targeted scholarly search queries to fetch source papers for those techniques.
+
+Target problem: {query}
+{source_topic_directive}
+
+Bottlenecks:
+{bottlenecks}
+
+Rules:
+1. For each bottleneck, propose up to {k} concrete techniques (algorithms, mathematical operators, statistical estimators, variational/generative parameterizations, or experimental protocols) from outside the target problem's immediate baseline methods.
+2. If a Source discipline / topic constraint is given above, draw techniques specifically from that discipline/topic and explain the mathematical bridge to the target bottleneck. Otherwise, select the strongest mathematically isomorphic techniques from external disciplines (e.g., numerical linear algebra, inverse problems, signal processing, statistical physics, machine learning, control theory, geophysics, bioinformatics, optics).
+3. resolution_guidance must concretely explain (in 2 to 4 sentences):
+   - how the external technique's mechanism resolves the bottleneck's scaling/ill-posedness limitation;
+   - what mathematical bridge or transformation adapts the target problem's objects to satisfy the technique's assumptions.
+4. search_queries must give 2 concise scholarly queries (3 to 7 keywords each, no quotes or boolean operators) to find foundational or methodological open-access papers on that technique in its source discipline.
+5. Reply with the JSON object only.
+
+Format your response as a JSON object matching this schema:
+{{
+  "leads": [
+    {{
+      "bottleneck_id": "B1",
+      "technique_name": "Canonical name of the external technique",
+      "source_discipline": "External field or topic where this technique originates",
+      "resolution_guidance": "Concrete explanation of how this technique resolves the bottleneck and what mathematical transformation bridges the two domains.",
+      "search_queries": [
+        "concise technique query 1",
+        "concise technique query 2"
+      ]
+    }}
+  ]
+}}
+"""
+
 
 

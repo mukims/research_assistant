@@ -19,6 +19,7 @@ from research_assistant.transfer.models import (
     Premise,
     PriorArt,
     Step,
+    TechniqueLead,
     Transfer,
 )
 from research_assistant.transfer.chunk_store import chunk_seq
@@ -315,18 +316,38 @@ class Seed:
     score: float
     level: str
     rank: int
+    guidance: str = ""
+
+
+def _topic_match_bonus(card: Card, source_topic: str) -> float:
+    """Bonus when a card's discipline/citation/context/method matches a requested source_topic."""
+    if not source_topic or not source_topic.strip():
+        return 0.0
+    topic_words = {
+        w.lower()
+        for w in re.findall(r"[a-zA-Z0-9]{4,}", source_topic)
+        if w.lower() not in _GENERIC_DOMAIN_STOPWORDS
+    }
+    if not topic_words:
+        return 0.0
+    card_text = f"{card.name} {card.citation} {card.context} {card.problem_solved}".lower()
+    card_words = set(re.findall(r"[a-zA-Z0-9]{4,}", card_text))
+    overlap = len(topic_words & card_words) / len(topic_words)
+    return 0.12 * overlap
 
 
 def candidate_cards(
     grounding: Grounding,
     deps: Deps,
     settings: TransferSettings,
+    leads: list[TechniqueLead] | None = None,
 ) -> tuple[list[Seed], list[str]]:
     """
     Stage S2: Retrieve and rank candidate technique cards for each bottleneck.
 
-    1. For each level in ("specific", "mid", "broad"), search cards index.
-    2. Merge hits by card_id keeping the highest similarity score, level, and 1-based rank.
+    1. For each level in ("specific", "mid", "broad", "inverse") and any LLM-proposed TechniqueLead,
+       search the cards index.
+    2. Merge hits by paper title keeping the highest similarity score, level, rank, and LLM guidance.
     3. Keep top settings.techniques_per_bottleneck cards per bottleneck.
     4. Warn if no verified cards found for a bottleneck.
     """
@@ -334,23 +355,33 @@ def candidate_cards(
     exclude = frozenset(near_docs | copies_of(grounding.near, deps.cards.cards) | set(settings.exclude_documents))
     seeds: list[Seed] = []
     warnings: list[str] = []
+    leads_list = leads or []
 
     for b in grounding.bottlenecks:
         if deps.cancelled():
             raise pipeline_status.PipelineCancelledError("Technique transfer stopped by user")
-        best_by_paper: dict[str, tuple[Card, float, str, int]] = {}
+        best_by_paper: dict[str, tuple[Card, float, str, int, str]] = {}
 
+        search_specs: list[tuple[str, str, str, set[str]]] = []
         for level in ("specific", "mid", "broad", "inverse"):
             generic_text = b.generic.get(level, "")
-            if not generic_text:
-                continue
-            query_vec = deps.embed_query(generic_text)
+            if generic_text:
+                search_specs.append((level, generic_text, "", set()))
+
+        for ld in leads_list:
+            if ld.bottleneck_id == b.id:
+                lead_q = f"{ld.technique_name}. {ld.resolution_guidance}".strip()
+                guidance_str = f"[{ld.technique_name} — {ld.source_discipline}] {ld.resolution_guidance}"
+                search_specs.append(("llm_guided", lead_q, guidance_str, set(ld.built_card_ids)))
+
+        for level, query_str, guidance_str, lead_card_ids in search_specs:
+            query_vec = deps.embed_query(query_str)
             try:
                 hits = deps.cards.search(
                     query_vec,
                     settings.cards_per_query,
                     exclude_documents=exclude,
-                    query_text=generic_text,
+                    query_text=query_str,
                 )
             except TypeError:
                 hits = deps.cards.search(
@@ -362,11 +393,21 @@ def candidate_cards(
                 if _is_baseline_echo(card_obj.name, b.current_method):
                     continue
                 adj_score = score * _domain_echo_factor(card_obj, grounding.near, b.quantities)
+                adj_score += _topic_match_bonus(card_obj, settings.source_topic)
+                if level == "llm_guided":
+                    if card_obj.card_id in lead_card_ids:
+                        adj_score += 0.12
+                    else:
+                        adj_score += 0.05
                 # Deduplicate by normalized paper title so duplicate PDFs of the same
                 # paper cannot occupy multiple top-k slots for the same bottleneck.
                 paper_key = _title_key(card_obj.citation) or card_obj.document
-                if paper_key not in best_by_paper or adj_score > best_by_paper[paper_key][1]:
-                    best_by_paper[paper_key] = (card_obj, adj_score, level, rank_idx)
+                prev = best_by_paper.get(paper_key)
+                if prev is None or adj_score > prev[1]:
+                    kept_guidance = guidance_str or (prev[4] if prev else "")
+                    best_by_paper[paper_key] = (card_obj, adj_score, level, rank_idx, kept_guidance)
+                elif guidance_str and not prev[4]:
+                    best_by_paper[paper_key] = (prev[0], prev[1], prev[2], prev[3], guidance_str)
 
         if not best_by_paper:
             mid_text = b.generic.get("mid", "")
@@ -376,7 +417,7 @@ def candidate_cards(
         sorted_candidates = sorted(best_by_paper.values(), key=lambda x: round(x[1], 8), reverse=True)
         top_candidates = sorted_candidates[: settings.techniques_per_bottleneck]
 
-        for card_obj, score, level, rank_idx in top_candidates:
+        for card_obj, score, level, rank_idx, guidance_str in top_candidates:
             seeds.append(
                 Seed(
                     bottleneck_id=b.id,
@@ -384,6 +425,7 @@ def candidate_cards(
                     score=score,
                     level=level,
                     rank=rank_idx,
+                    guidance=guidance_str,
                 )
             )
 
@@ -812,6 +854,11 @@ def develop_isolated(
     bottleneck_premises_str = "\n".join(f"- {p.claim} ({p.key})" for p in bottleneck.premises)
     passages_str = format_passages(prompt_passages, settings.passage_max_chars)
     card_mechanism_str = "\n".join(f"- {step}" for step in card.mechanism) if card.mechanism else "- N/A"
+    guidance_block = (
+        f"\nLLM Cross-Disciplinary Guidance:\n{seed.guidance}\n"
+        if seed.guidance
+        else ""
+    )
 
     user_prompt = TRANSFER_USER.format(
         bottleneck_statement=bottleneck.statement,
@@ -826,6 +873,7 @@ def develop_isolated(
         card_outputs=card.outputs,
         card_assumptions=", ".join(card.assumptions),
         card_mechanism=card_mechanism_str,
+        llm_guidance_block=guidance_block,
         passages=passages_str,
     )
 

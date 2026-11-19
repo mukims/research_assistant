@@ -16,14 +16,16 @@ from research_assistant.shared.db import load_search_resources
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
 from research_assistant.shared.search import hybrid_search
+from research_assistant.transfer import scout
 from research_assistant.transfer.cards import CardStore
 from research_assistant.transfer.chunk_store import chunk_store_for
 from research_assistant.transfer.deps import Deps, TransferSettings
-from research_assistant.transfer.models import Card, RunResult, Transfer, new_run_id
+from research_assistant.transfer.models import Card, RunResult, TechniqueLead, Transfer, new_run_id
 from research_assistant.transfer.premises import PremiseChecker
 from research_assistant.transfer.prior_art import PriorArtClient
 from research_assistant.transfer.scoring import rank, score_transfer
 from research_assistant.transfer.stages import (
+    CorpusCoverageError,
     Seed,
     candidate_cards,
     develop,
@@ -113,8 +115,9 @@ def estimate_calls(settings: TransferSettings) -> dict[str, int]:
     """Estimate model and judge call counts for a transfer run with given settings."""
     b = settings.bottlenecks
     t = settings.techniques_per_bottleneck
+    scout_llm = (2 if settings.enable_scout else 0) or (1 if settings.source_topic.strip() else 0)
     return {
-        "llm": 2 + 2 * b * t,
+        "llm": 2 + 2 * b * t + scout_llm,
         "critic": b * t,
         "judge_low": 1 * b + 2 * b * t,
         "judge_high": 3 * b + 4 * b * t,
@@ -125,6 +128,9 @@ def run_best_of_n(
     query: str,
     deps: Deps,
     settings: TransferSettings | None = None,
+    *,
+    card_dir: str | None = None,
+    scout_hooks: dict | None = None,
 ) -> RunResult:
     """Run best-of-N technique transfer search across candidate cards."""
     if settings is None:
@@ -134,11 +140,13 @@ def run_best_of_n(
     calls_lock = threading.Lock()
     calls = {"llm": 0, "critic": 0, "judge": 0, "embed": 0, "prior_art": 0}
     logger.info(
-        "Starting technique transfer run for query=%r (bottlenecks=%d, techniques=%d, cards_per_query=%d)",
+        "Starting technique transfer run for query=%r (bottlenecks=%d, techniques=%d, cards_per_query=%d, scout=%s, source_topic=%r)",
         query,
         settings.bottlenecks,
         settings.techniques_per_bottleneck,
         settings.cards_per_query,
+        settings.enable_scout,
+        settings.source_topic,
     )
 
     def _inc(key: str) -> None:
@@ -191,11 +199,81 @@ def run_best_of_n(
         chunk_store=wrapped_deps.chunk_store,
     )
 
-    # 1. Grounding
-    grounding = ground(query, wrapped_deps, settings, checker)
+    scout_warnings: list[str] = []
+    target_fetched: list[str] = []
+    source_fetched: list[str] = []
+    cards_built = 0
+    leads: list[TechniqueLead] = []
+    hooks = scout_hooks or {}
+
+    # 1. Grounding (with automatic target literature scouting if sparse and enable_scout=True)
+    try:
+        grounding = ground(query, wrapped_deps, settings, checker)
+    except CorpusCoverageError:
+        if not settings.enable_scout:
+            raise
+        deps.progress(0, 3, "Scouting target literature (arXiv / OpenAlex)")
+        target_kw = {k: hooks[k] for k in ("search_fn", "download_fn", "ingest_fn") if k in hooks}
+        target_fetched, fallback_grounding, t_warns = scout.scout_target_topic(
+            query,
+            wrapped_deps,
+            settings,
+            existing_docs=scout.known_corpus_documents(wrapped_deps),
+            **target_kw,
+        )
+        scout_warnings.extend(t_warns)
+        grounding = None
+        if target_fetched:
+            reload_kw = {"reload_resources_fn": hooks["reload_resources_fn"]} if "reload_resources_fn" in hooks else {}
+            try:
+                wrapped_deps = scout.reload_live_deps(wrapped_deps, card_dir=card_dir, **reload_kw)
+                checker = PremiseChecker(
+                    wrapped_deps.judge,
+                    wrapped_deps.texts,
+                    wrapped_deps.metadatas,
+                    chunk_store=wrapped_deps.chunk_store,
+                )
+                grounding = ground(query, wrapped_deps, settings, checker)
+            except CorpusCoverageError:
+                grounding = None
+            except Exception as reload_exc:
+                scout_warnings.append(f"Target corpus reload warning: {reload_exc}")
+                grounding = None
+        if grounding is None:
+            if fallback_grounding is not None:
+                grounding = fallback_grounding
+            else:
+                raise
+
+    # 1b. LLM Cross-Disciplinary Guidance & Dynamic Source Card Materialization
+    if settings.enable_scout or settings.source_topic.strip():
+        leads, l_warns = scout.propose_technique_leads(query, grounding, wrapped_deps, settings)
+        scout_warnings.extend(l_warns)
+        if settings.enable_scout and leads:
+            deps.progress(1, 3, "Fetching cross-disciplinary papers & building technique cards")
+            mat_kw = {
+                k: hooks[k]
+                for k in ("search_fn", "download_fn", "ingest_fn", "reload_resources_fn")
+                if k in hooks
+            }
+            wrapped_deps, source_fetched, cards_built, m_warns = scout.materialize_leads_into_cards(
+                leads,
+                wrapped_deps,
+                settings,
+                card_dir=card_dir,
+                existing_docs=scout.known_corpus_documents(wrapped_deps),
+                **mat_kw,
+            )
+            scout_warnings.extend(m_warns)
+            checker = PremiseChecker(
+                wrapped_deps.judge,
+                wrapped_deps.texts,
+                wrapped_deps.metadatas,
+                chunk_store=wrapped_deps.chunk_store,
+            )
 
     # 2. Candidate cards
-    seeds, cand_warnings = candidate_cards(grounding, wrapped_deps, settings)
+    seeds, cand_warnings = candidate_cards(grounding, wrapped_deps, settings, leads=leads)
 
     total_progress = 2 + len(seeds)
     deps.progress(1, total_progress, "Grounding bottlenecks")
@@ -257,11 +335,21 @@ def run_best_of_n(
         "judge": judge_model,
     }
 
-    run_warnings = list(grounding.warnings) + cand_warnings
+    run_warnings = scout_warnings + list(grounding.warnings) + cand_warnings
     if getattr(config, "TRANSFER_CRITIC_MODEL", None) is None:
         run_warnings.append("critic shares the generator's model")
 
     cards_used = {t.card_id: card_map[t.card_id] for t in ranked_transfers if t.card_id in card_map}
+    discovery_info = (
+        {
+            "enabled": bool(settings.enable_scout),
+            "target_fetched": target_fetched,
+            "source_fetched": source_fetched,
+            "cards_built": cards_built,
+        }
+        if (settings.enable_scout or settings.source_topic.strip() or leads)
+        else {}
+    )
 
     result = RunResult(
         run_id=new_run_id(query),
@@ -282,12 +370,16 @@ def run_best_of_n(
         calls=calls,
         seconds=round(time.time() - start_time, 2),
         warnings=run_warnings,
+        source_topic=settings.source_topic.strip(),
+        leads=leads,
+        discovery=discovery_info,
     )
     logger.info(
-        "Completed technique transfer run %s in %.2fs (%d transfers, %d warnings)",
+        "Completed technique transfer run %s in %.2fs (%d transfers, %d leads, %d warnings)",
         result.run_id,
         result.seconds,
         len(result.transfers),
+        len(result.leads),
         len(result.warnings),
     )
     return result
@@ -298,6 +390,7 @@ class TransferEngine:
 
     def __init__(self, deps: Deps | None = None, card_dir: str | None = None):
         self._deps = deps
+        self._live_loaded = deps is None
         self._card_dir = card_dir
 
     def get_deps(self) -> Deps:
@@ -313,6 +406,9 @@ class TransferEngine:
         prior_art_before_year: int | None = None,
         bottlenecks: int | None = None,
         techniques_per_bottleneck: int | None = None,
+        source_topic: str = "",
+        enable_scout: bool = False,
+        scout_max_papers: int | None = None,
         progress_cb: Callable[[int, int, str], None] | None = None,
     ) -> RunResult:
         ensure_idle()
@@ -323,15 +419,19 @@ class TransferEngine:
         if progress_cb is not None:
             deps = dataclasses.replace(deps, progress=progress_cb)
 
-        kw = {
+        kw: dict = {
             "cards_per_query": candidates,
             "temperature": temperature,
             "prior_art_before_year": prior_art_before_year,
+            "source_topic": source_topic.strip(),
+            "enable_scout": bool(enable_scout),
         }
         if bottlenecks is not None:
             kw["bottlenecks"] = bottlenecks
         if techniques_per_bottleneck is not None:
             kw["techniques_per_bottleneck"] = techniques_per_bottleneck
+        if scout_max_papers is not None:
+            kw["scout_max_papers"] = scout_max_papers
 
         settings = TransferSettings(**kw)
         with pipeline_status.track_stage(
@@ -340,7 +440,14 @@ class TransferEngine:
             total_steps=1,
             mark_idle_on_exit=True,
         ):
-            return run_best_of_n(query, deps, settings)
+            res = run_best_of_n(query, deps, settings, card_dir=self._card_dir)
+            if self._live_loaded and (
+                res.discovery.get("target_fetched")
+                or res.discovery.get("source_fetched")
+                or res.discovery.get("cards_built")
+            ):
+                self._deps = None
+            return res
 
 
 def default_engine() -> TransferEngine:

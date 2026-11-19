@@ -402,6 +402,8 @@ TRANSFER_PARTIAL_SHAPE_PENALTY     = float(os.environ.get("CITATION_TRANSFER_PAR
 TRANSFER_TUNE_PENALTY              = float(os.environ.get("CITATION_TRANSFER_TUNE_PENALTY", "0.5"))
 # Worker threads for parallel transfer candidate development.
 TRANSFER_MAX_WORKERS               = _env_int("CITATION_TRANSFER_MAX_WORKERS", 3)
+# Max open-access papers downloaded & ingested per topic during LLM-guided scouting.
+TRANSFER_SCOUT_MAX_PAPERS          = _env_int("CITATION_TRANSFER_SCOUT_MAX_PAPERS", 3)
 
 
 

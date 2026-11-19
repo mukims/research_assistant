@@ -147,6 +147,18 @@ class Scores:
 
 
 @dataclass
+class TechniqueLead:
+    """An LLM-proposed cross-disciplinary technique lead and how it resolves a bottleneck."""
+    bottleneck_id: str
+    technique_name: str
+    source_discipline: str
+    resolution_guidance: str
+    search_queries: list[str] = field(default_factory=list)
+    fetched_documents: list[str] = field(default_factory=list)
+    built_card_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Transfer:
     id: str
     bottleneck_id: str
@@ -187,6 +199,9 @@ class RunResult:
     calls: dict[str, int]
     seconds: float
     warnings: list[str] = field(default_factory=list)
+    source_topic: str = ""
+    leads: list[TechniqueLead] = field(default_factory=list)
+    discovery: dict[str, Any] = field(default_factory=dict)
 
 
 def new_run_id(query: str) -> str:
@@ -230,6 +245,8 @@ def result_from_dict(d: dict[str, Any]) -> RunResult:
         t_dict["scores"] = Scores(**t_dict["scores"]) if t_dict.get("scores") else None
         transfers.append(Transfer(**t_dict))
 
+    leads = [TechniqueLead(**ld) for ld in d_copy.get("leads", []) if isinstance(ld, dict)]
+
     return RunResult(
         run_id=d_copy["run_id"],
         query=d_copy["query"],
@@ -245,4 +262,7 @@ def result_from_dict(d: dict[str, Any]) -> RunResult:
         calls=d_copy.get("calls", {}),
         seconds=d_copy.get("seconds", 0.0),
         warnings=d_copy.get("warnings", []),
+        source_topic=str(d_copy.get("source_topic", "")),
+        leads=leads,
+        discovery=dict(d_copy.get("discovery") or {}),
     )

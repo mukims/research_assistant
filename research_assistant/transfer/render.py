@@ -80,6 +80,8 @@ def render_markdown(result: RunResult) -> str:
         f"**Models:** generator: `{gen_m}` | judge: `{jud_m}` | critic: `{crit_m}` | "
         f"**Calls:** {result.calls} | **Time:** {result.seconds}s\n"
     )
+    if result.source_topic:
+        lines.append(f"**Source discipline / second topic:** `{result.source_topic}`\n")
 
     # 3. Caveat
     lines.append("> Premises are checked against their papers; the mapping, steps and prediction are the tool's proposal.\n")
@@ -94,6 +96,33 @@ def render_markdown(result: RunResult) -> str:
         for p in b.premises:
             lines.append(f"  - {premise_badge(p)} {p.claim} ({p.key}, {p.document})")
         lines.append("")
+
+    # 4b. LLM Cross-Disciplinary Guidance & Discovery
+    if result.leads or result.discovery:
+        lines.append("## LLM Cross-Disciplinary Guidance & Discovery\n")
+        if result.discovery:
+            t_f = len(result.discovery.get("target_fetched") or [])
+            s_f = len(result.discovery.get("source_fetched") or [])
+            c_b = int(result.discovery.get("cards_built") or 0)
+            lines.append(
+                f"- **Active literature scout:** `{t_f}` target papers fetched | "
+                f"`{s_f}` source papers fetched | `{c_b}` new verified technique cards built"
+            )
+            lines.append("")
+        for ld in result.leads:
+            lines.append(
+                f"### [{ld.bottleneck_id}] {ld.technique_name} (*{ld.source_discipline}*)\n"
+            )
+            lines.append(f"- **How it resolves {ld.bottleneck_id}:** {ld.resolution_guidance}")
+            if ld.search_queries:
+                q_fmt = ", ".join(f"`{q}`" for q in ld.search_queries)
+                lines.append(f"- **Search queries:** {q_fmt}")
+            if ld.fetched_documents or ld.built_card_ids:
+                lines.append(
+                    f"- **Materialized evidence:** {len(ld.fetched_documents)} paper(s) ingested, "
+                    f"{len(ld.built_card_ids)} verified card(s) built"
+                )
+            lines.append("")
 
     # 5. Transfers in ranked order
     lines.append("## Proposed Transfers\n")

@@ -45,3 +45,6 @@ class TransferSettings:
     prior_art_before_year: int | None = None
     verify_rebuttals: bool = True
     max_workers: int = config.TRANSFER_MAX_WORKERS
+    source_topic: str = ""
+    enable_scout: bool = False
+    scout_max_papers: int = config.TRANSFER_SCOUT_MAX_PAPERS

@@ -401,6 +401,10 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             kind = "revise"
         elif "TASK: cards" in content:
             kind = "cards"
+        elif "TASK: scout_target" in content:
+            kind = "scout_target"
+        elif "TASK: scout_techniques" in content:
+            kind = "scout_techniques"
 
         chat_kind_counts[kind] = chat_kind_counts.get(kind, 0) + 1
         call_n = chat_kind_counts[kind]
@@ -449,7 +453,7 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             })
 
         if kind == "transfer":
-            keys = re.findall(r"\[(C\d+)\]", content)
+            keys = re.findall(r"\[(C(?:\d+|_QUERY))\]", content)
             k1 = keys[0] if keys else "C1"
             k2 = keys[-1] if keys else "C2"
             t, _, _ = good_transfer()
@@ -486,6 +490,62 @@ def world(**overrides) -> tuple[Deps, WorldLog]:
             return json.dumps({
                 "responses": [
                     {"objection": 0, "response": "Addressed objection with concrete argument.", "concede": False}
+                ]
+            })
+
+        if kind == "scout_target":
+            return json.dumps({
+                "search_queries": ["quantum transport inverse problem", "Hamiltonian conductance tomography"],
+                "provisional_bottlenecks": [
+                    {
+                        "statement": "Provisional bottleneck in sparse target corpus",
+                        "quantities": ["conductance"],
+                        "current_method": "recursive Green's function",
+                        "generic": {
+                            "specific": "g1-specific",
+                            "mid": "g1-mid",
+                            "broad": "g1-broad",
+                        },
+                        "inference": False,
+                    }
+                ],
+            })
+
+        if kind == "scout_techniques":
+            return json.dumps({
+                "leads": [
+                    {
+                        "bottleneck_id": "B1",
+                        "technique_name": "Sinkhorn entropic optimal transport",
+                        "source_discipline": "computational optimal transport",
+                        "resolution_guidance": "Replaces cubic matrix inversion with entropic Bregman scaling iterations over spectral marginals.",
+                        "search_queries": ["Sinkhorn entropic optimal transport inverse problems"],
+                    }
+                ]
+            })
+
+        if kind == "cards":
+            keys = re.findall(r"\[(C\d+)\]", content)
+            ev_key = keys[0] if keys else "C1"
+            return json.dumps({
+                "techniques": [
+                    {
+                        "name": "Sinkhorn entropic optimal transport",
+                        "problem_solved": "solves high-dimensional marginal coupling without dense matrix inversion",
+                        "math_signature": "min_P <C, P> + eps H(P) subject to P 1 = a, P^T 1 = b",
+                        "context": "computational optimal transport",
+                        "inputs": "cost kernel and noisy marginals",
+                        "outputs": "regularized transport plan",
+                        "assumptions": ["strictly positive Gibbs kernel"],
+                        "mechanism": [
+                            "form Gibbs kernel K = exp(-C / eps)",
+                            "alternate row and column scaling u <- a / (K v), v <- b / (K^T u)",
+                        ],
+                        "evidence": {
+                            "claim": "Sinkhorn scaling converges linearly on positive kernels",
+                            "key": ev_key,
+                        },
+                    }
                 ]
             })
 

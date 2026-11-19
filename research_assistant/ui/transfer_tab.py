@@ -120,6 +120,18 @@ def render_transfer_tab():
             placeholder="e.g. recovering continuous parameters from noisy spectra",
             help="Describe the physical problem, bottleneck, or mathematical challenge.",
         )
+        source_topic = st.text_input(
+            "Source Discipline or Second Topic to Bridge From (optional)",
+            key="transfer_source_topic_input",
+            placeholder="e.g. compressed sensing, geophysical tomography, optimal transport (leave blank to explore all fields)",
+            help="Optionally specify a second topic or discipline to bridge techniques from; leave empty for open-ended cross-disciplinary discovery.",
+        )
+        enable_scout = st.checkbox(
+            "🌐 Active LLM-Guided Discovery (explain how external techniques resolve the bottleneck & auto-fetch missing arXiv/OpenAlex papers into cards)",
+            value=True,
+            key="transfer_enable_scout",
+            help="When enabled, the LLM proposes cross-field techniques that resolve each bottleneck, fetches missing open-access papers for both topics, builds verified cards on the fly, and guides transfer synthesis.",
+        )
 
         col_b, col_tech, col_cands, col_year, col_temp = st.columns(5)
         with col_b:
@@ -174,6 +186,8 @@ def render_transfer_tab():
                     prior_art_before_year=int(before_year) if before_year else None,
                     bottlenecks=bottlenecks,
                     techniques_per_bottleneck=techniques_per_b,
+                    source_topic=source_topic.strip(),
+                    enable_scout=bool(enable_scout),
                     progress_cb=on_progress,
                 )
                 try:
@@ -206,12 +220,46 @@ def render_transfer_tab():
             result = result_from_dict(saved_result_dict)
             st.divider()
             st.markdown(f"### 📋 Transfer Results: *{html.escape(result.query)}*")
+            if result.source_topic:
+                st.caption(f"🎯 **Bridged from discipline / topic:** `{result.source_topic}`")
+            if result.discovery:
+                t_cnt = len(result.discovery.get("target_fetched") or [])
+                s_cnt = len(result.discovery.get("source_fetched") or [])
+                c_cnt = int(result.discovery.get("cards_built") or 0)
+                st.caption(
+                    f"🌐 **Active Discovery:** fetched {t_cnt} target paper(s), "
+                    f"{s_cnt} cross-disciplinary paper(s), and built {c_cnt} new verified technique card(s)."
+                )
 
-            t_tab_report, t_tab_tree, t_tab_json = st.tabs(["📄 Full Transfer Report", "🌳 Transfer Tree", "💾 Raw JSON"])
+            t_tab_report, t_tab_guidance, t_tab_tree, t_tab_json = st.tabs(
+                ["📄 Full Transfer Report", "🧭 LLM Resolution Guidance", "🌳 Transfer Tree", "💾 Raw JSON"]
+            )
 
             with t_tab_report:
                 report_md = render_markdown(result)
                 st.markdown(report_md)
+
+            with t_tab_guidance:
+                if result.leads:
+                    for ld in result.leads:
+                        st.markdown(
+                            f"#### [{html.escape(ld.bottleneck_id)}] {html.escape(ld.technique_name)} "
+                            f"(*{html.escape(ld.source_discipline)}*)"
+                        )
+                        st.markdown(f"**How it resolves {html.escape(ld.bottleneck_id)}:** {html.escape(ld.resolution_guidance)}")
+                        if ld.search_queries:
+                            qs_str = ", ".join(f"`{q}`" for q in ld.search_queries)
+                            st.caption(f"🔎 Search queries: {qs_str}")
+                        if ld.fetched_documents or ld.built_card_ids:
+                            st.caption(
+                                f"📄 Ingested {len(ld.fetched_documents)} paper(s) · "
+                                f"📇 Built {len(ld.built_card_ids)} verified card(s)"
+                            )
+                else:
+                    st.info(
+                        "No LLM technique guidance leads recorded on this run. "
+                        "Enable Active LLM-Guided Discovery or specify a Source Discipline to generate resolution guidance."
+                    )
 
             with t_tab_tree:
                 mermaid_tree = render_tree(result)
