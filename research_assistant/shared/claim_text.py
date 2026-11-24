@@ -71,12 +71,12 @@ def paragraph_sentences(p) -> list[str]:
     return [t for t in split_into_sentences(clean_text(p)) if t]
 
 
-_NUMERIC_CITE_RE = re.compile(r"^[\[\(]?\s*\d+[\d,;\s\-–—\]\)]*$")
+_NUMERIC_CITE_RE = re.compile(r"^(?:refs?\.?|references?)?\s*[\[\(]?\s*\d+[\d,;\s\-–—\]\)]*$", re.IGNORECASE)
 _ROMAN_CITE_RE = re.compile(r"^[\[\(]\s*[ivxlcdmIVXLCDM]+[\s,;\-–—ivxlcdmIVXLCDM]*[\]\)]$")
 
 
 def is_numeric_cite(txt: str) -> bool:
-    """"[12]", "[9,", "10]", "3-5", "[IV]": a marker that carries no words."""
+    """"[12]", "[9,", "10]", "3-5", "Ref. 11", "[IV]": a marker that carries no author words."""
     cleaned = (txt or "").strip()
     return bool(_NUMERIC_CITE_RE.match(cleaned) or _ROMAN_CITE_RE.match(cleaned))
 

@@ -60,7 +60,12 @@ from research_assistant.shared.atomic import atomic_write_json
 import concurrent.futures
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
-from research_assistant.shared.source_key import normalise_doi
+from research_assistant.shared.source_key import (
+    extract_arxiv_from_text,
+    extract_doi_from_text,
+    normalise_doi,
+    pdf_key,
+)
 from research_assistant.shared.tei_structure import artifact_registry, paragraph_artifacts, section_breadcrumb
 
 logger = get_logger("seed_audit")
@@ -143,7 +148,13 @@ def _build_number_map(body, bib_by_id: dict) -> dict[int, dict]:
     return number_map
 
 
-def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
+AUDIT_SCHEMA_VERSION = 2
+
+
+def extract_seed_citation_claims(
+    tei_source: str | BeautifulSoup,
+    seed_pdf_path: Optional[str] = None,
+) -> list[dict]:
     """Extract in-text citation claims from TEI XML.
 
     Returns a list of dicts with keys:
@@ -178,7 +189,24 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             soup = BeautifulSoup(f, "xml")
 
     # 1. Parse bibliography from <listBibl>
+    from research_assistant.audit.pdf_refs import (
+        align_biblstructs_to_pdf_groups,
+        assign_paragraph_bib_group,
+        extract_pdf_bibliography_groups,
+        is_endnote_text,
+        locate_seed_pdf,
+    )
+
+    def _first_nonempty(nodes) -> Optional[str]:
+        for nd in nodes:
+            if nd is not None:
+                val = _clean(nd)
+                if val:
+                    return val
+        return None
+
     list_bibl = soup.find("listBibl")
+    bib_entries: list[dict] = []
     bib_by_id = {}
     bib_by_index = {}
 
@@ -187,12 +215,32 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
             xid = b.get("xml:id") or b.get("id") or f"b{idx}"
             analytic = b.find("analytic")
             monogr = b.find("monogr")
-            t_node = (
-                (analytic.find("title", type="main") or analytic.find("title"))
-                if analytic
-                else None
-            ) or ((monogr.find("title", level="m") or monogr.find("title")) if monogr else None)
-            title = _clean(t_node) if t_node else None
+
+            raw_node = b.find("note", type="raw_reference")
+            raw_reference = _clean(raw_node) if raw_node else None
+
+            title = None
+            if analytic:
+                title = _first_nonempty([analytic.find("title", type="main"), *analytic.find_all("title")])
+            # GROBID sometimes emits an empty <analytic><title/> on long author lists and puts the title in an untyped <note>
+            if not title and analytic:
+                for nt in b.find_all("note"):
+                    if nt.get("type"):
+                        continue
+                    nt_txt = _clean(nt)
+                    if (
+                        nt_txt
+                        and len(nt_txt) >= 10
+                        and not nt_txt.lower().startswith(("http", "arxiv", "doi"))
+                        and not is_endnote_text(nt_txt)
+                    ):
+                        title = nt_txt
+                        break
+            if not title and monogr:
+                title = _first_nonempty([
+                    monogr.find("title", level="m"),
+                    *(t for t in monogr.find_all("title") if t.get("level") != "j"),
+                ])
 
             authors = []
             scope = analytic or b
@@ -202,6 +250,18 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                     pname = _person_name(pers)
                     if pname:
                         authors.append(pname)
+            # Recover surname dropped by GROBID when only 1-letter initials were parsed (e.g. "P O" for "P. O. Dral")
+            if (
+                len(authors) == 1
+                and raw_reference
+                and all(len(tok.strip(".")) <= 1 for tok in authors[0].split())
+            ):
+                m_lead = re.match(
+                    r"^\s*(?:\[\d+\]\s*|\d+\.\s*)?((?:[A-Z]\.\s*)+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ\-']+)\s*,",
+                    raw_reference,
+                )
+                if m_lead:
+                    authors = [m_lead.group(1).strip()]
 
             date_node = b.find("date", type="published") or b.find("date")
             year = None
@@ -213,13 +273,49 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
 
             doi_node = b.find("idno", type="DOI")
             doi = normalise_doi(doi_node.text) if doi_node and doi_node.text else None
-            raw_node = b.find("note", type="raw_reference")
-            raw_reference = _clean(raw_node) if raw_node else None
+            if not doi and raw_reference:
+                doi = extract_doi_from_text(raw_reference)
+
+            arxiv_id = None
+            for idno in b.find_all("idno"):
+                if (idno.get("type") or "").strip().lower() == "arxiv":
+                    id_txt = _clean(idno)
+                    if id_txt:
+                        arxiv_id = extract_arxiv_from_text(f"arXiv:{id_txt}") or id_txt.lower().removeprefix("arxiv:").strip()
+                        break
+            ptr_url = None
+            for ptr in b.find_all("ptr"):
+                tgt = (ptr.get("target") or "").strip()
+                if tgt:
+                    ptr_url = tgt
+                    break
+            if not arxiv_id:
+                for text_cand in (doi, ptr_url, raw_reference, title):
+                    arxiv_id = extract_arxiv_from_text(text_cand)
+                    if arxiv_id:
+                        break
 
             journal = monogr.find("title", level="j") if monogr else None
             book = monogr.find("title", level="m") if monogr else None
-            venue = _clean(journal) if journal else (_clean(book) if book else None)
-            is_monograph = bool(book) and not (analytic and analytic.find("title"))
+            j_clean = _clean(journal) if journal else None
+            b_clean = _clean(book) if book else None
+            has_analytic_title = bool(analytic and _first_nonempty(analytic.find_all("title")))
+            is_monograph = bool(b_clean) and not has_analytic_title
+            # Do not treat an authorless, yearless, ID-less prose footnote as a book venue
+            if is_monograph and b_clean == title and not (authors or year or doi or arxiv_id or ptr_url):
+                venue = None
+            else:
+                venue = j_clean or b_clean
+
+            if not raw_reference and not title:
+                synth_parts = [p for p in (", ".join(authors), venue, str(year or ""), doi, arxiv_id, ptr_url) if p]
+                if synth_parts:
+                    raw_reference = ". ".join(synth_parts)
+
+            is_endnote = bool(
+                not (authors or year or doi or arxiv_id or ptr_url or j_clean)
+                and is_endnote_text(raw_reference or title)
+            )
 
             # Printed reference label/number extraction:
             # 1. Check <biblStruct n="...">
@@ -250,25 +346,63 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                 "authors": authors,
                 "year": year,
                 "doi": doi,
+                "arxiv_id": arxiv_id,
+                "url": ptr_url,
                 "venue": venue,
                 "is_monograph": is_monograph,
+                "is_endnote": is_endnote,
                 "raw_reference": raw_reference,
             }
+            bib_entries.append(ref_info)
             bib_by_id[xid] = ref_info
             if printed_num is not None:
                 bib_by_index[printed_num] = ref_info
             bib_by_index.setdefault(idx + 1, ref_info)
 
-    # 2. Parse body paragraphs
+    # 2. Parse body paragraphs (with seed PDF printed-label & multi-bibliography alignment if available)
     body = soup.find("body")
     if not body:
         return []
 
+    physical_pdf = locate_seed_pdf(seed_pdf_path, tei_source if isinstance(tei_source, str) else None)
+    pdf_groups: list[dict] = []
+    pdf_pages_text: list[str] = []
+    endnotes_by_group: dict[int, dict[int, str]] = {}
+    if physical_pdf and bib_entries:
+        pdf_groups, pdf_pages_text = extract_pdf_bibliography_groups(physical_pdf)
+        if pdf_groups:
+            endnotes_by_group = align_biblstructs_to_pdf_groups(bib_entries, pdf_groups)
+
+    if pdf_groups:
+        group_bib_by_id: dict[int, dict] = {g: {} for g in range(len(pdf_groups))}
+        group_bib_by_index: dict[int, dict] = {g: {} for g in range(len(pdf_groups))}
+        group_pos_counter: dict[int, int] = {g: 0 for g in range(len(pdf_groups))}
+        for entry in bib_entries:
+            g = entry.get("bib_group", 0)
+            if g not in group_bib_by_id:
+                g = 0
+            group_pos_counter[g] = group_pos_counter.get(g, 0) + 1
+            g_pos = group_pos_counter[g]
+            group_bib_by_id[g][entry["xml_id"]] = entry
+            if entry.get("printed_index") is not None:
+                group_bib_by_index[g][entry["printed_index"]] = entry
+            elif g_pos not in endnotes_by_group.get(g, {}):
+                group_bib_by_index[g].setdefault(g_pos, entry)
+        # Rebuild single-group index as well when len(pdf_groups) == 1
+        if len(pdf_groups) == 1:
+            bib_by_index = group_bib_by_index[0]
+
     number_map = _build_number_map(body, bib_by_id)
+    group_number_maps: dict[int, dict] = {}
+    if pdf_groups:
+        for g in range(len(pdf_groups)):
+            group_number_maps[g] = _build_number_map(body, group_bib_by_id[g])
+
     registry = artifact_registry(soup)
 
     claims = []
     seen_pairs = set()
+    cur_min_page = 0
 
     for p_idx, p in enumerate(body.find_all("p")):
         refs = p.find_all("ref", type="bibr")
@@ -280,15 +414,61 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
         heading = section_breadcrumb(p)
         p_artifacts = paragraph_artifacts(p, registry)
 
+        active_bib_by_id = bib_by_id
+        active_bib_by_index = bib_by_index
+        active_number_map = number_map
+        active_endnotes: dict[int, str] = {}
+        grp_idx = 0
+        if pdf_groups:
+            p_plain = p.get_text(" ", strip=True)
+            grp_idx, cur_min_page = assign_paragraph_bib_group(
+                p_plain, pdf_pages_text, pdf_groups, min_page=cur_min_page
+            )
+            active_bib_by_id = group_bib_by_id.get(grp_idx, bib_by_id)
+            active_bib_by_index = group_bib_by_index.get(grp_idx, bib_by_index)
+            active_number_map = group_number_maps.get(grp_idx, number_map)
+            active_endnotes = endnotes_by_group.get(grp_idx, {})
+
         # Citations become period-free tokens; what the old placeholder
         # embedded lives in this table instead.
         cites = {}
         for n, ref in enumerate(refs):
             target = (ref.get("target") or "").lstrip("#")
             txt = clean_text(ref)
-            ref_info, resolution, note = _resolve_ref(
-                target, txt, bib_by_id, bib_by_index, number_map
-            )
+
+            # Check if numeric marker points to a printed explanatory endnote in this bibliography group
+            endnote_hit = None
+            if active_endnotes and is_numeric_cite(txt):
+                nums_txt = _NUM_RE.findall(txt)
+                if nums_txt:
+                    k_num = int(nums_txt[0])
+                    if k_num in active_endnotes and (
+                        k_num not in active_bib_by_index
+                        or active_bib_by_index[k_num].get("is_endnote")
+                        or active_bib_by_index[k_num].get("printed_index") != k_num
+                    ):
+                        note_text = active_endnotes[k_num]
+                        endnote_hit = {
+                            "xml_id": f"endnote_g{grp_idx}_{k_num}",
+                            "index": k_num,
+                            "printed_index": k_num,
+                            "title": note_text[:120],
+                            "authors": [],
+                            "year": None,
+                            "doi": None,
+                            "venue": None,
+                            "is_monograph": False,
+                            "is_endnote": True,
+                            "raw_reference": note_text,
+                        }
+
+            if endnote_hit is not None:
+                ref_info, resolution, note = endnote_hit, "endnote", ""
+            else:
+                scoped_target = target if (not pdf_groups or target in active_bib_by_id) else ""
+                ref_info, resolution, note = _resolve_ref(
+                    scoped_target, txt, active_bib_by_id, active_bib_by_index, active_number_map
+                )
             cites[n] = {"target": target, "txt": txt, "ref": ref_info, "resolution": resolution, "note": note}
             ref.replace_with(f" {cite_token(n)} ")
 
@@ -320,7 +500,10 @@ def extract_seed_citation_claims(tei_source: str | BeautifulSoup) -> list[dict]:
                 cite = cites[n]
                 resolved = cite["ref"] is not None
                 ref_info = cite["ref"] or _unknown_ref(cite["target"], cite["txt"])
-                role = classify_citation_role(sent, cite_token(n), ref_info)
+                if ref_info.get("is_endnote"):
+                    role = "pointer"
+                else:
+                    role = classify_citation_role(sent, cite_token(n), ref_info)
 
                 ref_key = ref_info.get("xml_id") or cite["target"] or cite["txt"]
                 dedup_key = (claim_text, ref_key)
@@ -374,11 +557,13 @@ def _load_downloaded_manifest() -> dict:
 
 
 def _is_ref_available(dl_entry: Optional[dict]) -> bool:
-    """True if reference has a downloaded file or abstract fallback available."""
+    """True if reference has a downloaded file, canonical corpus entry, or abstract fallback available."""
     if not dl_entry:
         return False
     path = dl_entry.get("path")
     if path and os.path.exists(path):
+        return True
+    if dl_entry.get("canonical_document"):
         return True
     if dl_entry.get("evidence_tier") == "abstract_only" and dl_entry.get("abstract"):
         return True
@@ -562,14 +747,39 @@ def _judge_claim_entry(
             except Exception as exc:
                 logger.debug("Fallback keyword search failed for %s: %s", item.get("document"), exc)
 
-    # Query relaxation fallback 3: Document-level fallback chunks
+    # Query relaxation fallback 3: Document-level fallback chunks (including normalized pdf_key)
     if not hits:
-        doc_hits = _get_document_fallback_chunks(
-            item.get("document"), collection, texts, metadatas, k=retrieve_k
-        )
-        if doc_hits:
-            hits = doc_hits
-            item["search_query_relaxed"] = "[document fallback chunks]"
+        doc_candidates = [item.get("document")]
+        if item.get("document") and ":" not in str(item["document"]):
+            norm_k = pdf_key(str(item["document"]))
+            if norm_k and norm_k not in doc_candidates:
+                doc_candidates.append(norm_k)
+        for doc_cand in doc_candidates:
+            if doc_cand != item.get("document"):
+                try:
+                    hits = hybrid_search(
+                        search_query,
+                        collection,
+                        bm25,
+                        texts,
+                        metadatas,
+                        top_k=retrieve_k,
+                        doc_filter={doc_cand},
+                        exclude_types=EXCLUDED_FROM_EVIDENCE,
+                    )
+                    if hits:
+                        item["document"] = doc_cand
+                        break
+                except Exception:
+                    pass
+            doc_hits = _get_document_fallback_chunks(
+                doc_cand, collection, texts, metadatas, k=retrieve_k
+            )
+            if doc_hits:
+                hits = doc_hits
+                item["document"] = doc_cand
+                item["search_query_relaxed"] = "[document fallback chunks]"
+                break
 
     if not hits:
         item["outcome"] = "no_evidence"
@@ -603,14 +813,44 @@ def _judge_claim_entry(
 
     try:
         verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
-        if escalate_k and len(hits) > top_k and needs_escalation(verdict):
-            item["first_judgement"] = verdict.get("judgement")
-            item["evidence"] = assemble_evidence(
-                hits[:escalate_k], JUDGEMENT_EVIDENCE_MAX_CHARS
-            )
-            _provenance(escalate_k)
-            item["escalated"] = True
-            verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
+        if escalate_k and needs_escalation(verdict):
+            # Also merge keyword-relaxed chunks on escalation so body-section evidence is not missed
+            kw_esc = _extract_claim_keywords(item.get("claim", ""), (item.get("ref") or {}).get("title", ""))
+            if kw_esc and kw_esc != search_query:
+                try:
+                    kw_hits = hybrid_search(
+                        kw_esc,
+                        collection,
+                        bm25,
+                        texts,
+                        metadatas,
+                        top_k=retrieve_k,
+                        doc_filter={item["document"]},
+                        exclude_types=EXCLUDED_FROM_EVIDENCE,
+                    )
+                    if kw_hits:
+                        expand_neighbours(kw_hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+                        seen_cidx = {h.get("chunk_index") for h in hits if h.get("chunk_index") is not None}
+                        seen_txts = {h.get("text") for h in hits}
+                        for kh in kw_hits:
+                            cidx = kh.get("chunk_index")
+                            if (cidx is not None and cidx in seen_cidx) or kh.get("text") in seen_txts:
+                                continue
+                            hits.append(kh)
+                            if cidx is not None:
+                                seen_cidx.add(cidx)
+                            seen_txts.add(kh.get("text"))
+                except Exception:
+                    pass
+            eff_esc_k = max(escalate_k, min(len(hits), 8))
+            if len(hits) > top_k:
+                item["first_judgement"] = verdict.get("judgement")
+                item["evidence"] = assemble_evidence(
+                    hits[:eff_esc_k], max(JUDGEMENT_EVIDENCE_MAX_CHARS, 9000)
+                )
+                _provenance(eff_esc_k)
+                item["escalated"] = True
+                verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
 
         # Second Judge Pass: for Unclear verdicts or Low confidence
         if CITATION_JUDGEMENT_SECOND_PASS and (
@@ -881,17 +1121,23 @@ def cross_check_seed_audit(
         1 for r in report.get("results", []) if r.get("outcome") == "judged"
     )
 
-    # 1. Identify claims whose reference PDFs became available since previous audit
+    # 1. Identify claims whose reference PDFs became available (or upgraded from abstract to full_text)
     unresolved_claims = [
         r for r in results
         if r.get("outcome") in (
             "not_downloaded",
             "deferred_paywalled",
             "cap_exceeded",
+            "cluster_skipped",
             "no_evidence",
             "retrieval_failed",
             "call_failed",
             "not_attempted",
+        )
+        or (
+            r.get("outcome") == "judged"
+            and r.get("evidence_tier") == "abstract_only"
+            and r.get("judgement") == "Unclear / insufficient evidence"
         )
     ]
 
@@ -903,29 +1149,53 @@ def cross_check_seed_audit(
         item for item in unresolved_claims
         if item.get("outcome") in BACKEND_FAILURE_OUTCOMES_ALL and item.get("document")
     ]
-    claims_to_rejudge = []
+    newly_available_pairs = []
     for item in unresolved_claims:
         if item in backend_failed:
             continue
         ref_info = item.get("ref")
         matched = _match_downloaded_paper(ref_info, seed_pdf_name, downloaded_manifest)
-        if matched:
-            item["downloaded"] = True
-            doc_file = (
-                os.path.basename(matched["path"])
-                if matched.get("path")
-                else (matched.get("key") or matched.get("title") or "unknown.pdf")
-            )
-            item["document"] = doc_file
-            item["citation_source"] = (
-                matched.get("title")
-                or matched.get("raw_reference")
-                or matched.get("key")
-                or doc_file
-            )
-            claims_to_rejudge.append(item)
+        if not matched:
+            continue
+        has_fulltext = bool(matched.get("path") or matched.get("canonical_document"))
+        if item.get("outcome") == "judged" and item.get("evidence_tier") == "abstract_only":
+            # Only re-judge an abstract_only Unclear item when full_text is now available
+            if has_fulltext:
+                newly_available_pairs.append((item, matched))
+        elif has_fulltext or (matched.get("evidence_tier") == "abstract_only" and matched.get("abstract")):
+            newly_available_pairs.append((item, matched))
 
-    to_judge = backend_failed + claims_to_rejudge[:max_new_claims]
+    claims_to_rejudge = []
+    selected_pairs = newly_available_pairs if max_new_claims < 0 else newly_available_pairs[:max_new_claims]
+    overflow_pairs = [] if max_new_claims <= 0 else newly_available_pairs[max_new_claims:]
+
+    for item, matched in selected_pairs:
+        item["downloaded"] = True
+        doc_file = matched.get("canonical_document") or (
+            os.path.basename(matched["path"])
+            if matched.get("path")
+            else (matched.get("key") or matched.get("title") or "unknown.pdf")
+        )
+        item["document"] = doc_file
+        item["citation_source"] = (
+            matched.get("title")
+            or matched.get("raw_reference")
+            or matched.get("key")
+            or doc_file
+        )
+        if matched.get("canonical_document"):
+            item["evidence_tier"] = "full_text"
+        elif matched.get("evidence_tier"):
+            item["evidence_tier"] = matched["evidence_tier"]
+        claims_to_rejudge.append(item)
+
+    for item, matched in overflow_pairs:
+        item["downloaded"] = True
+        item["outcome"] = "cap_exceeded"
+        item["judgement"] = None
+        item["reason"] = "Maximum claims evaluation budget reached during cross-check."
+
+    to_judge = backend_failed + claims_to_rejudge
     if to_judge:
         logger.info(
             "Cross-check: re-judging %d backend-failed citation(s) and %d newly available (cap %d).",
@@ -989,7 +1259,7 @@ def cross_check_seed_audit(
         "duration_seconds": round(elapsed, 2),
         "total_claims": len(results),
         "already_judged_count": initial_judged_count,
-        "newly_available_count": len(claims_to_rejudge),
+        "newly_available_count": len(newly_available_pairs),
         "newly_judged_count": newly_judged_count,
         "from_cache": True,
     }
@@ -1023,8 +1293,9 @@ def audit_seed_citations(
         cached = get_cached_seed_audit(seed_path)
         if cached:
             logger.info("Found cached audit report for %s — running fast cross-check", seed_path)
+            cc_cap = max_claims if max_claims > 0 else -1
             report, summary = cross_check_seed_audit(
-                seed_path, cached, search_resources=search_resources
+                seed_path, cached, search_resources=search_resources, max_new_claims=cc_cap
             )
             report["from_cache"] = True
             report["cross_check_summary"] = summary
@@ -1054,10 +1325,11 @@ def audit_seed_citations(
             "results": [],
         }
 
-    claims = extract_seed_citation_claims(tei_path)
+    claims = extract_seed_citation_claims(tei_path, seed_pdf_path=seed_path)
     if not claims:
         logger.info("No in-text citation claims found in %s.", tei_path)
         return {
+            "audit_schema_version": AUDIT_SCHEMA_VERSION,
             "seed_path": seed_path,
             "seed_name": seed_pdf_name,
             "generated": datetime.now().isoformat(timespec="seconds"),
@@ -1172,7 +1444,7 @@ def audit_seed_citations(
 
                 if is_dl:
                     c["downloaded"] = True
-                    c["document"] = (
+                    c["document"] = dl_entry.get("canonical_document") or (
                         os.path.basename(dl_entry["path"])
                         if dl_entry.get("path")
                         else (dl_entry.get("key") or dl_entry.get("title") or "unknown.pdf")
@@ -1182,7 +1454,9 @@ def audit_seed_citations(
                         or dl_entry.get("raw_reference")
                         or dl_entry.get("key")
                     )
-                    if dl_entry.get("evidence_tier"):
+                    if dl_entry.get("canonical_document"):
+                        c["evidence_tier"] = "full_text"
+                    elif dl_entry.get("evidence_tier"):
                         c["evidence_tier"] = dl_entry["evidence_tier"]
                     downloaded_claims.append(c)
                 else:
@@ -1326,6 +1600,7 @@ def audit_seed_citations(
     totals = compute_totals(all_results)
 
     report = {
+        "audit_schema_version": AUDIT_SCHEMA_VERSION,
         "seed_path": seed_path,
         "seed_name": seed_pdf_name,
         "generated": datetime.now().isoformat(timespec="seconds"),

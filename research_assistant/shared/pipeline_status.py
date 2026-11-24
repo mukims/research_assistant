@@ -485,7 +485,8 @@ def _persist_status_locked(status: dict[str, Any], allow_clear_cancel: bool = Fa
             global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(config.DATA_DIR, "pipeline_status.json"))
             if not allow_clear_cancel and not status.get("cancel_requested", False) and global_path != path and os.path.exists(global_path):
                 global_prev = _load_status_from_disk(global_path)
-                if global_prev.get("cancel_requested", False):
+                global_job = global_prev.get("current_job_id")
+                if global_prev.get("cancel_requested", False) and (not global_job or global_job == active_job):
                     status["cancel_requested"] = True
                     status["active"] = False
         except Exception:
@@ -496,13 +497,21 @@ def _persist_status_locked(status: dict[str, Any], allow_clear_cancel: bool = Fa
     # If writing to a job-scoped status file, also update global aggregate ledger
     if active_job and STATUS_PATH_OVERRIDE is None and global_path:
         try:
+            global_prev = _load_status_from_disk(global_path) if os.path.exists(global_path) else {}
+            global_job = global_prev.get("current_job_id")
+            # Do not let an old cancelled/finishing job clobber a newer active job's global status
+            if global_prev.get("active", False) and global_job and global_job != active_job and not status.get("active", False):
+                return
             summary_status = dict(status)
             summary_status["current_job_id"] = active_job
-            if not allow_clear_cancel and not summary_status.get("cancel_requested", False) and os.path.exists(global_path):
-                global_prev = _load_status_from_disk(global_path)
-                if global_prev.get("cancel_requested", False):
-                    summary_status["cancel_requested"] = True
-                    summary_status["active"] = False
+            if (
+                not allow_clear_cancel
+                and not summary_status.get("cancel_requested", False)
+                and global_prev.get("cancel_requested", False)
+                and (not global_job or global_job == active_job)
+            ):
+                summary_status["cancel_requested"] = True
+                summary_status["active"] = False
             atomic_write_json(global_path, summary_status, ensure_ascii=False, default=str)
         except Exception as exc:
             logger.debug("Failed updating global summary ledger from job status: %s", exc)
@@ -791,6 +800,8 @@ def request_cancel(
     with _status_lock():
         status = _load_status_from_disk()
         status["cancel_requested"] = True
+        if job_id and not status.get("current_job_id"):
+            status["current_job_id"] = job_id
         status["active"] = False
         status["stage"] = "idle"
         status["stage_label"] = "Idle"
@@ -836,19 +847,25 @@ def is_cancel_requested(job_id: Optional[str] = None) -> bool:
         except Exception:
             pass
 
-    # 3. Check current status path
-    status = _load_status_from_disk()
-    if status.get("cancel_requested"):
-        return True
+    scoped_job = job_id or active_job
 
-    # 4. If currently on a job-specific path, also check global status
-    if active_job or job_id:
+    # 3. Check current status path
+    cur_path = get_status_path()
+    status = _load_status_from_disk(cur_path)
+    if status.get("cancel_requested"):
+        cur_job = status.get("current_job_id")
+        if not scoped_job or not cur_job or cur_job == scoped_job:
+            return True
+
+    # 4. If currently on a job-specific path, also check global status when it applies to this job
+    if scoped_job and STATUS_PATH_OVERRIDE is None:
         try:
             from research_assistant import config
             global_path = getattr(config, "PIPELINE_STATUS_PATH", os.path.join(getattr(config, "DATA_DIR", "data"), "pipeline_status.json"))
-            if os.path.exists(global_path):
+            if global_path != cur_path and os.path.exists(global_path):
                 g_st = _load_status_from_disk(global_path)
-                if g_st.get("cancel_requested"):
+                g_job = g_st.get("current_job_id")
+                if g_st.get("cancel_requested") and (not g_job or g_job == scoped_job):
                     return True
         except Exception:
             pass

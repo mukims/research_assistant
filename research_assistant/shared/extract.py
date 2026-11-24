@@ -358,6 +358,7 @@ def grobid_fulltext(pdf_path: str, server: str = GROBID_SERVER,
         # in <s>, which is what lets a figure reference carry its sentence.
         data = [
             ("consolidateHeader", "1"),
+            ("includeRawCitations", "1"),
             ("segmentSentences", "1"),
             ("teiCoordinates", "p"),
             ("teiCoordinates", "head"),

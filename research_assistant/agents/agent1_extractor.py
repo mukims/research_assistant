@@ -49,6 +49,11 @@ from research_assistant.shared.atomic import atomic_write_json
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.paper_index import edit
 from research_assistant.shared import pipeline_status
+from research_assistant.shared.source_key import (
+    extract_arxiv_from_text,
+    extract_doi_from_text,
+    normalise_doi,
+)
 
 logger = get_logger("agent1")
 
@@ -184,16 +189,46 @@ def _doi_confidence(title, raw_reference):
 
 def parse_reference(bibl, source_file=None):
     """Parse a single <biblStruct> from a TEI reference list."""
+    from research_assistant.audit.pdf_refs import is_endnote_text
+
     analytic = bibl.find("analytic")
     monogr = bibl.find("monogr")
 
-    # Article title lives in <analytic>; for books and reports the title is
-    # in <monogr> instead, so fall back rather than returning None.
+    raw_node = bibl.find("note", type="raw_reference")
+    raw_reference = _clean(raw_node)
+
+    def _first_nonempty_title(nodes):
+        for nd in nodes:
+            if nd is not None:
+                val = _clean(nd)
+                if val:
+                    return val
+        return None
+
+    # Article title lives in <analytic>; when GROBID emits an empty <analytic><title/>
+    # on long-author-list papers, check untyped <note> before falling back to <monogr>
+    # non-journal titles (never mistake <title level="j"> journal name for article title).
     title = None
     if analytic:
-        title = _clean(analytic.find("title", type="main")) or _clean(analytic.find("title"))
+        title = _first_nonempty_title([analytic.find("title", type="main"), *analytic.find_all("title")])
+    if not title and analytic:
+        for nt in bibl.find_all("note"):
+            if nt.get("type"):
+                continue
+            nt_txt = _clean(nt)
+            if (
+                nt_txt
+                and len(nt_txt) >= 10
+                and not nt_txt.lower().startswith(("http", "arxiv", "doi"))
+                and not is_endnote_text(nt_txt)
+            ):
+                title = nt_txt
+                break
     if not title and monogr:
-        title = _clean(monogr.find("title", level="m")) or _clean(monogr.find("title"))
+        title = _first_nonempty_title([
+            monogr.find("title", level="m"),
+            *(t for t in monogr.find_all("title") if t.get("level") != "j"),
+        ])
 
     container = None
     if monogr:
@@ -203,7 +238,36 @@ def parse_reference(bibl, source_file=None):
             container = None
 
     doi_node = bibl.find("idno", type="DOI")
-    doi = doi_node.text.strip().lower() if doi_node and doi_node.text else None
+    doi = normalise_doi(doi_node.text) if doi_node and doi_node.text else None
+    if not doi and raw_reference:
+        doi = extract_doi_from_text(raw_reference)
+
+    arxiv_id = None
+    pmid = None
+    for idno in bibl.find_all("idno"):
+        id_type = (idno.get("type") or "").strip().lower()
+        id_val = _clean(idno)
+        if not id_val:
+            continue
+        if id_type == "arxiv" and not arxiv_id:
+            arxiv_id = extract_arxiv_from_text(f"arXiv:{id_val}") or id_val.lower().removeprefix("arxiv:").strip()
+        elif id_type == "pmid" and not pmid:
+            m_pm = re.search(r"\d+", id_val)
+            if m_pm:
+                pmid = m_pm.group(0)
+
+    ptr_url = None
+    for ptr in bibl.find_all("ptr"):
+        tgt = (ptr.get("target") or "").strip()
+        if tgt:
+            ptr_url = tgt
+            break
+
+    if not arxiv_id:
+        for text_cand in (doi, ptr_url, raw_reference, title):
+            arxiv_id = extract_arxiv_from_text(text_cand)
+            if arxiv_id:
+                break
 
     authors = []
     scope = analytic or bibl
@@ -213,17 +277,25 @@ def parse_reference(bibl, source_file=None):
             name = _person_name(pers)
             if name:
                 authors.append(name)
+    if (
+        len(authors) == 1
+        and raw_reference
+        and all(len(tok.strip(".")) <= 1 for tok in authors[0].split())
+    ):
+        m_lead = re.match(
+            r"^\s*(?:\[\d+\]\s*|\d+\.\s*)?((?:[A-Z]\.\s*)+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ\-']+)\s*,",
+            raw_reference,
+        )
+        if m_lead:
+            authors = [m_lead.group(1).strip()]
 
     year = None
-    date = bibl.find("date", type="published")
+    date = bibl.find("date", type="published") or bibl.find("date")
     if date:
         when = date.get("when") or _clean(date) or ""
         match = re.search(r"(1[89]\d{2}|20\d{2})", when)
         if match:
             year = int(match.group(1))
-
-    raw_node = bibl.find("note", type="raw_reference")
-    raw_reference = _clean(raw_node)
 
     return {
         "source_file": source_file,
@@ -234,6 +306,9 @@ def parse_reference(bibl, source_file=None):
         "year": year,
         "doi": doi,
         "doi_confidence": _doi_confidence(title, raw_reference) if doi else None,
+        "arxiv_id": arxiv_id,
+        "pmid": pmid,
+        "url": ptr_url,
         "raw_reference": raw_reference,
     }
 
@@ -369,13 +444,38 @@ def _references_from_grobid(pdf_path: str) -> list[Reference]:
         logger.warning("Could not parse TEI for %s: %s", pdf_path, exc)
         return []
 
+    from research_assistant.audit.pdf_refs import is_endnote_text
+
     references = []
     for raw in raw_references:
-        if not (raw.get("raw_reference") or raw.get("title")):
+        fallback_parts = []
+        if raw.get("authors"):
+            fallback_parts.append(", ".join(raw["authors"]))
+        if raw.get("title"):
+            fallback_parts.append(str(raw["title"]))
+        if raw.get("container"):
+            fallback_parts.append(str(raw["container"]))
+        if raw.get("year"):
+            fallback_parts.append(str(raw["year"]))
+        if raw.get("doi"):
+            fallback_parts.append(f"doi:{raw['doi']}")
+        if raw.get("arxiv_id"):
+            fallback_parts.append(f"arXiv:{raw['arxiv_id']}")
+        if raw.get("url"):
+            fallback_parts.append(str(raw["url"]))
+        synthesized_raw = ". ".join(p for p in fallback_parts if p)
+
+        raw_str = raw.get("raw_reference") or raw.get("title") or synthesized_raw
+        if not raw_str:
+            continue
+        if (
+            not (raw.get("authors") or raw.get("year") or raw.get("doi") or raw.get("arxiv_id") or raw.get("url"))
+            and is_endnote_text(raw_str)
+        ):
             continue
         references.append(
             Reference(
-                raw_reference=raw.get("raw_reference") or raw.get("title") or "",
+                raw_reference=raw_str,
                 source_file=raw.get("source_file") or os.path.basename(pdf_path),
                 title=raw.get("title"),
                 container=raw.get("container"),
@@ -383,6 +483,8 @@ def _references_from_grobid(pdf_path: str) -> list[Reference]:
                 year=raw.get("year"),
                 doi=raw.get("doi"),
                 doi_confidence=raw.get("doi_confidence"),
+                arxiv_id=raw.get("arxiv_id"),
+                pmid=raw.get("pmid"),
                 xml_id=raw.get("xml_id"),
                 extraction_method="grobid",
             )
@@ -560,10 +662,15 @@ def _references_from_regex(pdf_path: str) -> list[Reference]:
     for _, raw_ref in best_cits:
         if raw_ref not in seen:
             seen.add(raw_ref)
+            ext_doi = extract_doi_from_text(raw_ref)
+            ext_arxiv = extract_arxiv_from_text(raw_ref)
             references.append(
                 Reference(
                     raw_reference=raw_ref,
                     source_file=source_file,
+                    doi=ext_doi,
+                    doi_confidence="high" if ext_doi else None,
+                    arxiv_id=ext_arxiv,
                     extraction_method="regex",
                 )
             )
@@ -830,4 +937,5 @@ def run_extractor() -> dict:
 
 
 if __name__ == "__main__":
+    pipeline_status.clear_cancel_request()
     run_extractor()

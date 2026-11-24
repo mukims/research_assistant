@@ -130,14 +130,21 @@ def run_ingestor(workers: int = 1, force: bool = False):
 
         abstract_corpus = []
         abstract_keys = []
+        manifest_dirty = False
+        aliases_to_add = []
         for key, record in downloaded.items():
             if record.get("evidence_tier") == "abstract_only" and record.get("abstract"):
                 doc_key = record.get("key") or key
-                if not force and manifest.contains(doc_key):
-                    continue
                 tk = title_key(record.get("title"))
                 if tk and tk in titles_map and titles_map[tk] != doc_key:
-                    logger.info("Skipping abstract-only %s: same paper as %s", doc_key, titles_map[tk])
+                    keeper_doc = titles_map[tk]
+                    logger.info("Skipping abstract-only %s: same paper as %s", doc_key, keeper_doc)
+                    if record.get("canonical_document") != keeper_doc:
+                        record["canonical_document"] = keeper_doc
+                        manifest_dirty = True
+                    aliases_to_add.append((doc_key, keeper_doc))
+                    continue
+                if not force and manifest.contains(doc_key):
                     continue
                 if tk:
                     titles_map[tk] = doc_key
@@ -171,6 +178,21 @@ def run_ingestor(workers: int = 1, force: bool = False):
                     },
                 })
                 abstract_keys.append(doc_key)
+        if aliases_to_add:
+            try:
+                from research_assistant.config import PAPER_INDEX_PATH
+                from research_assistant.shared.paper_index import edit as edit_paper_index
+                with edit_paper_index(PAPER_INDEX_PATH) as idx_edit:
+                    for al, kp in aliases_to_add:
+                        idx_edit.add_alias(al, kp)
+            except Exception as exc:
+                logger.debug("Could not persist abstract->fulltext aliases: %s", exc)
+        if manifest_dirty:
+            try:
+                from research_assistant.shared.atomic import atomic_write_json
+                atomic_write_json(DOWNLOADED_JSON_PATH, downloaded, ensure_ascii=False)
+            except Exception as exc:
+                logger.debug("Could not persist canonical_document on downloaded.json: %s", exc)
         if abstract_corpus:
             logger.info("Ingesting %d abstract-only paper(s)...", len(abstract_keys))
             from research_assistant.shared.ingestion import upsert_corpus, last_summary_run
@@ -220,4 +242,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     multiprocessing.set_start_method("spawn", force=True)
+    pipeline_status.clear_cancel_request()
     run_ingestor(workers=args.workers, force=args.force)

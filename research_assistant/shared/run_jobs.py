@@ -113,6 +113,7 @@ def start_job(
     runner: Callable,
     origin: str = "audit",
     metadata: Optional[dict] = None,
+    clear_cancel: bool = False,
 ) -> Job:
     """Run *runner* in a daemon thread and register it under *job_id*.
 
@@ -133,6 +134,11 @@ def start_job(
         job = Job(job_id, label, origin, metadata=metadata)
         _JOBS[job_id] = job
 
+    if clear_cancel:
+        # Clear any stale cancellation from an earlier run only after single-flight
+        # admission succeeds so a JobBusy refusal never un-cancels an active run.
+        pipeline_status.clear_cancel_request(job_id=job_id)
+
     def _run():
         with pipeline_status.job_status_context(job_id):
             try:
@@ -142,10 +148,13 @@ def start_job(
                 if pipeline_status.is_cancel_requested(job_id):
                     raise pipeline_status.PipelineCancelledError(f"Run {job_id} cancelled during execution")
                 job.result = final if isinstance(final, dict) else {}
-                try:
-                    save_run(job_id, job.result, label=label, origin=origin, metadata=job.metadata, state="done")
-                except Exception as exc:  # the run succeeded; only its record failed
-                    logger.warning("Could not save run %s: %s", job_id, exc)
+                with _LOCK:
+                    is_current = _JOBS.get(job_id) is job
+                if is_current:
+                    try:
+                        save_run(job_id, job.result, label=label, origin=origin, metadata=job.metadata, state="done")
+                    except Exception as exc:  # the run succeeded; only its record failed
+                        logger.warning("Could not save run %s: %s", job_id, exc)
                 # State flips last: a reader that sees "done" may rely on the
                 # record being on disk already.
                 job.state = "done"
@@ -157,18 +166,21 @@ def start_job(
                     end_state = "failed"
                     job.error = pipeline_status.format_exception_detail(exc)
                     logger.error("Run %s failed: %s\n%s", job_id, job.error, traceback.format_exc())
-                try:
-                    save_run(
-                        job_id,
-                        job.snapshot or {"stopped": job.error},
-                        label=label,
-                        origin=origin,
-                        metadata=job.metadata,
-                        state=end_state,
-                        error=job.error,
-                    )
-                except Exception as save_err:
-                    logger.warning("Could not save interrupted run %s: %s", job_id, save_err)
+                with _LOCK:
+                    is_current = _JOBS.get(job_id) is job
+                if is_current:
+                    try:
+                        save_run(
+                            job_id,
+                            job.snapshot or {"stopped": job.error},
+                            label=label,
+                            origin=origin,
+                            metadata=job.metadata,
+                            state=end_state,
+                            error=job.error,
+                        )
+                    except Exception as save_err:
+                        logger.warning("Could not save interrupted run %s: %s", job_id, save_err)
                 # State flips last, as on the success path: a reader that sees
                 # "failed" or "cancelled" may rely on the record being on disk.
                 job.state = end_state

@@ -143,16 +143,21 @@ def render_audit_tab():
                 seed_file_path = staged[0]["path"]
                 effective_q = pdf_query.strip()
                 from research_assistant.shared.seed_audit import (
+                    AUDIT_SCHEMA_VERSION,
                     cross_check_seed_audit,
                     get_cached_seed_audit,
                 )
 
-                cached = get_cached_seed_audit(seed_file_path) if not force else None
+                raw_cached = get_cached_seed_audit(seed_file_path) if not force else None
+                legacy_cache = bool(
+                    raw_cached and raw_cached.get("audit_schema_version", 1) < AUDIT_SCHEMA_VERSION
+                )
+                cached = None if legacy_cache else raw_cached
                 # A record exists but the judge never ran on it (backend was
                 # down): the corpus already holds the seed and its references,
                 # so only the audit is re-run — as a job, not in this session.
                 stale = (
-                    None if (cached or force)
+                    None if (cached or force or legacy_cache)
                     else get_cached_seed_audit(seed_file_path, include_failed=True)
                 )
                 if stale:
@@ -174,8 +179,9 @@ def render_audit_tab():
                         expanded=True,
                     ) as status:
                         cached_res = get_cached_search_resources(_get_resources_mtime())
+                        cc_cap = config.CITATION_AUDIT_MAX_CLAIMS if config.CITATION_AUDIT_MAX_CLAIMS > 0 else -1
                         audit_res, summary = cross_check_seed_audit(
-                            seed_file_path, cached, search_resources=cached_res
+                            seed_file_path, cached, search_resources=cached_res, max_new_claims=cc_cap
                         )
                         status.update(
                             label=f"Done — cross-checked in {summary['duration_seconds']:.1f}s!",

@@ -574,9 +574,8 @@ def _start_audit_job(
         "origin": origin,
         "force": force,
     }
-    pipeline_status.clear_cancel_request(job_id=job_id)
     try:
-        run_jobs.start_job(job_id, label, runner, origin=origin, metadata=metadata)
+        run_jobs.start_job(job_id, label, runner, origin=origin, metadata=metadata, clear_cancel=True)
     except run_jobs.JobBusy as busy:
         st.warning(
             f"A run is already active on the server ({busy.job.label}). "

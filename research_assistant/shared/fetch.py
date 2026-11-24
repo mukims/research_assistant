@@ -21,7 +21,56 @@ logger = get_logger("fetch")
 # Crossref, arXiv, Unpaywall and Semantic Scholar all ask for identifying
 # contact details. Being polite gets you the faster rate-limit pool rather
 # than the shared one.
-HEADERS = {"User-Agent": USER_AGENT}
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+}
+
+_PMC_URL_RE = re.compile(r"\b(PMC\d{4,})\b", re.IGNORECASE)
+_OPENREVIEW_FORUM_RE = re.compile(r"https?://openreview\.net/forum\?id=([A-Za-z0-9_\-]+)", re.IGNORECASE)
+_ACLANTHOLOGY_RE = re.compile(r"^https?://aclanthology\.org/([A-Za-z0-9.\-_]+)/?$", re.IGNORECASE)
+_BIORXIV_MEDRXIV_RE = re.compile(
+    r"^(https?://(?:www\.)?(?:bio|med)rxiv\.org/content/10\.1101/[0-9.\-v]+)(?:v\d+)?(?:\.abstract|\.full)?/?$",
+    re.IGNORECASE,
+)
+
+
+def candidate_pdf_urls(url: str | None) -> list[str]:
+    """Expand a landing-page or repository URL into ordered direct-PDF candidate URLs."""
+    if not url or not str(url).strip():
+        return []
+    u = str(url).strip()
+    out: list[str] = []
+
+    def _add(cand: str):
+        if cand and cand not in out:
+            out.append(cand)
+
+    from research_assistant.shared.source_key import extract_arxiv_from_text
+
+    arxiv_id = extract_arxiv_from_text(u)
+    if arxiv_id and ("arxiv.org" in u.lower() or "10.48550/arxiv." in u.lower()):
+        _add(f"https://arxiv.org/pdf/{arxiv_id}.pdf")
+
+    m_or = _OPENREVIEW_FORUM_RE.search(u)
+    if m_or:
+        _add(f"https://openreview.net/pdf?id={m_or.group(1)}")
+
+    m_acl = _ACLANTHOLOGY_RE.match(u)
+    if m_acl and not u.lower().endswith(".pdf"):
+        _add(f"https://aclanthology.org/{m_acl.group(1)}.pdf")
+
+    m_bio = _BIORXIV_MEDRXIV_RE.match(u)
+    if m_bio:
+        _add(f"{u.rstrip('/')}.full.pdf" if not u.lower().endswith(".full") else f"{u}.pdf")
+
+    m_pmc = _PMC_URL_RE.search(u)
+    if m_pmc and ("ncbi.nlm.nih.gov/pmc" in u.lower() or "pmc.ncbi.nlm.nih.gov" in u.lower() or "europepmc.org" in u.lower()):
+        pmcid = m_pmc.group(1).upper()
+        _add(f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextPdf")
+
+    _add(u)
+    return out
 
 
 def filename_for(key: str) -> str:

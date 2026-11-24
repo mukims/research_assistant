@@ -17,7 +17,12 @@ from research_assistant.config import (
 from research_assistant.shared.claim_text import clean_text, is_numeric_cite
 from research_assistant.shared.log import get_logger
 from research_assistant.shared import pipeline_status
-from research_assistant.shared.source_key import normalise_doi
+from research_assistant.shared.paper_index import normalise_arxiv
+from research_assistant.shared.source_key import (
+    extract_arxiv_from_text,
+    normalise_doi,
+    source_key,
+)
 
 logger = get_logger("audit_resolver")
 
@@ -201,15 +206,73 @@ def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map) -> tuple[Opti
 
 def _load_downloaded_manifest(manifest_path: str | None = None, pulled_dir: str | None = None) -> dict:
     path = manifest_path or DOWNLOADED_JSON_PATH
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-    except Exception as e:
-        logger.warning("Could not read %s: %s", path, e)
-        return {}
-    return _relocate_manifest_paths(manifest, pulled_dir=pulled_dir)
+    manifest = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                manifest = loaded
+        except Exception as e:
+            logger.warning("Could not read %s: %s", path, e)
+            manifest = {}
+
+    manifest = _relocate_manifest_paths(manifest, pulled_dir=pulled_dir)
+
+    # Enrich from sibling paper_index.json (aliases + corpus papers not in downloaded.json)
+    idx_path = os.path.join(os.path.dirname(os.path.abspath(path)), "paper_index.json")
+    if os.path.exists(idx_path):
+        try:
+            from research_assistant.shared.academic_apis import verify_candidate_match
+            from research_assistant.shared.paper_index import PaperIndex
+            from research_assistant.shared.source_key import pdf_key
+
+            idx = PaperIndex.load(idx_path)
+            known_docs = set()
+            for k, entry in manifest.items():
+                if not isinstance(entry, dict):
+                    continue
+                doc_cand = pdf_key(entry["path"]) if entry.get("path") else (entry.get("key") or k)
+                resolved = idx.resolve(doc_cand)
+                if resolved is not None:
+                    known_docs.add(resolved.document)
+                    # Guard against legacy pre-verification PDFs in paper_index whose title disagrees
+                    if entry.get("title") and resolved.title:
+                        if not verify_candidate_match(entry["title"], resolved.title, max_year_diff=4):
+                            continue
+                    if resolved.document != doc_cand:
+                        entry["canonical_document"] = resolved.document
+                        if resolved.path and os.path.exists(resolved.path):
+                            entry["path"] = resolved.path
+                            entry["evidence_tier"] = "full_text"
+                else:
+                    known_docs.add(doc_cand)
+
+            for doc_name, p_entry in idx._papers.items():
+                if doc_name in known_docs:
+                    continue
+                if not p_entry.path or not os.path.exists(p_entry.path):
+                    continue
+                synth_key = (
+                    f"doi:{p_entry.dois[0]}"
+                    if p_entry.dois
+                    else (f"arxiv:{p_entry.arxiv_ids[0]}" if p_entry.arxiv_ids else f"corpus:{doc_name}")
+                )
+                if synth_key not in manifest:
+                    manifest[synth_key] = {
+                        "key": synth_key,
+                        "path": p_entry.path,
+                        "canonical_document": doc_name,
+                        "evidence_tier": "full_text",
+                        "provider": "corpus",
+                        "title": p_entry.title,
+                        "doi": p_entry.dois[0] if p_entry.dois else None,
+                        "arxiv_id": p_entry.arxiv_ids[0] if p_entry.arxiv_ids else None,
+                    }
+        except Exception as exc:
+            logger.debug("Could not enrich manifest from %s: %s", idx_path, exc)
+
+    return manifest
 
 
 def _relocate_manifest_paths(manifest: dict, pulled_dir: str | None = None) -> dict:
@@ -251,22 +314,56 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
 
     ref_xml_id = ref.get("xml_id")
     ref_doi = normalise_doi(ref.get("doi"))
+    ref_arxiv = normalise_arxiv(
+        ref.get("arxiv_id")
+        or extract_arxiv_from_text(ref.get("doi"))
+        or extract_arxiv_from_text(ref.get("url"))
+        or extract_arxiv_from_text(ref.get("raw_reference"))
+    )
     ref_title = _title_key(ref.get("title"))
 
-    # 1. Match by xml_id and cited_by
+    # 1. Match by xml_id and cited_by (including multi-paper cited_refs registry)
     if ref_xml_id and seed_pdf_name:
+        cref_tag = f"{seed_pdf_name}:{ref_xml_id}"
         for entry in downloaded_manifest.values():
-            if (
-                entry.get("xml_id") == ref_xml_id
-                and entry.get("cited_by") == seed_pdf_name
-            ):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("xml_id") == ref_xml_id and entry.get("cited_by") == seed_pdf_name:
+                return entry
+            cited_refs = entry.get("cited_refs")
+            if isinstance(cited_refs, list) and cref_tag in cited_refs:
                 return entry
 
     # 2. Match by DOI
     if ref_doi:
         for entry in downloaded_manifest.values():
-            if normalise_doi(entry.get("doi")) == ref_doi:
+            if isinstance(entry, dict) and normalise_doi(entry.get("doi")) == ref_doi:
                 return entry
+
+    # 2b. Match by arXiv ID
+    if ref_arxiv:
+        arxiv_key = f"arxiv:{ref_arxiv}"
+        if isinstance(downloaded_manifest.get(arxiv_key), dict):
+            return downloaded_manifest[arxiv_key]
+        for entry in downloaded_manifest.values():
+            if not isinstance(entry, dict):
+                continue
+            ent_arxiv = normalise_arxiv(
+                entry.get("arxiv_id")
+                or extract_arxiv_from_text(entry.get("doi"))
+                or extract_arxiv_from_text(entry.get("key"))
+            )
+            if ent_arxiv and ent_arxiv == ref_arxiv:
+                return entry
+
+    # 2c. Match by deterministic source_key(ref)
+    s_key = source_key(ref)
+    if s_key and isinstance(downloaded_manifest.get(s_key), dict):
+        # Guard against matching a completely different DOI when ref carried an explicit DOI
+        cand_entry = downloaded_manifest[s_key]
+        cand_doi = normalise_doi(cand_entry.get("doi"))
+        if not (ref_doi and cand_doi and ref_doi != cand_doi):
+            return cand_entry
 
     # 3. Match by title. Exactly equal wins. Otherwise only near-equal: one title
     # inside the other with the shorter at least 80% of the longer (a subtitle, an
@@ -274,16 +371,28 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
     # "science", "deep learning", and a bare substring test matched those to any
     # reference containing the words. Two different papers that both qualify are
     # not guessed between.
-    if len(ref_title) > 10:
+    from research_assistant.shared.academic_apis import title_variants
+
+    candidate_ref_titles = []
+    for tv in title_variants(ref.get("title")):
+        tk = _title_key(tv)
+        if len(tk) > 10 and tk not in candidate_ref_titles:
+            candidate_ref_titles.append(tk)
+    if len(ref_title) > 10 and ref_title not in candidate_ref_titles:
+        candidate_ref_titles.insert(0, ref_title)
+
+    for r_title in candidate_ref_titles:
         exact, near = [], []
         for entry in downloaded_manifest.values():
+            if not isinstance(entry, dict):
+                continue
             entry_title = _title_key(entry.get("title"))
             if not entry_title:
                 continue
-            if entry_title == ref_title:
+            if entry_title == r_title:
                 exact.append((entry_title, entry))
                 continue
-            shorter, longer = sorted((entry_title, ref_title), key=len)
+            shorter, longer = sorted((entry_title, r_title), key=len)
             if len(shorter) > 10 and shorter in longer and len(shorter) >= 0.8 * len(longer):
                 near.append((entry_title, entry))
         for group in (exact, near):
@@ -291,7 +400,7 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
                 if len({t for t, _ in group}) == 1:      # one title, however many copies
                     return group[0][1]
                 logger.warning("Reference %r matches %d different downloaded titles; leaving it unresolved",
-                               ref_title[:60], len({t for t, _ in group}))
+                               r_title[:60], len({t for t, _ in group}))
                 return None
 
     return None

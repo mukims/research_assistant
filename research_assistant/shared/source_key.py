@@ -35,16 +35,73 @@ def _hash(prefix, payload, length=16):
     return f"{prefix}:{digest}"
 
 
+_ARXIV_ID_PATTERNS = (
+    re.compile(r"10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", re.IGNORECASE),
+    re.compile(
+        r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z\-]+(?:\.[a-z]{2})?/[0-9]{7}(?:v\d+)?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\barxiv\s*(?:preprint\s*(?:arxiv\s*)?)?[:/\s]\s*([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z\-]+(?:\.[a-z]{2})?/[0-9]{7}(?:v\d+)?)\b",
+        re.IGNORECASE,
+    ),
+)
+
+_EMBEDDED_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"'<>\]\}]+)", re.IGNORECASE)
+_DOI_TRAILING_JUNK_RE = re.compile(r"(?:/mm\d+|(?<=\d)(?:website|webpage|online|html|pdf))$", re.IGNORECASE)
+
+
 def normalise_doi(doi):
-    """Strip the common prefixes so the same DOI always folds to one string."""
+    """Strip the common prefixes and trailing extraction noise so the same DOI folds to one string."""
     if not doi:
         return None
-    doi = doi.strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "doi:", "doi "):
+    doi = str(doi).strip().lower()
+    for prefix in (
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi.org/",
+        "dx.doi.org/",
+        "doi:",
+        "doi ",
+    ):
         if doi.startswith(prefix):
-            doi = doi[len(prefix):]
-    doi = doi.strip().rstrip(".")
-    return doi if doi.startswith("10.") else None
+            doi = doi[len(prefix):].strip()
+    while doi and doi[-1] in ".,;:'\"\\]}>":
+        doi = doi[:-1].strip()
+    while doi.endswith(")") and doi.count(")") > doi.count("("):
+        doi = doi[:-1].strip()
+    doi = _DOI_TRAILING_JUNK_RE.sub("", doi).rstrip("./,;")
+    return doi if doi.startswith("10.") and "/" in doi and len(doi.split("/", 1)[1]) >= 2 else None
+
+
+def extract_arxiv_from_text(text: str | None) -> str | None:
+    """Extract a canonical arXiv identifier from a reference string, DOI, or URL."""
+    if not text:
+        return None
+    s = str(text)
+    for pat in _ARXIV_ID_PATTERNS:
+        m = pat.search(s)
+        if m:
+            aid = m.group(1).strip().rstrip(".,;:)")
+            if aid.lower().endswith(".pdf"):
+                aid = aid[:-4]
+            return aid.lower()
+    return None
+
+
+def extract_doi_from_text(text: str | None) -> str | None:
+    """Extract a normalised DOI from raw reference text when structured fields omit it."""
+    if not text:
+        return None
+    for m in _EMBEDDED_DOI_RE.finditer(str(text)):
+        cand = normalise_doi(m.group(1))
+        if cand and not cand.startswith("10.48550/arxiv."):
+            return cand
+        if cand:
+            return cand
+    return None
 
 
 def source_key(record, min_doi_confidence=("high", "medium")):

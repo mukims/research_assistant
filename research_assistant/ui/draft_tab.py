@@ -70,9 +70,8 @@ def _start_draft_job(kind: Literal["cite", "verify"], text_or_path: str) -> str 
             return _run_verify(text_or_path)
 
     metadata = {"kind": kind, "label": label, "draft_path": draft_path or text_or_path}
-    pipeline_status.clear_cancel_request(job_id=job_id)
     try:
-        run_jobs.start_job(job_id, label, runner, origin="draft", metadata=metadata)
+        run_jobs.start_job(job_id, label, runner, origin="draft", metadata=metadata, clear_cancel=True)
     except run_jobs.JobBusy as busy:
         if draft_path:
             try:

@@ -194,8 +194,12 @@ def fetch(state: PipelineState) -> dict:
     if pipeline_status.is_cancel_requested():
         return {"stopped": "Pipeline stopped by user via UI"}
     _banner("fetch — downloading the referenced papers (Agent 2)")
+    seed_name = os.path.basename(state["seed_path"]) if state.get("seed_path") else None
     with pipeline_status.track_stage("fetch", "Fetching referenced papers", current_step=4, total_steps=5, detail="Downloading open-access reference PDFs"):
-        agent2_fetcher.fetch_papers()
+        try:
+            agent2_fetcher.fetch_papers(source_file=seed_name)
+        except TypeError:
+            agent2_fetcher.fetch_papers()
         return {}
 
 
@@ -213,32 +217,41 @@ def ingest_refs(state: PipelineState) -> dict:
 def respond(state: PipelineState) -> dict:
     if pipeline_status.is_cancel_requested():
         return {"stopped": "Pipeline stopped by user via UI"}
-    _banner("respond — related-work synthesis for the query")
+    _banner("respond — related-work synthesis and/or citation audit")
     from research_assistant.shared import retrieve  # imported here so corpus-building stays light
 
     with pipeline_status.track_stage("respond", "Synthesizing answer", current_step=5, total_steps=5, detail=f"Synthesizing related-work response for: {state.get('query', '')[:50]}"):
-        pipeline_status.add_event("✍️ Formulating related-work synthesis…")
-        synth_mode = state.get("synthesis_mode") or config.SYNTHESIS_MODE
-        result = retrieve.research_answer(
-            state["query"], mode=synth_mode, model=state.get("model"), backend=state.get("backend"),
-        )
-        pipeline_status.add_event("✅ Related-work synthesis complete")
+        result = None
+        if state.get("ask"):
+            pipeline_status.add_event("✍️ Formulating related-work synthesis…")
+            synth_mode = state.get("synthesis_mode") or config.SYNTHESIS_MODE
+            result = retrieve.research_answer(
+                state["query"], mode=synth_mode, model=state.get("model"), backend=state.get("backend"),
+            )
+            pipeline_status.add_event("✅ Related-work synthesis complete")
 
         audit_result = None
         if state.get("audit_citations") and state.get("seed_path"):
             try:
                 from research_assistant.shared import seed_audit
                 pipeline_status.add_event("🔍 Auditing in-text citations from seed paper…")
+                audit_force = bool(state.get("force", False))
+                if not audit_force:
+                    existing_audit = seed_audit.get_cached_seed_audit(state["seed_path"])
+                    if existing_audit and existing_audit.get("audit_schema_version", 1) < getattr(seed_audit, "AUDIT_SCHEMA_VERSION", 2):
+                        audit_force = True
                 audit_result = seed_audit.audit_seed_citations(
                     state["seed_path"],
-                    force=state.get("force", False),
+                    force=audit_force,
                 )
                 pipeline_status.add_event("✅ Seed citation audit complete")
             except Exception as e:
                 logger.warning("Seed citation audit encountered an error: %s", e)
                 audit_result = {"error": str(e), "totals": {"total": 0, "judged": 0}, "results": []}
 
-        out = {"answer": result}
+        out = {}
+        if result is not None:
+            out["answer"] = result
         if audit_result is not None:
             out["citation_audit"] = audit_result
         return out
@@ -288,7 +301,7 @@ def _after_extract(state: PipelineState) -> str:
 def _after_ingest_refs(state: PipelineState) -> str:
     if state.get("stopped"):
         return END
-    return "respond" if state.get("ask") else END
+    return "respond" if (state.get("ask") or state.get("audit_citations")) else END
 
 
 def build_graph():
