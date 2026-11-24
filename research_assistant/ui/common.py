@@ -184,6 +184,12 @@ def _render_sidebar_backend_controls():
             default_idx = idx
             break
 
+    if (
+        "sidebar_chat_model_selector" in st.session_state
+        and st.session_state["sidebar_chat_model_selector"] not in labels
+    ):
+        del st.session_state["sidebar_chat_model_selector"]
+
     sel_label = st.selectbox(
         "Chat Model Engine",
         options=labels,

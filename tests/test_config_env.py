@@ -42,3 +42,41 @@ def test_disable_switch_keeps_keys_out(tmp_path):
         capture_output=True, text=True, cwd=REPO_ROOT,
     )
     assert out.stdout.split() == ["False", "ollama"]
+
+
+def test_refresh_dotenv_picks_up_key_added_after_startup(tmp_path):
+    proj = tmp_path / "proj"
+    data = tmp_path / "data"
+    proj.mkdir()
+    data.mkdir()
+    script = f"""
+import pathlib
+from research_assistant import config
+from research_assistant.shared import llm
+
+config.PROJECT_ROOT = {str(proj)!r}
+config.DATA_DIR = {str(data)!r}
+config._DOTENV_ENABLED = True
+config._LAST_DOTENV_SIG = config._dotenv_signature(config._dotenv_paths())
+
+assert config.GEMINI_API_KEY is None
+assert llm.GEMINI_API_KEY is None
+assert config.LLM_BACKEND == "ollama"
+
+(pathlib.Path({str(proj)!r}) / ".env").write_text("GEMINI_API_KEY=test-live-key\\n")
+assert config.refresh_dotenv() is True
+assert config.GEMINI_API_KEY == "test-live-key"
+assert config.OPENAI_API_KEY == "test-live-key"
+assert config.LLM_BACKEND == "openai"
+assert llm.GEMINI_API_KEY == "test-live-key"
+assert llm.OPENAI_API_KEY == "test-live-key"
+assert config.refresh_dotenv() is False
+print("OK")
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", script],
+        env={"PATH": os.environ["PATH"], "CITATION_DISABLE_DOTENV": "1"},
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "OK"

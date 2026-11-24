@@ -12,11 +12,33 @@ audit (the citation-audit report), jobs (background runs), status and grobid (th
 sidebar widgets).
 """
 
+import importlib
 import os
+import sys
 
 import streamlit as st
 
 from research_assistant import config
+
+if not hasattr(config, "refresh_dotenv"):
+    _prev_cfg = {
+        k: getattr(config, k, None)
+        for k in (
+            "GEMINI_API_KEY", "LLM_BACKEND", "EMBED_BACKEND", "OPENAI_BASE_URL",
+            "OPENAI_API_KEY", "HF_TOKEN", "LLM_MODEL", "CHAT_MODEL", "EMBED_MODEL",
+            "EMBED_IMAGES", "CHAT_WINDOW_TOKENS", "JUDGEMENT_MODEL",
+            "UNPAYWALL_EMAIL", "USER_AGENT", "OPENALEX_MAILTO", "S2_API_KEY",
+        )
+    }
+    importlib.reload(config)
+    config._propagate_config_changes(_prev_cfg)
+    for _ui_mod in ("research_assistant.ui.common", "research_assistant.ui.preflight"):
+        if _ui_mod in sys.modules:
+            importlib.reload(sys.modules[_ui_mod])
+    st.cache_data.clear()
+elif config.refresh_dotenv():
+    st.cache_data.clear()
+
 from research_assistant.ui.audit_tab import render_audit_tab
 from research_assistant.ui.chat_tab import render_chat_tab
 from research_assistant.ui.common import _check_auth, _corpus_stats, _render_sidebar_backend_controls
@@ -104,7 +126,7 @@ with st.sidebar:
     _render_grobid_controls()
     # This session's pick (set just above by the picker); config holds only the default.
     if (st.session_state.get("llm_backend") or config.LLM_BACKEND) == "openai" and not config.OPENAI_API_KEY:
-        st.error("No OPENAI_API_KEY / HF_TOKEN set.", icon="🚫")
+        st.error("No OPENAI_API_KEY / GEMINI_API_KEY / HF_TOKEN set.", icon="🚫")
     render_preflight_sidebar()
 
 

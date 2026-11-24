@@ -38,11 +38,17 @@ PROJECT_ROOT = os.path.dirname(PACKAGE_ROOT)
 
 # What the process was started with. Real environment > DATA_DIR/.env > project .env.
 # CITATION_DISABLE_DOTENV=1 skips every .env file (the test suite sets it).
-_REAL_ENV = frozenset(os.environ)
+_REAL_ENV = globals().get("_REAL_ENV") or frozenset(os.environ)
 _DOTENV_ENABLED = os.environ.get("CITATION_DISABLE_DOTENV") != "1"
+_DOTENV_LOADED_KEYS: set[str] = set()
+_AUTO_SET_MODEL_ENV_KEYS: set[str] = set()
 
 if _DOTENV_ENABLED:
+    _before_proj_env = dict(os.environ)
     load_env_files([os.path.join(PROJECT_ROOT, ".env")], _REAL_ENV)
+    for _k, _v in os.environ.items():
+        if _k not in _REAL_ENV and _before_proj_env.get(_k) != _v:
+            _DOTENV_LOADED_KEYS.add(_k)
 
 # Everything the pipeline *writes* is anchored here, separate from the source
 # tree. Set CITATION_DATA_DIR to a writable path (e.g. /data) on a read-only or
@@ -50,7 +56,29 @@ if _DOTENV_ENABLED:
 DATA_DIR = os.environ.get("CITATION_DATA_DIR", os.path.join(PROJECT_ROOT, "data"))
 
 if _DOTENV_ENABLED:
+    _before_data_env = dict(os.environ)
     load_env_files([os.path.join(DATA_DIR, ".env")], _REAL_ENV)
+    for _k, _v in os.environ.items():
+        if _k not in _REAL_ENV and _before_data_env.get(_k) != _v:
+            _DOTENV_LOADED_KEYS.add(_k)
+
+
+def _dotenv_paths() -> list[str]:
+    return [os.path.join(PROJECT_ROOT, ".env"), os.path.join(DATA_DIR, ".env")]
+
+
+def _dotenv_signature(paths: list[str]) -> tuple:
+    sig = []
+    for path in paths:
+        try:
+            st_res = os.stat(path)
+            sig.append((path, st_res.st_mtime_ns, st_res.st_size))
+        except OSError:
+            sig.append((path, None, None))
+    return tuple(sig)
+
+
+_LAST_DOTENV_SIG = _dotenv_signature(_dotenv_paths()) if _DOTENV_ENABLED else ()
 
 
 # ─── Hardware CPU Guardrails ─────────────────────────────────────────────────
@@ -129,8 +157,10 @@ if (LLM_BACKEND == "openai" or GEMINI_API_KEY) and GEMINI_API_KEY:
     _default_embed_backend = "ollama"
     if os.environ.get("CITATION_LLM_MODEL") in (None, "", *_LEGACY_DEFAULT_OLLAMA_MODELS):
         os.environ["CITATION_LLM_MODEL"] = _default_llm_model
+        _AUTO_SET_MODEL_ENV_KEYS.add("CITATION_LLM_MODEL")
     if os.environ.get("CITATION_CHAT_MODEL") in (None, "", *_LEGACY_DEFAULT_OLLAMA_MODELS):
         os.environ["CITATION_CHAT_MODEL"] = _default_llm_model
+        _AUTO_SET_MODEL_ENV_KEYS.add("CITATION_CHAT_MODEL")
 else:
     _default_base_url = "https://router.huggingface.co/v1"
     _default_llm_model = DEFAULT_OLLAMA_MODEL
@@ -483,3 +513,143 @@ OCR_MODEL_DIR            = os.environ.get("CITATION_OCR_MODEL_DIR", os.path.join
 MAX_CITATION_LEN   = 500   # Skip citations longer than this (likely malformed)
 ARXIV_RATE_LIMIT   = 3     # Seconds between arXiv requests
 UNPAYWALL_SLEEP    = 0.5   # Courtesy sleep after Unpaywall downloads
+
+
+# ─── Live .env Refresh ───────────────────────────────────────────────────────
+_REFRESHABLE_ATTRS = (
+    "GEMINI_API_KEY",
+    "LLM_BACKEND",
+    "EMBED_BACKEND",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "HF_TOKEN",
+    "LLM_MODEL",
+    "CHAT_MODEL",
+    "EMBED_MODEL",
+    "EMBED_IMAGES",
+    "CHAT_WINDOW_TOKENS",
+    "JUDGEMENT_MODEL",
+    "UNPAYWALL_EMAIL",
+    "USER_AGENT",
+    "OPENALEX_MAILTO",
+    "S2_API_KEY",
+)
+
+
+def _apply_env_settings() -> None:
+    """Recompute credential, backend and contact settings from os.environ."""
+    global GEMINI_API_KEY, LLM_BACKEND, EMBED_BACKEND, OPENAI_BASE_URL, OPENAI_API_KEY
+    global HF_TOKEN, LLM_MODEL, CHAT_MODEL, EMBED_MODEL, EMBED_IMAGES, CHAT_WINDOW_TOKENS
+    global JUDGEMENT_MODEL, UNPAYWALL_EMAIL, USER_AGENT, OPENALEX_MAILTO, S2_API_KEY
+
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    llm_backend = os.environ.get("LLM_BACKEND")
+    if llm_backend is None:
+        llm_backend = "openai" if GEMINI_API_KEY else "ollama"
+    LLM_BACKEND = llm_backend.lower()
+
+    if (LLM_BACKEND == "openai" or GEMINI_API_KEY) and GEMINI_API_KEY:
+        default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        default_llm_model = DEFAULT_GEMINI_MODEL
+        default_embed_backend = "ollama"
+        if os.environ.get("CITATION_LLM_MODEL") in (None, "", *_LEGACY_DEFAULT_OLLAMA_MODELS):
+            os.environ["CITATION_LLM_MODEL"] = default_llm_model
+            _AUTO_SET_MODEL_ENV_KEYS.add("CITATION_LLM_MODEL")
+        if os.environ.get("CITATION_CHAT_MODEL") in (None, "", *_LEGACY_DEFAULT_OLLAMA_MODELS):
+            os.environ["CITATION_CHAT_MODEL"] = default_llm_model
+            _AUTO_SET_MODEL_ENV_KEYS.add("CITATION_CHAT_MODEL")
+    else:
+        default_base_url = "https://router.huggingface.co/v1"
+        default_llm_model = DEFAULT_OLLAMA_MODEL
+        default_embed_backend = LLM_BACKEND
+
+    EMBED_BACKEND = os.environ.get("CITATION_EMBED_BACKEND", default_embed_backend).lower()
+    OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", default_base_url)
+    if "generativelanguage.googleapis.com" in OPENAI_BASE_URL and GEMINI_API_KEY:
+        OPENAI_API_KEY = GEMINI_API_KEY
+    else:
+        OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("HF_TOKEN") or GEMINI_API_KEY
+    HF_TOKEN = os.environ.get("HF_TOKEN") or OPENAI_API_KEY
+
+    LLM_MODEL = os.environ.get("CITATION_LLM_MODEL", default_llm_model)
+    CHAT_MODEL = os.environ.get("CITATION_CHAT_MODEL", default_llm_model)
+    EMBED_MODEL = os.environ.get("CITATION_EMBED_MODEL", DEFAULT_EMBED_MODEL)
+    EMBED_IMAGES = EMBED_BACKEND == "ollama" and EMBED_MODEL.startswith("embeddinggemma-2")
+    CHAT_WINDOW_TOKENS = _env_int(
+        "CITATION_CHAT_WINDOW_TOKENS",
+        32768 if LLM_BACKEND == "openai" else CHAT_OLLAMA_OPTIONS.get("num_ctx", 4096),
+    )
+    default_judgement = DEFAULT_GEMINI_MODEL if GEMINI_API_KEY else None
+    JUDGEMENT_MODEL = os.environ.get("CITATION_JUDGEMENT_MODEL") or default_judgement or None
+
+    UNPAYWALL_EMAIL = os.environ.get("UNPAYWALL_EMAIL") or None
+    USER_AGENT = "research_assistant/0.2 (+" + PROJECT_URL + (
+        f"; mailto:{UNPAYWALL_EMAIL}" if UNPAYWALL_EMAIL else ""
+    ) + ")"
+    OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO") or UNPAYWALL_EMAIL
+    S2_API_KEY = os.environ.get("S2_API_KEY")
+
+
+def _propagate_config_changes(old_values: dict[str, object]) -> None:
+    """Update bindings imported from config across already-loaded package modules."""
+    import sys
+
+    changed = {
+        k: globals()[k]
+        for k in _REFRESHABLE_ATTRS
+        if k in old_values and globals().get(k) != old_values[k]
+    }
+    if not changed:
+        return
+    for name, mod in list(sys.modules.items()):
+        if mod is None or mod is sys.modules.get(__name__):
+            continue
+        if not (name.startswith("research_assistant.") or name == "orchestrate"):
+            continue
+        for attr, new_val in changed.items():
+            if hasattr(mod, attr) and getattr(mod, attr) == old_values[attr]:
+                setattr(mod, attr, new_val)
+        if "USER_AGENT" in changed:
+            for hdr_attr in ("HEADERS", "DEFAULT_HEADERS"):
+                hdrs = getattr(mod, hdr_attr, None)
+                if isinstance(hdrs, dict) and hdrs.get("User-Agent") == old_values["USER_AGENT"]:
+                    hdrs["User-Agent"] = changed["USER_AGENT"]
+    llm_mod = sys.modules.get("research_assistant.shared.llm")
+    if llm_mod is not None and hasattr(llm_mod, "_CLIENT_CACHE"):
+        llm_mod._CLIENT_CACHE.clear()
+
+
+def refresh_dotenv() -> bool:
+    """Re-read .env files when modified after startup (e.g. during a Streamlit session).
+
+    Returns True if any exported config attribute changed. No-op when
+    CITATION_DISABLE_DOTENV=1 (tests) or when .env file metadata is unchanged.
+    """
+    global _LAST_DOTENV_SIG
+    if not _DOTENV_ENABLED:
+        return False
+    paths = _dotenv_paths()
+    sig = _dotenv_signature(paths)
+    if sig == _LAST_DOTENV_SIG:
+        return False
+    _LAST_DOTENV_SIG = sig
+
+    old_values = {k: globals().get(k) for k in _REFRESHABLE_ATTRS}
+    for key in list(_DOTENV_LOADED_KEYS):
+        if key not in _REAL_ENV:
+            os.environ.pop(key, None)
+    _DOTENV_LOADED_KEYS.clear()
+    for auto_key in list(_AUTO_SET_MODEL_ENV_KEYS):
+        if auto_key not in _REAL_ENV:
+            os.environ.pop(auto_key, None)
+    _AUTO_SET_MODEL_ENV_KEYS.clear()
+
+    before = dict(os.environ)
+    load_env_files(paths, _REAL_ENV)
+    for key, val in os.environ.items():
+        if key not in _REAL_ENV and before.get(key) != val:
+            _DOTENV_LOADED_KEYS.add(key)
+
+    _apply_env_settings()
+    _propagate_config_changes(old_values)
+    return any(globals().get(k) != old_values[k] for k in _REFRESHABLE_ATTRS)

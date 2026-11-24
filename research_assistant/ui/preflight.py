@@ -16,15 +16,33 @@ def _session_target() -> tuple[str, str]:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_checks(llm_backend: str, chat_model: str) -> list:
+def _cached_checks(
+    llm_backend: str,
+    chat_model: str,
+    has_api_key: bool = False,
+    has_email: bool = False,
+) -> list:
     # dicts, not Check objects: st.cache_data pickles the result, keyed by the
-    # session's active backend and chat model so switching the sidebar picker
-    # updates the checks immediately; a 60s TTL picks up external daemon fixes.
+    # session's active backend, chat model and credential presence so switching
+    # the sidebar picker or editing .env updates the checks immediately; a 60s
+    # TTL picks up external daemon fixes.
     return [asdict(c) for c in run_checks(llm_backend=llm_backend, chat_model=chat_model)]
 
 
+def _checks_for_session() -> list:
+    if hasattr(config, "refresh_dotenv"):
+        config.refresh_dotenv()
+    llm_backend, chat_model = _session_target()
+    return _cached_checks(
+        llm_backend,
+        chat_model,
+        has_api_key=bool(config.OPENAI_API_KEY),
+        has_email=bool(config.UNPAYWALL_EMAIL),
+    )
+
+
 def render_preflight_banner() -> None:
-    failing = [c for c in _cached_checks(*_session_target()) if c["blocking"] and not c["ok"]]
+    failing = [c for c in _checks_for_session() if c["blocking"] and not c["ok"]]
     if not failing:
         return
     lines = "\n".join(f"- **{c['name']}**: {c['fix'] or c['detail']}" for c in failing)
@@ -33,7 +51,7 @@ def render_preflight_banner() -> None:
 
 def render_preflight_sidebar() -> None:
     with st.sidebar.expander("Setup checks"):
-        for c in _cached_checks(*_session_target()):
+        for c in _checks_for_session():
             icon = "✅" if c["ok"] else ("❌" if c["blocking"] else "⚠️")
             st.markdown(f"{icon} **{c['name']}**: {c['detail']}")
             if not c["ok"] and c["fix"]:
