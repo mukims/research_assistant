@@ -74,6 +74,87 @@ def paragraph_sentences(p) -> list[str]:
 _NUMERIC_CITE_RE = re.compile(r"^(?:refs?\.?|references?)?\s*[\[\(]?\s*\d+[\d,;\s\-–—\]\)]*$", re.IGNORECASE)
 _ROMAN_CITE_RE = re.compile(r"^[\[\(]\s*[ivxlcdmIVXLCDM]+[\s,;\-–—ivxlcdmIVXLCDM]*[\]\)]$")
 
+_DECIMAL_SECTION_OR_EQ_RE = re.compile(
+    r"^\s*[\(\[]?\s*(?:eqs?\.?|sec(?:tion)?s?\.?|fig(?:ure)?s?\.?|thm\.?|lem\.?|app\.?)?\s*"
+    r"\d+(?:\.\d+)+[a-z]?\s*[\)\]]?\s*$",
+    re.IGNORECASE,
+)
+_BROKEN_DECIMAL_HALF_RE = re.compile(
+    r"^(?:\s*[\(\[]\s*\d+\.\d*\s*|\s*\.\d+[a-z]?\s*[\)\]]\s*)$",
+    re.IGNORECASE,
+)
+_INTERNAL_XREF_RE = re.compile(
+    r"^\s*[\(\[]?\s*(?:chapter|chap\.?|section|sec\.?|appendix|app\.?|part|theorem|thm\.?|"
+    r"lemma|lem\.?|proposition|prop\.?|corollary|cor\.?|exercise|ex\.?)\s+"
+    r"[A-Z0-9]+(?:\.[A-Z0-9]+)*\s*[\)\]]?\s*$",
+    re.IGNORECASE,
+)
+_CODE_ARRAY_OR_SLICE_RE = re.compile(
+    r"(?:^\s*\[\s*-?\d*\s*:\s*-?\d*(?:\s*:\s*-?\d*)?\s*\]\s*$"
+    r"|\btensor\s*\("
+    r"|\[\s*\["
+    r"|\d+\.\s*,"
+    r"|,\s*\d+\.\s*[,\]]"
+    r"|^\s*\[\s*0\s*[,\]]\s*$)",
+    re.IGNORECASE,
+)
+_LIFESPAN_RE = re.compile(
+    r"(?:\b1[5-9]\d{2}\s*[-–—]\s*(?:1[6-9]\d{2}|20\d{2})\b"
+    r"|\(\s*[-–—]\s*(?:1[6-9]\d{2}|20\d{2})\s*\)\s*\)?$)"
+)
+_YEAR_ANY_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})[a-z]?\b")
+_MULTI_AY_SPLIT_RE = re.compile(
+    r"(?<=\b(?:1[89]\d{2}|20\d{2}))\s*[;,]\s*(?=[A-ZÀ-ÖØ-Þ])"
+    r"|(?<=\b(?:1[89]\d{2}|20\d{2})[a-z])\s*[;,]\s*(?=[A-ZÀ-ÖØ-Þ])"
+)
+
+
+def is_non_citation_ref(txt: str, has_valid_target: bool = False) -> bool:
+    """True when a GROBID ``<ref type="bibr">`` node is actually an equation/section
+    cross-reference (``(1.3)``, ``1.3.6``, ``(1.191``, ``.198)``), a code token
+    (``[__name__]``), a birth–death lifespan (``Fisher (1890-1962)``), or empty."""
+    cleaned = (txt or "").strip()
+    if not cleaned or not re.search(r"[A-Za-z0-9]", cleaned):
+        return True
+    if has_valid_target:
+        return False
+    if _DECIMAL_SECTION_OR_EQ_RE.match(cleaned) or _BROKEN_DECIMAL_HALF_RE.match(cleaned):
+        return True
+    if _INTERNAL_XREF_RE.match(cleaned) or _CODE_ARRAY_OR_SLICE_RE.search(cleaned):
+        return True
+    if _LIFESPAN_RE.search(cleaned):
+        return True
+    # Code / identifier tokens (underscores, scope/member operators) without a year
+    if ("_" in cleaned or "::" in cleaned or "->" in cleaned) and not _YEAR_ANY_RE.search(cleaned):
+        return True
+    return False
+
+
+def split_author_year_cites(txt: str) -> list[str]:
+    """Split a multi-entry parenthetical author–year string into individual citations.
+
+    Example: ``'(Kingma and Welling, 2014, Rezende et al., 2014)'``
+    -> ``['(Kingma and Welling, 2014)', '(Rezende et al., 2014)']``.
+    Single citations and numeric citations are returned as ``[txt]``.
+    """
+    cleaned = (txt or "").strip()
+    if not cleaned or is_numeric_cite(cleaned):
+        return [cleaned] if cleaned else []
+    if len(_YEAR_ANY_RE.findall(cleaned)) < 2:
+        return [cleaned]
+    is_wrapped = (cleaned.startswith("(") and cleaned.endswith(")")) or (
+        cleaned.startswith("[") and cleaned.endswith("]")
+    )
+    open_ch = cleaned[0] if is_wrapped else "("
+    close_ch = cleaned[-1] if is_wrapped else ")"
+    inner = cleaned[1:-1].strip() if is_wrapped else cleaned.strip("()[] ")
+    parts = [p.strip(" ,;()[]") for p in _MULTI_AY_SPLIT_RE.split(inner) if p.strip(" ,;()[]")]
+    if len(parts) <= 1 or not all(_YEAR_ANY_RE.search(p) for p in parts):
+        return [cleaned]
+    if is_wrapped or cleaned.startswith("(") or cleaned.endswith(")"):
+        return [f"{open_ch}{p}{close_ch}" for p in parts]
+    return parts
+
 
 def is_numeric_cite(txt: str) -> bool:
     """"[12]", "[9,", "10]", "3-5", "Ref. 11", "[IV]": a marker that carries no author words."""
@@ -235,6 +316,136 @@ def sentence_context(sentences: list[str], idx: int) -> str:
     if idx + 1 < len(sentences):
         parts.append(sentences[idx + 1])
     return " ".join(parts)
+
+
+_CLAUSE_SPLIT_RE = re.compile(
+    r"(?:;\s+|:\s+|,\s+(?=(?:whereas|while|although|though|but|yet|however)\b))",
+    re.IGNORECASE,
+)
+_RANGE_OR_LIST_CITE_RE = re.compile(r"\d+\s*[-–—,;]\s*\d+")
+
+
+def render_focal_sentence(sentence: str, cites: dict[int, dict], target_n: int) -> str:
+    """Render *sentence* marking *target_n* as ``[THIS CITATION: ...]`` and other citations in brackets."""
+    def _sub(match):
+        n = int(match.group(1))
+        txt = ((cites.get(n) or {}).get("txt", "") or "").strip("[] ")
+        if n == target_n:
+            return f"[THIS CITATION: {txt or f'#{n}'}]"
+        return f"[{txt}]" if txt else ""
+    return " ".join(CITE_TOKEN_RE.sub(_sub, sentence).split())
+
+
+def describe_citation_locus(sentence: str, target_n: int, cites: dict[int, dict]) -> dict:
+    """Analyze how *target_n* sits within a potentially multi-citation *sentence*.
+
+    Returns a dict with:
+      - ``mode``: ``'single'`` | ``'multi_locus'`` | ``'cluster'``
+      - ``focal_sentence``: rendered sentence with ``[THIS CITATION: ...]`` when multi/cluster
+      - ``target_clause``: clean sub-clause or local phrase anchored by *target_n* (when ``multi_locus``)
+      - ``attribution_note``: scoping guidance for the judge context block (None for ``single``)
+    """
+    matches = list(CITE_TOKEN_RE.finditer(sentence))
+    txt_raw = ((cites.get(target_n) or {}).get("txt", "") or "").strip()
+    txt_clean = txt_raw.strip("[] ") or f"#{target_n}"
+
+    if len(matches) <= 1:
+        is_range = bool(is_numeric_cite(txt_raw) and _RANGE_OR_LIST_CITE_RE.search(txt_raw))
+        if not is_range:
+            return {
+                "mode": "single",
+                "focal_sentence": render_sentence(sentence, cites),
+                "target_clause": None,
+                "attribution_note": None,
+            }
+        focal = render_focal_sentence(sentence, cites, target_n)
+        note = (
+            f"[Target Citation Attribution: [THIS CITATION: {txt_clean}] is part of a multi-reference "
+            "range/group. If the sentence explicitly enumerates distinct examples (e.g. 'including A, B, and C'), "
+            "evaluate the example addressed by this reference; otherwise evaluate the full claim scope as usual.]"
+        )
+        return {
+            "mode": "cluster",
+            "focal_sentence": focal,
+            "target_clause": None,
+            "attribution_note": note,
+        }
+
+    # Group consecutive tokens into contiguous citation clusters (loci)
+    clusters: list[list[re.Match]] = [[matches[0]]]
+    for m_prev, m_curr in zip(matches, matches[1:]):
+        between = sentence[m_prev.end():m_curr.start()]
+        stripped_between = re.sub(r"\b(?:and|or|refs?\.?)\b", "", between, flags=re.IGNORECASE)
+        if not re.search(r"[A-Za-z0-9]{2,}", stripped_between):
+            clusters[-1].append(m_curr)
+        else:
+            clusters.append([m_curr])
+
+    focal = render_focal_sentence(sentence, cites, target_n)
+    if len(clusters) == 1:
+        total_in_cluster = len(clusters[0])
+        note = (
+            f"[Target Citation Attribution: [THIS CITATION: {txt_clean}] is 1 of {total_in_cluster} "
+            "references cited together at this position. If the sentence explicitly enumerates distinct "
+            "examples (e.g. 'such as A, B, and C'), evaluate the example addressed by this reference; "
+            "otherwise evaluate the full claim scope as usual.]"
+        )
+        return {
+            "mode": "cluster",
+            "focal_sentence": focal,
+            "target_clause": None,
+            "attribution_note": note,
+        }
+
+    # Multiple distinct citation positions across the sentence: isolate the target clause/phrase
+    tok_str = cite_token(target_n)
+    clause_candidates = _CLAUSE_SPLIT_RE.split(sentence)
+    chosen_seg = next((seg for seg in clause_candidates if tok_str in seg), sentence)
+
+    # Check if chosen_seg still holds multiple distinct clusters (e.g. "in imaging [2] and seismology [3]")
+    seg_matches = list(CITE_TOKEN_RE.finditer(chosen_seg))
+    seg_clusters: list[list[re.Match]] = []
+    for sm in seg_matches:
+        if not seg_clusters:
+            seg_clusters.append([sm])
+        else:
+            btw = chosen_seg[seg_clusters[-1][-1].end():sm.start()]
+            btw_s = re.sub(r"\b(?:and|or|refs?\.?)\b", "", btw, flags=re.IGNORECASE)
+            if not re.search(r"[A-Za-z0-9]{2,}", btw_s):
+                seg_clusters[-1].append(sm)
+            else:
+                seg_clusters.append([sm])
+
+    local_phrase = render_claim(chosen_seg, cites).strip(" ,;.")
+    if len(seg_clusters) >= 2:
+        t_cidx = next(
+            (ci for ci, cl in enumerate(seg_clusters) if any(int(m.group(1)) == target_n for m in cl)),
+            0,
+        )
+        start_pos = seg_clusters[t_cidx - 1][-1].end() if t_cidx > 0 else 0
+        # If the citation sits at the end of its item (postfix "[2]"), cut right after its cluster;
+        # if it is a narrative subject near the start ("Büttiker [2] showed..."), extend to next cluster.
+        before_in_item = render_claim(chosen_seg[start_pos:seg_clusters[t_cidx][0].start()], cites).strip(" ,;.")
+        if len(before_in_item.split()) >= 2:
+            end_pos = seg_clusters[t_cidx][-1].end()
+        else:
+            end_pos = seg_clusters[t_cidx + 1][0].start() if t_cidx + 1 < len(seg_clusters) else len(chosen_seg)
+        cand_phrase = render_claim(chosen_seg[start_pos:end_pos], cites)
+        cand_phrase = re.sub(r"^\s*(?:,\s*)?(?:and|or|as well as)\s+", "", cand_phrase, flags=re.IGNORECASE).strip(" ,;.")
+        if len(cand_phrase.split()) >= 2:
+            local_phrase = cand_phrase
+
+    note = (
+        f"[Target Citation Attribution: This sentence cites references at {len(clusters)} distinct "
+        f"positions. Evaluate ONLY the sub-clause or item anchored by [THIS CITATION: {txt_clean}] "
+        f"(\"{local_phrase}\"), not sibling clauses or items anchored by other citations.]"
+    )
+    return {
+        "mode": "multi_locus",
+        "focal_sentence": focal,
+        "target_clause": local_phrase or None,
+        "attribution_note": note,
+    }
 
 
 # ─── Citation key extraction & punctuation restoration ───────────────────────

@@ -383,6 +383,7 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| ⚪ **Unclear / Insufficient** | **{totals.get('Unclear / insufficient evidence', 0)}** | {pct(totals.get('Unclear / insufficient evidence', 0))} | Fragile or inconclusive evidence |",
         f"| ⏳ **Deferred (Pending Evidence)** | **{totals.get('deferred_paywalled', 0)}** | {pct(totals.get('deferred_paywalled', 0))} | Paragraph >90% paywalled; evaluation deferred |",
         f"| 🔒 **Paywalled / Unchecked** | **{totals.get('not_downloaded', 0)}** | {pct(totals.get('not_downloaded', 0))} | Non-OA reference; unavailable |",
+        f"| 🔧 **Non-Evidential (Skipped)** | **{totals.get('non_evidential', sum(1 for r in results if r.get('outcome') in ('not_a_claim', 'malformed_claim')))}** | {pct(totals.get('non_evidential', sum(1 for r in results if r.get('outcome') in ('not_a_claim', 'malformed_claim'))))} | Software, method, definition, or pointer — not a claim |",
         "",
         "### Scientific Evidence Reliability Rating",
         "",
@@ -393,7 +394,17 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         f"| 🟠 **Low / Flagged** | **{totals.get('reliability', {}).get('low', 0)}** | {pct(totals.get('reliability', {}).get('low', 0))} | Unverified spans, retracted/flawed sources, or rubric violations |",
         f"| 🔴 **Contradicted** | **{totals.get('reliability', {}).get('contradicted', 0)}** | {pct(totals.get('reliability', {}).get('contradicted', 0))} | Cited peer-reviewed literature directly refutes the claim |",
         f"| 🟠 **Unsupported** | **{totals.get('reliability', {}).get('unsupported', 0)}** | {pct(totals.get('reliability', {}).get('unsupported', 0))} | The cited paper was read and does not report this |",
-        f"| ⏳ **Unresolved / Pending** | **{totals.get('reliability', {}).get('unresolved', 0)}** | {pct(totals.get('reliability', {}).get('unresolved', 0))} | Judged but undecidable, or not assessed (see coverage) |",
+        *(
+            [
+                f"| ⏳ **Inconclusive / Unjudged (In Corpus)** | **{totals['reliability_breakdown'].get('inconclusive', 0)}** | {pct(totals['reliability_breakdown'].get('inconclusive', 0))} | Judged undecidable or in-corpus unassessed (see coverage) |",
+                f"| 🔒 **Unavailable / Paywalled** | **{totals['reliability_breakdown'].get('unavailable_paywalled', 0)}** | {pct(totals['reliability_breakdown'].get('unavailable_paywalled', 0))} | Reference PDF unavailable or paragraph >90% paywalled |",
+                f"| 🔧 **Non-Evidential (Excluded)** | **{totals['reliability_breakdown'].get('non_evidential_skipped', 0)}** | {pct(totals['reliability_breakdown'].get('non_evidential_skipped', 0))} | Software, method, definition, or pointer — no empirical claim to verify |",
+            ]
+            if totals.get("reliability_breakdown") is not None
+            else [
+                f"| ⏳ **Unresolved / Pending** | **{totals.get('reliability', {}).get('unresolved', 0)}** | {pct(totals.get('reliability', {}).get('unresolved', 0))} | Judged but undecidable, or not assessed (see coverage) |",
+            ]
+        ),
         "",
     ]
 
@@ -654,6 +665,17 @@ def generate_seed_audit_markdown(report: dict, seed_title: str | None = None) ->
         for i, item in enumerate(not_downloaded, 1):
             lines.append(_format_entry(item, i))
         current_sec += 1
+
+    uncited_claims = report.get("uncited_claims") or []
+    if uncited_claims:
+        lines.append(f"## {current_sec}. Advisory: Uncited Factual Sentences Possibly Needing Attribution ({len(uncited_claims)})\n")
+        lines.append(
+            "These uncited body sentences state factual, comparative, or domain assertions that may warrant a literature citation.\n"
+        )
+        for uc in uncited_claims:
+            sec_lbl = uc.get("section_heading") or uc.get("section") or "body"
+            lines.append(f"- **[{sec_lbl}]** \"{uc.get('sentence', '')}\"")
+        lines.append("")
 
     return "\n".join(lines)
 

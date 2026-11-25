@@ -21,12 +21,15 @@ from research_assistant.shared.claim_text import (
     claim_quality,
     classify_citation_role,
     clean_text,
+    describe_citation_locus,
+    is_non_citation_ref,
     is_numeric_cite,
     paragraph_sentences,
     reattach_leading_markers,
     render_claim,
     render_sentence,
     sentence_context,
+    split_author_year_cites,
     tidy_punctuation,
 )
 from research_assistant.shared.extract import normalise_section_kind
@@ -37,6 +40,8 @@ from research_assistant.judgement.evidence import (
 from research_assistant.judgement.judge import (
     _judge_once,
     _judgement_model,
+    compose_context,
+    filter_relevant_artifacts,
 )
 from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
@@ -50,6 +55,8 @@ from research_assistant.config import (
     PULLED_PDFS_DIR,
     RAW_DIR,
     CITATION_AUDIT_CONTEXTUALIZE_QUERIES,
+    CITATION_AUDIT_CHECK_UNCITED,
+    CITATION_AUDIT_MAX_UNCITED_SENTENCES,
     CITATION_AUDIT_MAX_CLAIMS,
     CITATION_AUDIT_MAX_PAIRS_PER_SENTENCE,
     CITATION_AUDIT_DEFERRED_PAYWALL_THRESHOLD,
@@ -59,7 +66,13 @@ from research_assistant.shared import pipeline_status
 from research_assistant.shared.atomic import atomic_write_json
 import concurrent.futures
 from research_assistant.shared.log import get_logger
-from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
+from research_assistant.shared.search import (
+    expand_neighbours,
+    extract_salient_claim_terms,
+    hybrid_search,
+    rerank_candidates,
+    supplement_intra_doc_lexical_hits,
+)
 from research_assistant.shared.source_key import (
     extract_arxiv_from_text,
     extract_doi_from_text,
@@ -369,9 +382,20 @@ def extract_seed_citation_claims(
     pdf_pages_text: list[str] = []
     endnotes_by_group: dict[int, dict[int, str]] = {}
     if physical_pdf and bib_entries:
+        orig_indices = [(e.get("printed_index"), e.get("index")) for e in bib_entries]
         pdf_groups, pdf_pages_text = extract_pdf_bibliography_groups(physical_pdf)
         if pdf_groups:
             endnotes_by_group = align_biblstructs_to_pdf_groups(bib_entries, pdf_groups)
+            aligned_count = sum(1 for e in bib_entries if e.get("printed_index") is not None)
+            # Guard against unnumbered author-year manuscripts/textbooks whose body text
+            # contains numbered exercise lists mistaken for small bibliography blocks.
+            if len(bib_entries) >= 8 and aligned_count < max(3, int(0.25 * len(bib_entries))):
+                pdf_groups = []
+                endnotes_by_group = {}
+                for entry, (orig_pi, orig_idx) in zip(bib_entries, orig_indices):
+                    entry["printed_index"] = orig_pi
+                    entry["index"] = orig_idx
+                    entry.pop("bib_group", None)
 
     if pdf_groups:
         group_bib_by_id: dict[int, dict] = {g: {} for g in range(len(pdf_groups))}
@@ -404,7 +428,72 @@ def extract_seed_citation_claims(
     seen_pairs = set()
     cur_min_page = 0
 
+    def _stitch_adjacent_refs(p_node) -> None:
+        """Merge GROBID-split author-year and lifespan <ref type='bibr'> siblings in place."""
+        from bs4 import NavigableString
+
+        cur_refs = list(p_node.find_all("ref", type="bibr"))
+        idx_r = 0
+        while idx_r + 1 < len(cur_refs):
+            ra = cur_refs[idx_r]
+            rb = cur_refs[idx_r + 1]
+            if ra.parent is None or rb.parent is None or ra.parent != rb.parent:
+                idx_r += 1
+                continue
+            between_nodes = []
+            sib = ra.next_sibling
+            contiguous = True
+            while sib is not None and sib is not rb:
+                if isinstance(sib, NavigableString) and sib.strip() in {"", "and", "&", ","}:
+                    between_nodes.append(sib)
+                    sib = sib.next_sibling
+                else:
+                    contiguous = False
+                    break
+            if not contiguous or sib is not rb:
+                idx_r += 1
+                continue
+
+            ta = clean_text(ra)
+            tb = clean_text(rb)
+            mid = " ".join(s.strip() for s in between_nodes if s.strip())
+            has_year_a = bool(re.search(r"\b(?:1[89]\d{2}|20\d{2})\b", ta))
+            has_year_b = bool(re.search(r"\b(?:1[89]\d{2}|20\d{2})\b", tb))
+
+            # Case 1: Split birth-death lifespan, e.g. 'Fisher (1890' + 'Fisher ( -1962) )'
+            is_split_lifespan = bool(
+                re.search(r"\(\s*1[5-9]\d{2}\s*$", ta)
+                and re.search(r"[-–—]\s*(?:1[6-9]\d{2}|20\d{2})", tb)
+            )
+            # Case 2: Split co-author citation, e.g. '(Kingma and' + 'Welling, 2014, ...)'
+            is_split_author = bool(
+                not (ra.get("target") or "").strip()
+                and not is_numeric_cite(ta)
+                and not is_numeric_cite(tb)
+                and not has_year_a
+                and has_year_b
+                and re.search(r"(?:\band\b|&|,\s*$)", ta, re.IGNORECASE)
+            )
+            if is_split_lifespan or is_split_author:
+                merged = " ".join(x for x in (ta, mid, tb) if x)
+                ra.clear()
+                ra.append(merged)
+                if is_split_lifespan:
+                    if "target" in ra.attrs:
+                        del ra.attrs["target"]
+                elif rb.get("target") and len(split_author_year_cites(merged)) == 1:
+                    ra["target"] = rb["target"]
+                for bn in between_nodes:
+                    bn.extract()
+                rb.decompose()
+                cur_refs.pop(idx_r + 1)
+                continue
+            idx_r += 1
+
     for p_idx, p in enumerate(body.find_all("p")):
+        if not p.find("ref", type="bibr"):
+            continue
+        _stitch_adjacent_refs(p)
         refs = p.find_all("ref", type="bibr")
         if not refs:
             continue
@@ -432,45 +521,76 @@ def extract_seed_citation_claims(
         # Citations become period-free tokens; what the old placeholder
         # embedded lives in this table instead.
         cites = {}
-        for n, ref in enumerate(refs):
+        tok_counter = 0
+        for ref in refs:
             target = (ref.get("target") or "").lstrip("#")
             txt = clean_text(ref)
+            has_valid_target = bool(target and target in bib_by_id)
 
-            # Check if numeric marker points to a printed explanatory endnote in this bibliography group
-            endnote_hit = None
-            if active_endnotes and is_numeric_cite(txt):
-                nums_txt = _NUM_RE.findall(txt)
-                if nums_txt:
-                    k_num = int(nums_txt[0])
-                    if k_num in active_endnotes and (
-                        k_num not in active_bib_by_index
-                        or active_bib_by_index[k_num].get("is_endnote")
-                        or active_bib_by_index[k_num].get("printed_index") != k_num
-                    ):
-                        note_text = active_endnotes[k_num]
-                        endnote_hit = {
-                            "xml_id": f"endnote_g{grp_idx}_{k_num}",
-                            "index": k_num,
-                            "printed_index": k_num,
-                            "title": note_text[:120],
-                            "authors": [],
-                            "year": None,
-                            "doi": None,
-                            "venue": None,
-                            "is_monograph": False,
-                            "is_endnote": True,
-                            "raw_reference": note_text,
-                        }
+            if is_non_citation_ref(txt, has_valid_target=has_valid_target):
+                ref.replace_with(f" {txt} " if txt else " ")
+                continue
 
-            if endnote_hit is not None:
-                ref_info, resolution, note = endnote_hit, "endnote", ""
-            else:
-                scoped_target = target if (not pdf_groups or target in active_bib_by_id) else ""
-                ref_info, resolution, note = _resolve_ref(
-                    scoped_target, txt, active_bib_by_id, active_bib_by_index, active_number_map
-                )
-            cites[n] = {"target": target, "txt": txt, "ref": ref_info, "resolution": resolution, "note": note}
-            ref.replace_with(f" {cite_token(n)} ")
+            sub_cites = split_author_year_cites(txt) if not is_numeric_cite(txt) else [txt]
+            replacement_tokens = []
+            for sub_txt in sub_cites:
+                n = tok_counter
+                tok_counter += 1
+                sub_target = target if len(sub_cites) == 1 else ""
+                if len(sub_cites) > 1 and target and target in bib_by_id:
+                    # Retain target only for the sub-citation whose author/year matches bib_by_id[target]
+                    cand_match, _, _ = _resolve_ref("", sub_txt, {target: bib_by_id[target]}, {}, {})
+                    if cand_match is not None:
+                        sub_target = target
+
+                # Check if numeric marker points to a printed explanatory endnote in this bibliography group
+                endnote_hit = None
+                if active_endnotes and is_numeric_cite(sub_txt):
+                    nums_txt = _NUM_RE.findall(sub_txt)
+                    if nums_txt:
+                        k_num = int(nums_txt[0])
+                        if k_num in active_endnotes and (
+                            k_num not in active_bib_by_index
+                            or active_bib_by_index[k_num].get("is_endnote")
+                            or active_bib_by_index[k_num].get("printed_index") != k_num
+                        ):
+                            note_text = active_endnotes[k_num]
+                            endnote_hit = {
+                                "xml_id": f"endnote_g{grp_idx}_{k_num}",
+                                "index": k_num,
+                                "printed_index": k_num,
+                                "title": note_text[:120],
+                                "authors": [],
+                                "year": None,
+                                "doi": None,
+                                "venue": None,
+                                "is_monograph": False,
+                                "is_endnote": True,
+                                "raw_reference": note_text,
+                            }
+
+                if endnote_hit is not None:
+                    ref_info, resolution, note = endnote_hit, "endnote", ""
+                elif is_numeric_cite(sub_txt):
+                    scoped_target = sub_target if (not pdf_groups or sub_target in active_bib_by_id) else ""
+                    ref_info, resolution, note = _resolve_ref(
+                        scoped_target, sub_txt, active_bib_by_id, active_bib_by_index, active_number_map
+                    )
+                else:
+                    # Author-year citations do not restart at [1] in appendices: search full bib_by_id
+                    ref_info, resolution, note = _resolve_ref(
+                        sub_target, sub_txt, bib_by_id, bib_by_index, number_map
+                    )
+                cites[n] = {
+                    "target": sub_target,
+                    "txt": sub_txt,
+                    "ref": ref_info,
+                    "resolution": resolution,
+                    "note": note,
+                }
+                replacement_tokens.append(cite_token(n))
+
+            ref.replace_with(" " + " ".join(replacement_tokens) + " ")
 
         sentences = reattach_leading_markers(paragraph_sentences(p), cites)
         display = [render_sentence(s, cites) for s in sentences]
@@ -514,9 +634,19 @@ def extract_seed_citation_claims(
                 if resolved and role == "evidential":
                     p_refs_dict.setdefault(ref_key, ref_info)
 
+                locus = describe_citation_locus(sent, n, cites)
+                if locus["attribution_note"]:
+                    focal_display = list(display)
+                    focal_display[s_idx] = locus["focal_sentence"]
+                    cite_context = f"{sentence_context(focal_display, s_idx)}\n{locus['attribution_note']}"
+                else:
+                    cite_context = context
+
                 paragraph_claims.append({
                     "sentence": display[s_idx],
                     "claim": claim_text,
+                    "target_clause": locus["target_clause"],
+                    "attribution_mode": locus["mode"],
                     "cite_text": cite["txt"],
                     "target": cite["target"],
                     "ref": ref_info,
@@ -525,7 +655,7 @@ def extract_seed_citation_claims(
                     "resolution_note": cite["note"],
                     "role": role,
                     "claim_quality": quality,
-                    "context": context,
+                    "context": cite_context,
                     "section": section,
                     "section_heading": heading,
                     "artifacts": p_artifacts,
@@ -548,6 +678,7 @@ from research_assistant.audit.resolver import (
     _title_key,
     _match_downloaded_paper,
     attach_cited_summaries,
+    enrich_item_bibliometrics,
 )
 from research_assistant.audit import resolver as _audit_resolver
 
@@ -581,26 +712,16 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None)
 
 
 def _extract_claim_keywords(claim: str, ref_title: str = "") -> str:
-    """Extract informative keywords from a claim and cited paper title for fallback retrieval."""
-    import re
-
-    stop_words = {
-        "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "with", "by", "of", "from",
-        "is", "are", "was", "were", "be", "been", "that", "this", "these", "those", "as", "it",
-        "et", "al", "which", "we", "our", "their", "paper", "study", "propose", "proposed",
-        "show", "shows", "shown", "demonstrate", "demonstrates", "using", "used", "into", "also",
-        "can", "could", "may", "might", "will", "would", "shall", "should", "not", "no", "such",
-    }
-    raw = f"{claim} {ref_title}"
-    words = re.findall(r"\b[A-Za-z0-9_-]{3,}\b", raw)
-    seen = set()
-    deduped = []
-    for w in words:
-        wl = w.lower()
-        if wl not in stop_words and wl not in seen:
-            seen.add(wl)
-            deduped.append(w)
-    return " ".join(deduped[:12])
+    """Extract informative keywords from a claim (using cited title only when claim is sparse)."""
+    terms = extract_salient_claim_terms(claim, max_terms=12)
+    if len(terms) < 3 and ref_title:
+        extra = extract_salient_claim_terms(ref_title, max_terms=6)
+        seen = {t.lower() for t in terms}
+        for e in extra:
+            if e.lower() not in seen:
+                terms.append(e)
+                seen.add(e.lower())
+    return " ".join(terms[:12])
 
 
 def _get_document_fallback_chunks(
@@ -688,7 +809,8 @@ def _judge_claim_entry(
     )
 
     retrieve_k = max(top_k, escalate_k if escalate_k > top_k else 0)
-    search_query = item.get("search_query") or item["claim"]
+    pool_k = max(12, retrieve_k) if top_k >= 2 else retrieve_k
+    search_query = item.get("search_query") or item.get("target_clause") or item["claim"]
     item["search_query"] = search_query
 
     try:
@@ -698,7 +820,7 @@ def _judge_claim_entry(
             bm25,
             texts,
             metadatas,
-            top_k=retrieve_k,
+            top_k=pool_k,
             doc_filter={item["document"]},
             exclude_types=EXCLUDED_FROM_EVIDENCE,
         )
@@ -787,9 +909,29 @@ def _judge_claim_entry(
         item["reason"] = "No relevant passages found in the cited document."
         return item
 
-    hits = rerank_candidates(search_query, hits, top_k=retrieve_k)
+    focal_claim = item.get("target_clause") or item.get("claim") or ""
+    hits = supplement_intra_doc_lexical_hits(
+        [focal_claim, item.get("claim", ""), search_query],
+        {item["document"]},
+        collection,
+        texts,
+        metadatas,
+        hits,
+        exclude_types=EXCLUDED_FROM_EVIDENCE,
+    )
+    hits = rerank_candidates(
+        search_query,
+        hits,
+        top_k=max(pool_k, len(hits)),
+        claim_text=focal_claim,
+        neighbour_window=JUDGEMENT_NEIGHBOUR_WINDOW,
+        primary_k=top_k,
+    )
 
     expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+    for h in hits[:top_k]:
+        if isinstance(h.get("metadata"), dict):
+            enrich_item_bibliometrics(item, hit_meta=h["metadata"])
     item["evidence_tier"] = (
         "abstract_only"
         if all((h.get("metadata") or {}).get("tier") == "abstract_only" for h in hits[:top_k])
@@ -807,9 +949,15 @@ def _judge_claim_entry(
     item["escalated"] = False
 
     claim_context = item.get("context")
-    if item.get("section") and claim_context and not str(claim_context).startswith("[Section:"):
-        sec_header = f"[Section: {str(item['section']).replace('_', ' ').title()}]\n"
-        claim_context = f"{sec_header}{claim_context}"
+    if claim_context and not str(claim_context).startswith("[Section:"):
+        rel_artifacts = filter_relevant_artifacts(
+            item.get("sentence") or item.get("claim"), item.get("artifacts")
+        )
+        sec_label = item.get("section_heading") or (
+            str(item["section"]).replace("_", " ").title() if item.get("section") else None
+        )
+        if sec_label or rel_artifacts:
+            claim_context = compose_context(claim_context, section=sec_label, artifacts=rel_artifacts)
 
     try:
         verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
@@ -1007,6 +1155,8 @@ NOT_ASSESSED_OUTCOMES = (
     "call_failed", "not_a_claim", "malformed_claim", "unresolved_ref",
 )
 _ATTEMPTED_OUTCOMES = ("judged", "no_evidence", "retrieval_failed", "parse_failed", "call_failed")
+_UNAVAILABLE_OUTCOMES = ("not_downloaded", "deferred_paywalled")
+_NON_EVIDENTIAL_OUTCOMES = ("not_a_claim", "malformed_claim")
 _RELIABILITY_KEYS = (
     ("high", "HIGH"), ("moderate", "MODERATE"), ("low", "LOW"),
     ("contradicted", "CONTRADICTED"), ("unsupported", "UNSUPPORTED"), ("unresolved", "UNRESOLVED"),
@@ -1018,8 +1168,11 @@ def compute_totals(results: list[dict]) -> dict:
     only; everything else is in not_assessed, keyed by outcome, so
     judged + sum(not_assessed) == total always holds."""
     judged = [r for r in results if r.get("outcome") == "judged"]
+    non_evidential = sum(1 for r in results if r.get("outcome") in _NON_EVIDENTIAL_OUTCOMES)
     totals = {
         "total": len(results),
+        "evidential_citations": len(results) - non_evidential,
+        "non_evidential": non_evidential,
         "downloaded": sum(1 for r in results if r.get("downloaded")),
         "judged": len(judged),
     }
@@ -1041,6 +1194,37 @@ def compute_totals(results: list[dict]) -> dict:
     totals["reliability"] = {
         key: sum(1 for r in results if r.get("reliability") == rating)
         for key, rating in _RELIABILITY_KEYS
+    }
+    unavailable_n = sum(
+        1 for r in results
+        if r.get("outcome") in _UNAVAILABLE_OUTCOMES
+        and (r.get("reliability") in (None, "UNRESOLVED"))
+    )
+    non_evid_rel_n = sum(
+        1 for r in results
+        if r.get("outcome") in _NON_EVIDENTIAL_OUTCOMES
+        and (r.get("reliability") in (None, "UNRESOLVED"))
+    )
+    inconclusive_n = sum(
+        1 for r in results
+        if r.get("outcome") not in (*_UNAVAILABLE_OUTCOMES, *_NON_EVIDENTIAL_OUTCOMES)
+        and (
+            r.get("reliability") == "UNRESOLVED"
+            or (
+                r.get("reliability") is None
+                and (r.get("outcome") != "judged" or r.get("judgement") == "Unclear / insufficient evidence")
+            )
+        )
+    )
+    totals["reliability_breakdown"] = {
+        "high": totals["reliability"]["high"],
+        "moderate": totals["reliability"]["moderate"],
+        "low": totals["reliability"]["low"],
+        "contradicted": totals["reliability"]["contradicted"],
+        "unsupported": totals["reliability"]["unsupported"],
+        "inconclusive": inconclusive_n,
+        "unavailable_paywalled": unavailable_n,
+        "non_evidential_skipped": non_evid_rel_n,
     }
     return totals
 
@@ -1170,6 +1354,7 @@ def cross_check_seed_audit(
     overflow_pairs = [] if max_new_claims <= 0 else newly_available_pairs[max_new_claims:]
 
     for item, matched in selected_pairs:
+        enrich_item_bibliometrics(item, dl_entry=matched)
         item["downloaded"] = True
         doc_file = matched.get("canonical_document") or (
             os.path.basename(matched["path"])
@@ -1190,6 +1375,7 @@ def cross_check_seed_audit(
         claims_to_rejudge.append(item)
 
     for item, matched in overflow_pairs:
+        enrich_item_bibliometrics(item, dl_entry=matched)
         item["downloaded"] = True
         item["outcome"] = "cap_exceeded"
         item["judgement"] = None
@@ -1216,6 +1402,10 @@ def cross_check_seed_audit(
 
     # 2. In-memory refresh of Source Assessor and Reliability Policy across all claims
     for r in results:
+        if r.get("ref"):
+            dl_match = _match_downloaded_paper(r.get("ref"), seed_pdf_name, downloaded_manifest)
+            if dl_match:
+                enrich_item_bibliometrics(r, dl_entry=dl_match)
         source_eval = assess_source(metadata=r.get("metadata") or {}, ref_info=r.get("ref"))
         r["source_grade"] = source_eval["grade"]
         r["source_assessment"] = source_eval
@@ -1266,6 +1456,106 @@ def cross_check_seed_audit(
     return report, summary
 
 
+_AUTHOR_DISCOURSE_RE = re.compile(
+    r"^(?:in\s+(?:this\s+(?:paper|work|study|section|letter|article)|section\s+\d|sec\.\s*\d|appendix)|"
+    r"here\s*,?\s*we\b|we\s+(?:present|introduce|propose|develop|investigate|measure|demonstrate|"
+    r"show|find|observe|organize|conclude|summarize|define|consider|denote|assume|derive)\b|"
+    r"our\s+(?:results|approach|method|analysis|experiments|simulations|findings)\b|"
+    r"the\s+remainder\s+of\s+this\b|section\s+\d+\s+describes\b|fig(?:ure)?\.?\s*\d+|table\s+\d+)",
+    re.IGNORECASE,
+)
+
+
+def extract_uncited_candidate_sentences(tei_source, max_sentences: int = CITATION_AUDIT_MAX_UNCITED_SENTENCES) -> list[dict]:
+    """Extract clean, uncited body sentences that may state prior-work or empirical facts without attribution."""
+    if isinstance(tei_source, BeautifulSoup):
+        soup = tei_source
+    else:
+        if not tei_source or not os.path.exists(tei_source):
+            return []
+        with open(tei_source, "r", encoding="utf-8") as fh:
+            soup = BeautifulSoup(fh, "xml")
+
+    body = soup.find("body")
+    if not body:
+        return []
+
+    candidates: list[dict] = []
+    seen_sents: set[str] = set()
+    for p_idx, p in enumerate(body.find_all("p")):
+        p_copy = BeautifulSoup(str(p), "xml").find("p")
+        if p_copy is None:
+            continue
+        p_id = p.get("xml:id") or p.get("id") or f"p_{p_idx}"
+        section = _paragraph_section(p)
+        if section in {"acknowledgements", "references", "appendix"}:
+            continue
+        heading = section_breadcrumb(p)
+
+        # Mark any bibr ref that is a real citation so sentences carrying citations are skipped
+        for ref in p_copy.find_all("ref", type="bibr"):
+            txt = clean_text(ref)
+            target = (ref.get("target") or "").lstrip("#")
+            if is_non_citation_ref(txt, has_valid_target=bool(target)):
+                ref.replace_with(f" {txt} " if txt else " ")
+            else:
+                ref.replace_with(" __HAS_CITE__ ")
+
+        for sent in paragraph_sentences(p_copy):
+            if "__HAS_CITE__" in sent:
+                continue
+            cleaned = tidy_punctuation(sent)
+            words = cleaned.split()
+            if len(words) < 8 or len(words) > 70:
+                continue
+            if "fragment" in claim_quality(cleaned):
+                continue
+            if _AUTHOR_DISCOURSE_RE.search(cleaned):
+                continue
+            if cleaned in seen_sents:
+                continue
+            seen_sents.add(cleaned)
+            candidates.append({
+                "sentence": cleaned,
+                "section": section,
+                "section_heading": heading,
+                "paragraph_id": p_id,
+            })
+            if max_sentences > 0 and len(candidates) >= max_sentences:
+                return candidates
+    return candidates
+
+
+def detect_uncited_claims(
+    tei_source,
+    max_sentences: int = CITATION_AUDIT_MAX_UNCITED_SENTENCES,
+    batch_checker=None,
+) -> list[dict]:
+    """Run batched citation-worthiness check over uncited candidate sentences in *tei_source*."""
+    from research_assistant.config import CITATION_CHECK_BATCH_SIZE
+
+    candidates = extract_uncited_candidate_sentences(tei_source, max_sentences=max_sentences)
+    if not candidates:
+        return []
+
+    if batch_checker is None:
+        from research_assistant.agents.agent5_batch_citer import _batch_needs_citation
+        batch_checker = _batch_needs_citation
+
+    batch_size = max(1, int(CITATION_CHECK_BATCH_SIZE or 15))
+    flagged: list[dict] = []
+    for start in range(0, len(candidates), batch_size):
+        chunk = candidates[start:start + batch_size]
+        try:
+            needs = batch_checker([c["sentence"] for c in chunk])
+            for cand, need in zip(chunk, needs):
+                if need:
+                    flagged.append(cand)
+        except Exception as exc:
+            logger.warning("Uncited-claim check failed on batch at %d: %s", start, exc)
+    return flagged
+
+
 def audit_seed_citations(
     seed_path: str,
     search_resources=None,
@@ -1274,6 +1564,7 @@ def audit_seed_citations(
     force: bool = False,
     skip_if_cached: bool = True,
     concurrency: int | None = None,
+    check_uncited: bool | None = None,
 ) -> dict:
     """Audit the in-text citation claims of an uploaded seed paper against the local corpus.
 
@@ -1410,6 +1701,9 @@ def audit_seed_citations(
         if total_p_refs > 0 and paywall_ratio > pct_threshold:
             # Paragraph is >90% paywalled: defer evaluation of claims
             for c in p_claims:
+                dl_entry = _match_downloaded_paper(c.get("ref"), seed_pdf_name, downloaded_manifest)
+                if dl_entry:
+                    enrich_item_bibliometrics(c, dl_entry=dl_entry)
                 c["downloaded"] = False
                 c["outcome"] = "deferred_paywalled"
                 c["judgement"] = "Deferred (pending paywalled evidence)"
@@ -1426,6 +1720,8 @@ def audit_seed_citations(
             for c in p_claims:
                 ref = c.get("ref")
                 dl_entry = _match_downloaded_paper(ref, seed_pdf_name, downloaded_manifest)
+                if dl_entry:
+                    enrich_item_bibliometrics(c, dl_entry=dl_entry)
                 is_dl = _is_ref_available(dl_entry)
                 c["paragraph_missing_refs"] = missing_p_refs
                 c["paywall_ratio"] = paywall_ratio
@@ -1599,6 +1895,12 @@ def audit_seed_citations(
 
     totals = compute_totals(all_results)
 
+    run_uncited = CITATION_AUDIT_CHECK_UNCITED if check_uncited is None else check_uncited
+    uncited_claims: list[dict] = []
+    if run_uncited and not aborted:
+        uncited_claims = detect_uncited_claims(tei_path)
+        totals["uncited_claims_flagged"] = len(uncited_claims)
+
     report = {
         "audit_schema_version": AUDIT_SCHEMA_VERSION,
         "seed_path": seed_path,
@@ -1608,6 +1910,7 @@ def audit_seed_citations(
         "totals": totals,
         "results": all_results,
         "aborted": aborted,
+        **({"uncited_claims": uncited_claims} if run_uncited else {}),
     }
 
     os.makedirs(AUDIT_DIR, exist_ok=True)

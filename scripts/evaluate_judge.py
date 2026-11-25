@@ -24,7 +24,12 @@ from datetime import datetime
 from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.config import DATA_DIR
 from research_assistant.judgement.evalset import DEFAULT_CASE_FILES, load_cases, split_held_out
-from research_assistant.judgement.judge import PROMPT_TEMPLATE, compose_context, judge
+from research_assistant.judgement.judge import (
+    PROMPT_TEMPLATE,
+    compose_context,
+    filter_relevant_artifacts,
+    judge,
+)
 from research_assistant.judgement.metrics import compare, render, score
 from research_assistant.shared.atomic import atomic_write_json
 
@@ -33,12 +38,17 @@ RESULTS_DIR = os.path.join(DATA_DIR, "eval", "judge", "results")
 
 def _context_for(case, context_mode):
     """What the judge is shown besides claim and evidence: nothing, the
-    sentence window the case was harvested with, or the full block the
-    audit builds (section, captions, window)."""
+    sentence window the case was harvested with, selective (section + only
+    captions referenced in the claim), or the full block (section, all
+    paragraph captions, window)."""
     if context_mode == "none":
         return None
     if context_mode == "window":
         return case.get("context")
+    if context_mode == "selective":
+        rel_arts = filter_relevant_artifacts(case.get("claim"), case.get("artifacts"))
+        sec = case.get("section_heading") if rel_arts else None
+        return compose_context(case.get("context"), section=sec, artifacts=rel_arts)
     return compose_context(case.get("context"), section=case.get("section_heading"), artifacts=case.get("artifacts"))
 
 
@@ -49,7 +59,7 @@ def _judge_one(case, mode, context_mode="window"):
     with tempfile.TemporaryDirectory() as d:
         draft = os.path.join(d, "draft.txt")
         with open(draft, "w", encoding="utf-8") as fh:
-            fh.write(f"{case['claim']} \\cite{{cite_1}}.")
+            fh.write(f"{case['claim'].rstrip('.!?')} \\cite{{cite_1}}.")
         with open(os.path.join(d, "draft_citations.json"), "w", encoding="utf-8") as fh:
             json.dump({case["citation_source"]: "cite_1"}, fh)
         report = verify_draft(draft)
@@ -143,10 +153,11 @@ def main():
     ap.add_argument("--mode", choices=["judge", "verifier"], default="judge")
     ap.add_argument(
         "--context",
-        choices=["none", "window", "full"],
+        choices=["none", "window", "selective", "full"],
         default="window",
         help="what the judge sees besides claim and evidence (judge mode); "
-             "'window' is what the audit sends, 'full' adds the section breadcrumb and figure captions",
+             "'window' is the sentence window, 'selective' adds captions explicitly referenced in the claim, "
+             "'full' adds the section breadcrumb and all paragraph figure captions",
     )
     ap.add_argument("--cases", nargs="*", default=None)
     ap.add_argument("--runs", type=int, default=1)

@@ -10,6 +10,8 @@ import re
 from enum import Enum
 from typing import Any
 
+from research_assistant.shared.source_key import normalise_doi
+
 
 class SourceGrade(str, Enum):
     RIGOROUS_PRIMARY = "RIGOROUS_PRIMARY"
@@ -79,7 +81,8 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
 
     title = str(meta.get("title") or "").strip()
     venue = str(meta.get("venue") or meta.get("journal") or "").strip()
-    doi = str(meta.get("doi") or "").strip().lower()
+    raw_doi = str(meta.get("doi") or "").strip()
+    doi = normalise_doi(raw_doi) or raw_doi.lower()
     arxiv_id = str(meta.get("arxiv_id") or "").strip()
     pub_type = str(meta.get("publication_type") or meta.get("type") or "").strip().lower()
 

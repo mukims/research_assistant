@@ -292,6 +292,54 @@ _CONTEXT_HEADER = (
 )
 
 ARTIFACT_CAPTION_CHARS = 200
+_ARTIFACT_LABEL_RE = re.compile(
+    r"^\s*(fig(?:ure)?s?\.?|tab(?:le)?s?\.?)\s*([A-Za-z0-9]+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def filter_relevant_artifacts(claim_text: str | None, artifacts: list | None) -> list:
+    """Keep only figure/table captions explicitly referenced in *claim_text*.
+
+    Paragraph-level ``artifacts`` often carry captions for four different figures
+    discussed across a long paragraph; injecting unreferenced captions distracted
+    the judge in 25d6fd9. Matching the exact figure/table identifier mentioned in
+    the claim sentence itself gives figure-referencing claims the caption they
+    point at while leaving plain prose claims clean.
+    """
+    if not claim_text or not artifacts:
+        return []
+    text = str(claim_text)
+    selected = []
+    for art in artifacts:
+        if not isinstance(art, dict):
+            continue
+        label = str(art.get("label") or "").strip()
+        caption = str(art.get("caption") or "").strip()
+        if not label or not caption:
+            continue
+        m = _ARTIFACT_LABEL_RE.match(label)
+        if not m:
+            if re.search(rf"\b{re.escape(label)}\b", text, re.IGNORECASE):
+                selected.append(art)
+            continue
+        kind_raw, ident = m.group(1).lower(), m.group(2)
+        if kind_raw.startswith("fig"):
+            # Match 'Fig. 2', 'Fig. 2b', 'Figure 2(a)', or plural 'Figs. 1 and 2' / 'Figs. 1-3'
+            pat = re.compile(
+                rf"\bfig(?:ure)?s?\.?\s*(?:[A-Za-z0-9\(\)]+\s*(?:,|and|&|[-–—])\s*)*"
+                rf"{re.escape(ident)}(?:[a-z]|\([a-z0-9]+\))?\b",
+                re.IGNORECASE,
+            )
+        else:
+            pat = re.compile(
+                rf"\btab(?:le)?s?\.?\s*(?:[A-Za-z0-9]+\s*(?:,|and|&|[-–—])\s*)*"
+                rf"{re.escape(ident)}(?:[a-z]|\([a-z0-9]+\))?\b",
+                re.IGNORECASE,
+            )
+        if pat.search(text):
+            selected.append(art)
+    return selected
 
 
 def compose_context(window: str | None, section: str | None = None, artifacts: list | None = None) -> str | None:

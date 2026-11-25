@@ -52,13 +52,23 @@ from research_assistant.judgement.judge import (
     JudgementParseError,
     judge,
 )
+from research_assistant.audit.resolver import (
+    _load_downloaded_manifest,
+    enrich_item_bibliometrics,
+    match_manifest_for_verifier,
+)
 from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.claim_text import tidy_punctuation
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
-from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
+from research_assistant.shared.search import (
+    expand_neighbours,
+    hybrid_search,
+    rerank_candidates,
+    supplement_intra_doc_lexical_hits,
+)
 from research_assistant.shared.seed_audit import (
     _extract_claim_keywords,
     _get_document_fallback_chunks,
@@ -148,11 +158,39 @@ def citation_pairs(sentences: list, key_to_source: dict) -> list:
             )
         for key in sorted(keys):
             source = key_to_source.get(key)
+            pair_context = context
+            if len(keys) >= 2:
+                def _mark_key(m):
+                    raw_inner = m.group(0)
+                    inner_keys = _cite_keys(raw_inner)
+                    if key in inner_keys:
+                        others = sorted(inner_keys - {key})
+                        other_sfx = f" (grouped with {', '.join(others)})" if others else ""
+                        return f"[THIS CITATION: {key}{other_sfx}]"
+                    return f"[{','.join(sorted(inner_keys))}]"
+
+                focal_sent = tidy_punctuation(_CITE_RE.sub(_mark_key, sentence))
+                focal_ctx = " ".join(p for p in (before, f"«{focal_sent}»", after) if p)
+                cite_groups = list(_CITE_RE.finditer(sentence))
+                if len(cite_groups) >= 2:
+                    note = (
+                        f"[Target Citation Attribution: This sentence cites references at {len(cite_groups)} "
+                        f"distinct positions. Evaluate ONLY the sub-clause or item anchored by "
+                        f"[THIS CITATION: {key}], not sibling clauses anchored by other citations.]"
+                    )
+                else:
+                    note = (
+                        f"[Target Citation Attribution: [THIS CITATION: {key}] is 1 of {len(keys)} "
+                        "references cited together at this position. If the sentence explicitly enumerates "
+                        "distinct examples (e.g. 'such as A, B, and C'), evaluate the example addressed "
+                        "by this reference; otherwise evaluate the full claim scope as usual.]"
+                    )
+                pair_context = f"{focal_ctx}\n{note}"
             pairs.append({
                 "sentence_index": index,
                 "sentence": sentence,
                 "claim": claim,
-                "context": context,
+                "context": pair_context,
                 "cite_key": key,
                 "citation_source": source,
                 "compound_sentence": compound,
@@ -292,6 +330,8 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             entry["evidence_hits"] = 1
             if replayed.get("document"):
                 entry["document"] = replayed["document"]
+            if isinstance(replayed.get("metadata"), dict):
+                enrich_item_bibliometrics(entry, hit_meta=replayed["metadata"])
             entry["escalated"] = False
             try:
                 verdict = _judge_once(entry["claim"], entry["evidence"], context=entry.get("context"))
@@ -381,9 +421,30 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             logger.info(" -> nothing retrieved from that source for this claim.")
             return entry
 
-        hits = rerank_candidates(search_query, hits, top_k=retrieve_k)
+        hits = supplement_intra_doc_lexical_hits(
+            [entry.get("claim", ""), search_query],
+            documents,
+            collection,
+            texts,
+            metadatas,
+            hits,
+            exclude_types=EXCLUDED_FROM_EVIDENCE,
+        )
+        hits = rerank_candidates(
+            search_query,
+            hits,
+            top_k=max(retrieve_k, len(hits)),
+            claim_text=entry.get("claim", ""),
+            neighbour_window=JUDGEMENT_NEIGHBOUR_WINDOW,
+            primary_k=top_k,
+        )
 
+        if not entry.get("document") and documents:
+            entry["document"] = sorted(documents)[0]
         expand_neighbours(hits, texts, metadatas, window=JUDGEMENT_NEIGHBOUR_WINDOW)
+        for h in hits[:top_k]:
+            if isinstance(h.get("metadata"), dict):
+                enrich_item_bibliometrics(entry, hit_meta=h["metadata"])
         entry["evidence_tier"] = (
             "abstract_only"
             if all((h.get("metadata") or {}).get("tier") == "abstract_only" for h in hits[:top_k])
@@ -466,8 +527,16 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
                 idx = future_to_idx[future]
                 results[idx] = future.result()
 
+    try:
+        downloaded_manifest = _load_downloaded_manifest()
+    except Exception:
+        downloaded_manifest = {}
+
     for entry in results:
-        paper_meta = entry.get("metadata") or {}
+        dl_match = match_manifest_for_verifier(entry, downloaded_manifest) if downloaded_manifest else None
+        if dl_match:
+            enrich_item_bibliometrics(entry, dl_entry=dl_match)
+        paper_meta = dict(entry.get("metadata") or {})
         actual_venue = (
             paper_meta.get("venue")
             or paper_meta.get("journal")
@@ -475,12 +544,11 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             or (entry.get("ref") or {}).get("journal")
             or ""
         )
-        source_eval = assess_source({
-            "venue": actual_venue,
-            "title": paper_meta.get("title") or (entry.get("ref") or {}).get("title") or entry.get("citation_source") or "",
-            "doi": paper_meta.get("doi") or (entry.get("ref") or {}).get("doi"),
-            "arxiv_id": paper_meta.get("arxiv_id") or (entry.get("ref") or {}).get("arxiv_id"),
-        })
+        if actual_venue and not paper_meta.get("venue"):
+            paper_meta["venue"] = actual_venue
+        if not paper_meta.get("title"):
+            paper_meta["title"] = (entry.get("ref") or {}).get("title") or entry.get("citation_source") or ""
+        source_eval = assess_source(metadata=paper_meta, ref_info=entry.get("ref"))
         entry["source_grade"] = source_eval["grade"]
         entry["source_assessment"] = source_eval
         # A rating is a statement about a verdict; an orphaned, unresolved or

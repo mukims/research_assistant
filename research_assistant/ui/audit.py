@@ -179,6 +179,7 @@ def _render_seed_citation_audit(final, origin="audit"):
         cols[5].metric("Paywalled / Unchecked ⚪", totals.get("not_downloaded", 0))
 
         rel_totals = totals.get("reliability") or {}
+        rel_breakdown = totals.get("reliability_breakdown") or {}
         if rel_totals:
             st.caption("🛡️ **Scientific Evidence Reliability Assessment:**")
             rcols = st.columns(6)
@@ -187,7 +188,20 @@ def _render_seed_citation_audit(final, origin="audit"):
             rcols[2].metric("Low / Flagged 🟠", rel_totals.get("low", 0), help="Unverified spans, retracted sources, or rubric violations")
             rcols[3].metric("Contradicted 🔴", rel_totals.get("contradicted", 0), help="Direct conflict with primary experimental/theoretical findings")
             rcols[4].metric("Unsupported 🟠", rel_totals.get("unsupported", 0), help="The cited paper was read and does not report this")
-            rcols[5].metric("Unresolved ⏳", rel_totals.get("unresolved", 0), help="Judged but undecidable, or not assessed — see the caption above")
+            if rel_breakdown:
+                inconc_n = rel_breakdown.get("inconclusive", 0)
+                excl_n = rel_breakdown.get("non_evidential_skipped", 0)
+                unavail_n = rel_breakdown.get("unavailable_paywalled", 0)
+                rcols[5].metric(
+                    "Inconclusive ⏳",
+                    inconc_n,
+                    help=(
+                        f"Judged undecidable or in-corpus unassessed ({inconc_n}). "
+                        f"Excludes {unavail_n} unavailable/paywalled and {excl_n} non-evidential (software/method/pointer) citations."
+                    ),
+                )
+            else:
+                rcols[5].metric("Unresolved ⏳", rel_totals.get("unresolved", 0), help="Judged but undecidable, or not assessed — see the caption above")
 
         # Filter tabs
         supp_count = totals.get("Supports", 0) + totals.get("Partially supports", 0)
@@ -519,6 +533,14 @@ def _render_seed_citation_audit(final, origin="audit"):
         with tab_all:
             for it in results:
                 _render_claim_item(it)
+
+        uncited_claims = audit.get("uncited_claims") or []
+        if uncited_claims:
+            with st.expander(f"📝 Advisory: Uncited Statements Possibly Needing Attribution ({len(uncited_claims)})"):
+                st.caption("Uncited sentences in the manuscript body flagged by the citation-worthiness check.")
+                for uc in uncited_claims:
+                    sec_lbl = uc.get("section_heading") or uc.get("section") or "body"
+                    st.markdown(f"- **[{sec_lbl}]** \"{uc.get('sentence', '')}\"")
 
         if seed_path and os.path.exists(seed_path):
             if st.button("🔄 Re-run Seed Citation Audit", key=f"{origin}_btn_rerun_seed_audit"):

@@ -8,6 +8,7 @@ singleton instance across many calls (needed for the planned Agent 5's
 per-sentence loop).
 """
 
+import re
 import numpy as np
 
 from research_assistant.config import RRF_K, DEFAULT_TOP_K, EXCLUDED_FROM_EVIDENCE
@@ -285,10 +286,143 @@ def get_cross_encoder():
     return _CROSS_ENCODER
 
 
-def rerank_candidates(query: str, candidates: list[dict], top_k: int = DEFAULT_TOP_K) -> list[dict]:
+_RERANK_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "with", "by", "of", "from",
+    "is", "are", "was", "were", "be", "been", "being", "that", "this", "these", "those", "as",
+    "it", "its", "et", "al", "which", "we", "our", "their", "paper", "study", "studies",
+    "propose", "proposed", "show", "shows", "shown", "demonstrate", "demonstrates", "demonstrated",
+    "report", "reports", "reported", "using", "used", "into", "also", "can", "could", "may",
+    "might", "will", "would", "shall", "should", "not", "no", "such", "than", "then", "have",
+    "has", "had", "more", "most", "very", "both", "between", "within", "across", "under", "over",
+})
+_SALIENT_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9@_\-\.]{1,}")
+_TECH_TOKEN_RE = re.compile(
+    r"(?:\b\d+(?:\.\d+)?(?:\s*(?:wt%|at\.?%|mol%|eV|meV|keV|GeV|K|C|Hz|GHz|THz|nm|um|mm|cm|mA|uA|V|mV|F/g|Wh/kg|W/kg|cm2/Vs|%|s|ms|ns|ps|fs))?\b"
+    r"|\b(?:[A-Z]{2,}[0-9A-Za-z\-]*|[A-Za-z]+[0-9]+[A-Za-z0-9@\-]*|[A-Za-z]+-[A-Za-z0-9\-]+)\b)"
+)
+_OUTBOUND_CITE_RE = re.compile(r"\[\d+[^\]]*\]|\bet\s+al\.")
+_PRIMARY_BODY_SECTIONS = frozenset({"results", "methods", "discussion", "experimental", "methodology", "analysis"})
+_INTRO_SECTIONS = frozenset({"abstract", "introduction", "background", "related_work", "overview"})
+
+
+def extract_salient_claim_terms(claim: str, max_terms: int = 14) -> list[str]:
+    """Extract informative domain words, numbers, chemical formulas, and acronyms from *claim*
+    without polluting intra-paper search with the cited paper's own title."""
+    if not claim:
+        return []
+    tech = [m.group(0).strip(".,;:()") for m in _TECH_TOKEN_RE.finditer(claim)]
+    words = [m.group(0).strip(".,;:()") for m in _SALIENT_WORD_RE.finditer(claim)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in tech + words:
+        tl = tok.lower()
+        if len(tl) < 2 or tl in _RERANK_STOPWORDS or tl in seen:
+            continue
+        if len(tl) == 2 and not any(c.isdigit() or c.isupper() for c in tok):
+            continue
+        seen.add(tl)
+        out.append(tok)
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def supplement_intra_doc_lexical_hits(
+    queries: list[str],
+    doc_filter: set | None,
+    collection,
+    texts,
+    metadatas,
+    existing_hits: list[dict],
+    exclude_types: set | None = None,
+    max_extra: int = 4,
+) -> list[dict]:
+    """Deterministically rescue high-overlap chunks (exact numbers, formulas, rare claim words)
+    inside *doc_filter* that dense/contextualized search missed, with zero embedding API calls."""
+    if not doc_filter or not queries:
+        return existing_hits
+    combined_q = " ".join(q for q in queries if q)
+    salient = [t.lower() for t in extract_salient_claim_terms(combined_q, max_terms=18)]
+    tech = {m.group(0).strip(".,;:()").lower() for m in _TECH_TOKEN_RE.finditer(combined_q) if len(m.group(0).strip()) >= 2}
+    if not salient:
+        return existing_hits
+
+    doc_chunks: list[tuple[int, str, dict]] = []
+    if getattr(collection, "is_lancedb", False) and hasattr(collection, "get"):
+        for doc_name in sorted(doc_filter):
+            try:
+                res = collection.get(where={"document": doc_name}, limit=160, include=["documents", "metadatas"])
+                docs_l = (res or {}).get("documents") or []
+                metas_l = (res or {}).get("metadatas") or []
+                for i, d_txt in enumerate(docs_l):
+                    m = metas_l[i] if i < len(metas_l) and isinstance(metas_l[i], dict) else {"document": doc_name}
+                    if exclude_types and m.get("type") in exclude_types:
+                        continue
+                    cidx = m.get("seq") if isinstance(m.get("seq"), int) else -1
+                    if d_txt and str(d_txt).strip():
+                        doc_chunks.append((cidx, str(d_txt), m))
+            except Exception:
+                pass
+    elif isinstance(texts, list) and isinstance(metadatas, list) and texts and metadatas:
+        limit = min(len(texts), len(metadatas))
+        for idx in range(limit):
+            m = metadatas[idx]
+            if not isinstance(m, dict) or m.get("document") not in doc_filter:
+                continue
+            if exclude_types and m.get("type") in exclude_types:
+                continue
+            d_txt = texts[idx]
+            if d_txt and str(d_txt).strip():
+                doc_chunks.append((idx, str(d_txt), m))
+
+    if not doc_chunks:
+        return existing_hits
+
+    seen_cidx = {h.get("chunk_index") for h in existing_hits if isinstance(h.get("chunk_index"), int) and h.get("chunk_index") >= 0}
+    seen_texts = {h.get("text") for h in existing_hits if h.get("text")}
+
+    scored_extras: list[tuple[float, dict]] = []
+    min_rrf = min((float(h.get("rrf_score", 0.01)) for h in existing_hits), default=0.01)
+    for cidx, d_txt, m in doc_chunks:
+        if (cidx >= 0 and cidx in seen_cidx) or d_txt in seen_texts:
+            continue
+        low_txt = d_txt.lower()
+        sal_hits = sum(1 for t in salient if t in low_txt)
+        tech_hits = sum(1 for t in tech if t in low_txt)
+        if tech_hits >= 1 and sal_hits >= 2 or sal_hits >= max(3, len(salient) // 2):
+            lex_score = (sal_hits / len(salient)) + (0.5 * tech_hits / max(1, len(tech)))
+            scored_extras.append((
+                lex_score,
+                {
+                    "chunk_index": int(cidx),
+                    "text": d_txt,
+                    "metadata": m,
+                    "rrf_score": round(min_rrf * 0.95, 5),
+                },
+            ))
+
+    if not scored_extras:
+        return existing_hits
+
+    scored_extras.sort(key=lambda x: x[0], reverse=True)
+    merged = list(existing_hits)
+    for _, extra_hit in scored_extras[:max_extra]:
+        merged.append(extra_hit)
+    return merged
+
+
+def rerank_candidates(
+    query: str,
+    candidates: list[dict],
+    top_k: int = DEFAULT_TOP_K,
+    claim_text: str | None = None,
+    neighbour_window: int = 1,
+    primary_k: int | None = None,
+) -> list[dict]:
     """
-    Re-ranks candidates using a neural Cross-Encoder when available,
-    falling back cleanly to the existing RRF score.
+    Re-ranks candidates using a neural Cross-Encoder when enabled, or a fast
+    deterministic lexical + technical/numeric + section-diversity reranker
+    when Cross-Encoder is disabled.
     """
     if not candidates:
         return []
@@ -296,19 +430,111 @@ def rerank_candidates(query: str, candidates: list[dict], top_k: int = DEFAULT_T
         return candidates[:top_k]
 
     model = get_cross_encoder()
-    if model is None:
-        return candidates[:top_k]
+    if model is not None:
+        try:
+            pairs = [[query, c.get("text", "")] for c in candidates]
+            scores = model.predict(pairs)
+            ranked = []
+            for cand, score in zip(candidates, scores):
+                item = dict(cand)
+                item["cross_encoder_score"] = float(score)
+                ranked.append(item)
+            ranked.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
+            return ranked[:top_k]
+        except Exception as exc:
+            logger.debug("Cross-encoder re-ranking failed (%s); falling back to lexical reranker.", exc)
 
-    try:
-        pairs = [[query, c.get("text", "")] for c in candidates]
-        scores = model.predict(pairs)
-        ranked = []
-        for cand, score in zip(candidates, scores):
-            item = dict(cand)
-            item["cross_encoder_score"] = float(score)
-            ranked.append(item)
-        ranked.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-        return ranked[:top_k]
-    except Exception as exc:
-        logger.debug("Cross-encoder re-ranking failed (%s); returning original candidates.", exc)
-        return candidates[:top_k]
+    combined_q = f"{claim_text or ''} {query or ''}".strip()
+    salient = [t.lower() for t in extract_salient_claim_terms(combined_q, max_terms=16)]
+    tech = [
+        m.group(0).strip(".,;:()").lower()
+        for m in _TECH_TOKEN_RE.finditer(combined_q)
+        if len(m.group(0).strip()) >= 2
+    ]
+
+    has_explicit_scores = any(("rrf_score" in c or "score" in c) for c in candidates)
+    raw_scores = [
+        float(c.get("rrf_score", c.get("score", 1.0 / (pos + 1 + 60.0))))
+        for pos, c in enumerate(candidates)
+    ]
+    min_s, max_s = min(raw_scores), max(raw_scores)
+
+    scored: list[tuple[float, float, int, dict]] = []
+    for pos, (cand, r_s) in enumerate(zip(candidates, raw_scores)):
+        if has_explicit_scores:
+            if min_s >= 0 and max_s > 0:
+                base = r_s / max_s
+            elif max_s > min_s:
+                base = (r_s - min_s) / (max_s - min_s)
+            else:
+                base = 0.5
+        else:
+            base = 1.0 / (pos + 1 + 10.0)
+
+        text = str(cand.get("text") or "")
+        low_txt = text.lower()
+        sal_frac = (sum(1 for t in salient if t in low_txt) / len(salient)) if salient else 0.0
+        tech_frac = (sum(1 for t in tech if t in low_txt) / len(tech)) if tech else 0.0
+        lex_signal = 0.30 * sal_frac + 0.22 * tech_frac
+
+        meta = cand.get("metadata") or {}
+        sec = str(meta.get("section") or "").strip().lower()
+        sec_adj = 0.0
+        if lex_signal > 0:
+            if sec in _PRIMARY_BODY_SECTIONS:
+                sec_adj += 0.06
+            outbound_cites = len(_OUTBOUND_CITE_RE.findall(text))
+            if outbound_cites >= 4 and sec in (_INTRO_SECTIONS | {""}):
+                sec_adj -= 0.06
+
+        total_score = (0.55 * base) + lex_signal + sec_adj - (pos * 1e-6)
+        scored.append((total_score, lex_signal, pos, cand))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    focus_k = primary_k if (primary_k is not None and 0 < primary_k <= top_k) else top_k
+
+    # When pool exceeds focus_k and focus_k >= 3, avoid wasting primary slots on adjacent chunks
+    # (which expand_neighbours merges anyway) and ensure body-section representation when supported.
+    if len(scored) > focus_k and focus_k >= 3 and neighbour_window > 0:
+        selected: list[tuple[float, float, int, dict]] = []
+        deferred_adj: list[tuple[float, float, int, dict]] = []
+        for entry in scored:
+            if len(selected) >= focus_k:
+                deferred_adj.append(entry)
+                continue
+            cand = entry[3]
+            cidx = cand.get("chunk_index")
+            doc = (cand.get("metadata") or {}).get("document")
+            is_adj = False
+            if isinstance(cidx, int) and cidx >= 0:
+                for sel in selected:
+                    s_cand = sel[3]
+                    s_cidx = s_cand.get("chunk_index")
+                    s_doc = (s_cand.get("metadata") or {}).get("document")
+                    if isinstance(s_cidx, int) and s_cidx >= 0 and s_doc == doc and abs(cidx - s_cidx) <= neighbour_window:
+                        is_adj = True
+                        break
+            if is_adj:
+                deferred_adj.append(entry)
+            else:
+                selected.append(entry)
+
+        while len(selected) < focus_k and deferred_adj:
+            selected.append(deferred_adj.pop(0))
+
+        # Section diversity: if every selected chunk is abstract/intro, swap last slot for best body chunk
+        sel_secs = {str((s[3].get("metadata") or {}).get("section") or "").lower() for s in selected}
+        if sel_secs and sel_secs.issubset(_INTRO_SECTIONS):
+            for idx_d, d_entry in enumerate(deferred_adj):
+                d_sec = str((d_entry[3].get("metadata") or {}).get("section") or "").lower()
+                if d_sec in _PRIMARY_BODY_SECTIONS and d_entry[1] > 0 and (selected[-1][0] - d_entry[0]) <= 0.20:
+                    displaced = selected[-1]
+                    selected[-1] = d_entry
+                    deferred_adj[idx_d] = displaced
+                    break
+
+        ordered_all = [x[3] for x in (selected + deferred_adj)]
+        return ordered_all[:top_k]
+
+    return [x[3] for x in scored[:top_k]]

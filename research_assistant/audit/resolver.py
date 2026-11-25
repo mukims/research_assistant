@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from typing import Optional
 
 from research_assistant.config import (
@@ -27,7 +28,16 @@ from research_assistant.shared.source_key import (
 logger = get_logger("audit_resolver")
 
 _NUM_RE = re.compile(r"\d+")
-_YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
+_YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})([a-z])?\b")
+_CHAR_FOLD_MAP = str.maketrans({"ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "ß": "ss", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "đ": "d", "Đ": "D"})
+
+
+def _fold_accents(text: str) -> str:
+    """Strip diacritics while preserving case and word boundaries (e.g. 'Bollobás' -> 'Bollobas')."""
+    if not text:
+        return ""
+    norm = unicodedata.normalize("NFKD", str(text).translate(_CHAR_FOLD_MAP))
+    return "".join(c for c in norm if not unicodedata.combining(c))
 
 
 def _looks_like_reference(entry: Optional[dict]) -> bool:
@@ -114,38 +124,84 @@ def _resolve_ref(target, txt, bib_by_id, bib_by_index, number_map) -> tuple[Opti
     if not is_numeric_cite(txt):
         if tgt is not None:
             return tgt, "target", ""
-        year = _YEAR_RE.search(txt or "")
-        req_year = int(year.group(1)) if year else None
+        txt_folded = _fold_accents(txt or "")
+        year_m = _YEAR_RE.search(txt_folded)
+        req_year = int(year_m.group(1)) if year_m else None
+        has_et_al = bool(re.search(r"\bet\s+al\b", txt_folded, re.IGNORECASE))
+        cite_cap_words = re.findall(r"\b(?:[A-Z]{2,}|[A-Z][a-zA-Z\-']{1,})\b", txt_folded)
+        first_cite_surname = cite_cap_words[0].lower() if cite_cap_words else None
+
+        best_entry = None
+        best_score = -1
         for info in bib_by_id.values():
             surnames = []
             for a in info.get("authors", []):
-                a_clean = a.strip()
+                a_clean = _fold_accents(a).strip()
                 if not a_clean:
                     continue
                 if "," in a_clean:
                     surnames.append(a_clean.split(",")[0].strip())
                 else:
                     surnames.append(a_clean.split()[-1].strip())
-            raw = info.get("raw_reference") or ""
-            title = info.get("title") or ""
-            surname_tokens = []
-            for s in surnames:
-                surname_tokens.append(s)
-                for tok in s.split():
-                    if len(tok) > 2:
-                        surname_tokens.append(tok)
-            surname_hit = any(len(s) > 1 and re.search(rf"\b{re.escape(s)}\b", txt, re.IGNORECASE) for s in surname_tokens)
-            if not surname_hit:
+            raw = _fold_accents(info.get("raw_reference") or "")
+            title = _fold_accents(info.get("title") or "")
+
+            matched_surnames = 0
+            first_author_matched = False
+            for idx_s, s in enumerate(surnames):
+                cands = [s] + [tok for tok in s.split() if len(tok) > 2]
+                if any(len(c) > 1 and re.search(rf"\b{re.escape(c)}\b", txt_folded, re.IGNORECASE) for c in cands):
+                    matched_surnames += 1
+                    if idx_s == 0:
+                        first_author_matched = True
+
+            fallback_hit = False
+            if matched_surnames == 0 and cite_cap_words:
                 # Match Titlecase names or all-caps institutional acronyms (e.g. IUPAC, NASA)
-                m_authors = re.findall(r"\b(?:[A-Z]{2,}|[A-Z][a-z]{2,})\b", txt)
-                surname_hit = any(
-                    re.search(rf"\b{re.escape(auth)}\b", raw, re.IGNORECASE) or
-                    re.search(rf"\b{re.escape(auth)}\b", title, re.IGNORECASE)
-                    for auth in m_authors
+                fallback_hit = any(
+                    len(auth) > 2 and (
+                        re.search(rf"\b{re.escape(auth)}\b", raw, re.IGNORECASE)
+                        or re.search(rf"\b{re.escape(auth)}\b", title, re.IGNORECASE)
+                    )
+                    for auth in cite_cap_words
+                    if auth.lower() not in {"and", "the", "for", "see", "ref", "refs", "vol", "chap"}
                 )
-            if surname_hit:
-                if req_year is None or info.get("year") == req_year or str(req_year) in raw:
-                    return info, "surname", ""
+
+            if matched_surnames == 0 and not fallback_hit:
+                continue
+
+            info_year = info.get("year")
+            year_score = 0
+            if req_year is not None:
+                if info_year == req_year or re.search(rf"\b{req_year}[a-z]?\b", raw):
+                    year_score = 20
+                elif info_year is not None and abs(int(info_year) - req_year) == 1 and matched_surnames >= 1 and first_author_matched:
+                    # Preprint-to-journal 1-year lag fallback when first author agrees
+                    year_score = 4
+                else:
+                    continue
+            else:
+                # Without a year in the citation marker, require strong author match
+                if not first_author_matched and matched_surnames == 0:
+                    continue
+                year_score = 2
+
+            score = year_score + (matched_surnames * 5)
+            if first_author_matched:
+                score += 8
+                if first_cite_surname and surnames and surnames[0].lower() == first_cite_surname:
+                    score += 4
+            if has_et_al and len(surnames) >= 3:
+                score += 2
+            elif not has_et_al and surnames and matched_surnames == len(surnames):
+                score += 3
+
+            if score > best_score:
+                best_score = score
+                best_entry = info
+
+        if best_entry is not None:
+            return best_entry, "surname", ""
         return None, "unresolved", ""
 
     k = None
@@ -406,6 +462,122 @@ def _match_downloaded_paper(ref: Optional[dict], seed_pdf_name: str, downloaded_
     return None
 
 
+def enrich_item_bibliometrics(
+    item: dict,
+    dl_entry: Optional[dict] = None,
+    hit_meta: Optional[dict] = None,
+) -> dict:
+    """Merge bibliometric and retraction signals from downloaded.json / chunk metadata into *item*.
+
+    Copies only bibliographic fields (never chunk-level storage fields such as
+    ``type='text_chunk'``) into ``item['metadata']`` and backfills missing
+    ``doi`` / ``arxiv_id`` / ``venue`` onto ``item['ref']`` so ``assess_source()``
+    sees verified retractions, citation counts, DOIs, and venues.
+    """
+    meta = dict(item.get("metadata") or {})
+
+    if isinstance(dl_entry, dict):
+        if dl_entry.get("is_retracted") is not None or dl_entry.get("retracted") is not None:
+            meta["is_retracted"] = bool(
+                meta.get("is_retracted")
+                or dl_entry.get("is_retracted")
+                or dl_entry.get("retracted")
+            )
+        if dl_entry.get("citation_count") is not None and meta.get("citation_count") is None:
+            meta["citation_count"] = dl_entry["citation_count"]
+        cand_venue = dl_entry.get("venue") or dl_entry.get("journal")
+        if cand_venue and not meta.get("venue"):
+            meta["venue"] = cand_venue
+        raw_doi = dl_entry.get("doi")
+        cand_doi = normalise_doi(raw_doi) or (str(raw_doi).strip() if raw_doi else None)
+        if cand_doi and not meta.get("doi"):
+            meta["doi"] = cand_doi
+        cand_arxiv = (
+            dl_entry.get("arxiv_id")
+            or extract_arxiv_from_text(dl_entry.get("doi"))
+            or extract_arxiv_from_text(dl_entry.get("key"))
+        )
+        if cand_arxiv and not meta.get("arxiv_id"):
+            meta["arxiv_id"] = cand_arxiv
+        if dl_entry.get("publication_type") and not meta.get("publication_type"):
+            meta["publication_type"] = dl_entry["publication_type"]
+        if dl_entry.get("provider") and not meta.get("provider"):
+            meta["provider"] = dl_entry["provider"]
+        if dl_entry.get("title") and not meta.get("title"):
+            meta["title"] = dl_entry["title"]
+        if dl_entry.get("is_monograph") and "is_monograph" not in meta:
+            meta["is_monograph"] = bool(dl_entry["is_monograph"])
+
+    if isinstance(hit_meta, dict):
+        if hit_meta.get("is_retracted") is not None or hit_meta.get("retracted") is not None:
+            meta["is_retracted"] = bool(
+                meta.get("is_retracted")
+                or hit_meta.get("is_retracted")
+                or hit_meta.get("retracted")
+            )
+        if hit_meta.get("citation_count") is not None and meta.get("citation_count") is None:
+            meta["citation_count"] = hit_meta["citation_count"]
+        cand_venue = hit_meta.get("venue") or hit_meta.get("journal")
+        if cand_venue and not meta.get("venue"):
+            meta["venue"] = cand_venue
+        raw_doi = hit_meta.get("doi")
+        cand_doi = normalise_doi(raw_doi) or (str(raw_doi).strip() if raw_doi else None)
+        if cand_doi and not meta.get("doi"):
+            meta["doi"] = cand_doi
+        cand_arxiv = hit_meta.get("arxiv_id") or extract_arxiv_from_text(hit_meta.get("doi"))
+        if cand_arxiv and not meta.get("arxiv_id"):
+            meta["arxiv_id"] = cand_arxiv
+        if hit_meta.get("publication_type") and not meta.get("publication_type"):
+            meta["publication_type"] = hit_meta["publication_type"]
+        if hit_meta.get("title") and not meta.get("title"):
+            meta["title"] = hit_meta["title"]
+
+    if meta:
+        item["metadata"] = meta
+
+    ref = item.get("ref")
+    if isinstance(ref, dict):
+        if meta.get("doi") and not ref.get("doi"):
+            ref["doi"] = meta["doi"]
+        if meta.get("arxiv_id") and not ref.get("arxiv_id"):
+            ref["arxiv_id"] = meta["arxiv_id"]
+        if meta.get("venue") and not ref.get("venue"):
+            ref["venue"] = meta["venue"]
+
+    return item
+
+
+def match_manifest_for_verifier(entry: dict, downloaded_manifest: dict) -> Optional[dict]:
+    """Match an Agent 8 verification entry against ``downloaded_manifest`` by
+    canonical document, PDF filename, DOI, arXiv ID, or citation_source title."""
+    if not entry or not downloaded_manifest:
+        return None
+
+    doc = entry.get("document")
+    meta = entry.get("metadata") or {}
+    ref = entry.get("ref") or {}
+    cite_src = entry.get("citation_source") or ""
+
+    if doc:
+        doc_base = os.path.basename(str(doc))
+        for m_entry in downloaded_manifest.values():
+            if not isinstance(m_entry, dict):
+                continue
+            if m_entry.get("canonical_document") == doc or m_entry.get("key") == doc:
+                return m_entry
+            m_path = m_entry.get("path")
+            if m_path and os.path.basename(str(m_path)) in (str(doc), doc_base):
+                return m_entry
+
+    synth_ref = {
+        "doi": meta.get("doi") or ref.get("doi"),
+        "arxiv_id": meta.get("arxiv_id") or ref.get("arxiv_id") or extract_arxiv_from_text(doc) or extract_arxiv_from_text(cite_src),
+        "title": meta.get("title") or ref.get("title") or cite_src,
+        "raw_reference": ref.get("raw_reference") or cite_src,
+    }
+    return _match_downloaded_paper(synth_ref, "", downloaded_manifest)
+
+
 def attach_cited_summaries(claims: list[dict]) -> None:
     """Read the ingest-time summary of each cited paper into claim['cited_summary'].
 
@@ -444,7 +616,7 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None,
         authors = ref.get("authors") or []
         first_author = authors[0] if authors else ""
         year = str(ref.get("year") or "")
-        claim = c.get("claim") or ""
+        claim = c.get("target_clause") or c.get("claim") or ""
         keywords = [t for t in (first_author, year, ref_title) if t]
         if keywords:
             return f"{' '.join(keywords)}: {claim}"
@@ -489,6 +661,8 @@ def contextualize_citation_queries(claims: list[dict], model: str | None = None,
             ref = c.get("ref") or {}
             ref_str = f"{', '.join((ref.get('authors') or [])[:2])} ({ref.get('year') or 'n.d.'}) - '{ref.get('title') or ''}'"
             entry = f"[{idx}] Cited Reference: {ref_str}\n    Claim Sentence: \"{c.get('claim', '')}\""
+            if c.get("target_clause"):
+                entry += f"\n    Target Sub-Clause Anchored by This Citation: \"{c['target_clause']}\""
             summary, doc = c.get("cited_summary"), c.get("document")
             if summary:
                 if doc in summarised:

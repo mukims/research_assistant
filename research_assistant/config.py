@@ -367,6 +367,9 @@ CITATION_CITER_JUDGE = _env_bool("CITATION_CITER_JUDGE", True)
 # Reuses the audit's contextualizer, so CITATION_AUDIT_CONTEXTUALIZE_QUERIES=False makes this a no-op.
 CITATION_CITER_CONTEXTUALIZE = _env_bool("CITATION_CITER_CONTEXTUALIZE", False)
 CITATION_AUDIT_CONTEXTUALIZE_QUERIES = _env_bool("CITATION_AUDIT_CONTEXTUALIZE_QUERIES", True)
+# Optional advisory pass scanning uncited body sentences for factual claims that may need attribution.
+CITATION_AUDIT_CHECK_UNCITED = _env_bool("CITATION_AUDIT_CHECK_UNCITED", False)
+CITATION_AUDIT_MAX_UNCITED_SENTENCES = _env_int("CITATION_AUDIT_MAX_UNCITED_SENTENCES", 60)
 
 
 # ─── Search Tunables ──────────────────────────────────────────────────────────
