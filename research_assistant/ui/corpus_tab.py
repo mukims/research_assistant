@@ -1,6 +1,7 @@
 """Tab: manage, explore, and batch-ingest documents into the corpus."""
 
 import os
+import re
 import streamlit as st
 
 from research_assistant import config
@@ -11,12 +12,162 @@ from research_assistant.shared.batch_uploader import (
     unpack_and_stage_uploads,
 )
 from research_assistant.shared.ingestion import ingest_pdfs
+from research_assistant.shared.paper_index import PaperIndex, normalise_arxiv
+from research_assistant.shared.source_key import normalise_doi
 from research_assistant.ui.common import (
     _corpus_stats,
     _manifest,
     get_cached_search_resources,
 )
 from research_assistant.ui.status import _render_live_pipeline_status
+
+_ARXIV_FILENAME_RE = re.compile(r"^arxiv_(\d{4}\.\d{4,5}(?:v\d+)?)\.pdf$", re.I)
+
+
+def _doc_key_from_path(path: str | None) -> str:
+    if not path:
+        return ""
+    return os.path.basename(path).strip().replace(" ", "_").lower()
+
+
+def _index_manifest_records(raw_manifest: dict | None) -> tuple[dict, dict, dict, dict]:
+    """Index manifest records by raw key, PDF doc_key, normalized DOI, and normalized arXiv ID."""
+    by_key: dict[str, dict] = {}
+    by_doc: dict[str, dict] = {}
+    by_doi: dict[str, dict] = {}
+    by_arxiv: dict[str, dict] = {}
+
+    if not isinstance(raw_manifest, dict):
+        return by_key, by_doc, by_doi, by_arxiv
+
+    for raw_k, rec in raw_manifest.items():
+        if not isinstance(rec, dict):
+            continue
+        by_key[raw_k] = rec
+        by_key[f"abstract_only:{raw_k}"] = rec
+        rec_key = rec.get("key")
+        if isinstance(rec_key, str) and rec_key:
+            by_key.setdefault(rec_key, rec)
+            by_key.setdefault(f"abstract_only:{rec_key}", rec)
+        dk = _doc_key_from_path(rec.get("path"))
+        if dk:
+            by_doc.setdefault(dk, rec)
+        nd = normalise_doi(rec.get("doi"))
+        if nd:
+            by_doi.setdefault(nd, rec)
+        na = normalise_arxiv(rec.get("arxiv_id"))
+        if na:
+            by_arxiv.setdefault(na, rec)
+
+    return by_key, by_doc, by_doi, by_arxiv
+
+
+def build_corpus_explorer_records(
+    ingested_map: dict[str, str],
+    downloaded: dict | None = None,
+    seeds: dict | None = None,
+    paper_index: PaperIndex | None = None,
+    filter_query: str = "",
+) -> list[dict]:
+    """Join ingested document keys with PaperIndex, downloaded.json, and seed_papers.json."""
+    if not ingested_map:
+        return []
+
+    if paper_index is None:
+        paper_index = PaperIndex.load(config.PAPER_INDEX_PATH)
+    if downloaded is None:
+        downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
+    if seeds is None:
+        seeds = _manifest(config.SEED_PAPERS_PATH)
+
+    dl_by_key, dl_by_doc, dl_by_doi, dl_by_arxiv = _index_manifest_records(downloaded)
+    sd_by_key, sd_by_doc, sd_by_doi, sd_by_arxiv = _index_manifest_records(seeds)
+
+    q = (filter_query or "").strip().lower()
+    doc_records: list[dict] = []
+
+    for doc_key, timestamp in ingested_map.items():
+        pe = paper_index.resolve(doc_key) if paper_index is not None else None
+        m_arx = _ARXIV_FILENAME_RE.match(doc_key)
+        fn_arxiv = m_arx.group(1) if m_arx else ""
+
+        def _lookup(by_key: dict, by_doc: dict, by_doi: dict, by_arxiv: dict) -> dict:
+            hit = by_key.get(doc_key) or by_doc.get(doc_key)
+            if not hit and pe is not None:
+                hit = by_doc.get(pe.document)
+                if not hit:
+                    for d in pe.dois:
+                        nd = normalise_doi(d)
+                        if nd and nd in by_doi:
+                            hit = by_doi[nd]
+                            break
+                if not hit:
+                    for a in pe.arxiv_ids:
+                        na = normalise_arxiv(a)
+                        if na and na in by_arxiv:
+                            hit = by_arxiv[na]
+                            break
+            if not hit and fn_arxiv:
+                na = normalise_arxiv(fn_arxiv)
+                if na:
+                    hit = by_arxiv.get(na)
+            return hit or {}
+
+        dl_meta = _lookup(dl_by_key, dl_by_doc, dl_by_doi, dl_by_arxiv)
+        sd_meta = _lookup(sd_by_key, sd_by_doc, sd_by_doi, sd_by_arxiv)
+
+        pe_title = ""
+        if pe and pe.title and pe.title.strip() and pe.title.strip().lower() != doc_key.lower():
+            pe_title = pe.title.strip()
+
+        title = (
+            pe_title
+            or (dl_meta.get("title") or "").strip()
+            or (sd_meta.get("title") or "").strip()
+            or doc_key
+        )
+        doi = (
+            (pe.dois[0] if (pe and pe.dois) else None)
+            or dl_meta.get("doi")
+            or sd_meta.get("doi")
+            or ""
+        )
+        arxiv_id = (
+            (pe.arxiv_ids[0] if (pe and pe.arxiv_ids) else None)
+            or dl_meta.get("arxiv_id")
+            or sd_meta.get("arxiv_id")
+            or fn_arxiv
+            or ""
+        )
+        url = dl_meta.get("url") or sd_meta.get("url") or ""
+        venue = (
+            dl_meta.get("venue")
+            or dl_meta.get("container")
+            or sd_meta.get("venue")
+            or ""
+        )
+        authors = (
+            list(pe.first_authors)
+            if (pe and pe.first_authors)
+            else list(dl_meta.get("authors") or ())
+        )
+
+        search_corpus = f"{doc_key} {title} {doi} {arxiv_id} {venue} {' '.join(authors)}".lower()
+        if q and q not in search_corpus:
+            continue
+
+        doc_records.append({
+            "key": doc_key,
+            "title": title,
+            "doi": doi,
+            "arxiv_id": arxiv_id,
+            "url": url,
+            "venue": venue,
+            "authors": authors,
+            "timestamp": timestamp,
+        })
+
+    return doc_records
 
 
 def render_corpus_tab(chunks: int, papers: int):
@@ -241,36 +392,23 @@ def render_corpus_tab(chunks: int, papers: int):
         key="corpus_search_filter",
     ).strip().lower()
 
-    downloaded = _manifest(config.DOWNLOADED_JSON_PATH)
-    seeds = _manifest(config.SEED_PAPERS_PATH)
-
-    # Build list of records
-    doc_records = []
-    for doc_key, timestamp in ingested_map.items():
-        doc_meta = downloaded.get(doc_key) or seeds.get(doc_key) or {}
-        title = doc_meta.get("title") or doc_key
-        doi = doc_meta.get("doi") or ""
-        arxiv_id = doc_meta.get("arxiv_id") or ""
-        url = doc_meta.get("url") or ""
-
-        search_corpus = f"{doc_key} {title} {doi} {arxiv_id}".lower()
-        if filter_query and filter_query not in search_corpus:
-            continue
-
-        doc_records.append({
-            "key": doc_key,
-            "title": title,
-            "doi": doi,
-            "arxiv_id": arxiv_id,
-            "url": url,
-            "timestamp": timestamp,
-        })
+    doc_records = build_corpus_explorer_records(
+        ingested_map,
+        downloaded=_manifest(config.DOWNLOADED_JSON_PATH),
+        seeds=_manifest(config.SEED_PAPERS_PATH),
+        paper_index=PaperIndex.load(config.PAPER_INDEX_PATH),
+        filter_query=filter_query,
+    )
 
     st.markdown(f"**Showing {len(doc_records)} of {len(ingested_map)} indexed document(s)**")
 
     if doc_records:
         for idx, rec in enumerate(doc_records[:100]):
             bits = [f"Key: `{rec['key']}`"]
+            if rec.get("authors"):
+                bits.append(f"Author: {rec['authors'][0]}")
+            if rec.get("venue"):
+                bits.append(rec["venue"])
             if rec["doi"]:
                 bits.append(f"[doi:{rec['doi']}](https://doi.org/{rec['doi']})")
             if rec["arxiv_id"]:

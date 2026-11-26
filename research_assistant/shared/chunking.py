@@ -74,6 +74,70 @@ def sentences(text: str) -> list[str]:
     return _regex_sentences(text)
 
 
+_MD_TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*(?::?-{2,}:?\s*\|?)?\s*$")
+
+
+def is_markdown_table(text: str) -> bool:
+    """True when *text* contains a Markdown pipe table with a header separator row."""
+    if not text or "|" not in text:
+        return False
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    return any(_MD_TABLE_SEP_RE.match(ln) for ln in lines[:6])
+
+
+def split_markdown_table_preserving_header(
+    table_text: str,
+    hard_max: int,
+    caption_prefix: str = "",
+) -> list[str]:
+    """Split a Markdown table exceeding *hard_max* into row-batches that each repeat
+    the caption prefix + Markdown column header + separator (+ optional units row)."""
+    full = f"{caption_prefix}\n\n{table_text}".strip() if caption_prefix else (table_text or "").strip()
+    if not full:
+        return []
+    if len(full) <= hard_max:
+        return [full]
+
+    raw_lines = [ln for ln in (table_text or "").splitlines() if ln.strip()]
+    sep_idx = next((i for i, ln in enumerate(raw_lines[:6]) if _MD_TABLE_SEP_RE.match(ln)), -1)
+    if sep_idx < 1:
+        # Not a structured Markdown table with header + separator; return whole if no rows
+        return [full]
+
+    header_end = sep_idx + 1
+    # Keep an immediate parenthesized-units subheader row if present, e.g. '| (K) | (uV/K) |'
+    if header_end < len(raw_lines):
+        next_cells = [c.strip() for c in raw_lines[header_end].strip().strip("|").split("|") if c.strip()]
+        if next_cells and all(c.startswith("(") and c.endswith(")") for c in next_cells):
+            header_end += 1
+
+    preamble_lines = ([caption_prefix.strip()] if caption_prefix.strip() else []) + raw_lines[:header_end]
+    preamble = "\n".join(preamble_lines)
+    data_rows = raw_lines[header_end:]
+    if not data_rows:
+        return [full]
+
+    chunks: list[str] = []
+    cur_rows: list[str] = []
+    cur_chars = len(preamble)
+
+    for row in data_rows:
+        add_len = 1 + len(row)
+        if cur_rows and (cur_chars + add_len) > hard_max:
+            chunks.append(preamble + "\n" + "\n".join(cur_rows))
+            cur_rows = [row]
+            cur_chars = len(preamble) + add_len
+        else:
+            cur_rows.append(row)
+            cur_chars += add_len
+
+    if cur_rows:
+        chunks.append(preamble + "\n" + "\n".join(cur_rows))
+    return chunks
+
+
 def pack_windows(paragraphs, target: int, hard_max: int) -> list[tuple[str, int, int]]:
     """Pack sentences into windows. Returns (text, page_first, page_last)."""
     out: list[tuple[str, int, int]] = []
@@ -94,6 +158,14 @@ def pack_windows(paragraphs, target: int, hard_max: int) -> list[tuple[str, int,
         fresh = 0
 
     for para in paragraphs:
+        if is_markdown_table(para.text):
+            if fresh:
+                close(overlap=False)
+            else:
+                cur, cur_pages, fresh = [], [], 0
+            for tbl_chunk in split_markdown_table_preserving_header(para.text, hard_max=hard_max):
+                out.append((tbl_chunk, para.page, para.page))
+            continue
         for s in sentences(para.text):
             if len(s) > hard_max:
                 # A giant sentence stands alone; whatever is pending closes
@@ -149,6 +221,8 @@ def should_keep_chunk(text: str, min_chars: int = 200, min_alpha: float = 0.6) -
     """
     if not text or not text.strip():
         return False
+    if is_markdown_table(text):
+        return True
     ratio = alpha_ratio(text)
     if is_math_or_quantitative(text):
         if ratio >= 0.35 and len(text.strip()) >= 10:
@@ -171,7 +245,9 @@ def filter_document(doc: Document, min_alpha: float = 0.6, min_section_chars: in
             continue
         paras = [
             p for p in sec.paragraphs
-            if alpha_ratio(p.text) >= min_alpha or (is_math_or_quantitative(p.text) and alpha_ratio(p.text) >= 0.35)
+            if is_markdown_table(p.text)
+            or alpha_ratio(p.text) >= min_alpha
+            or (is_math_or_quantitative(p.text) and alpha_ratio(p.text) >= 0.35)
         ]
         if not paras:
             continue
@@ -231,9 +307,32 @@ def chunk_document(doc: Document, target: int, hard_max: int,
         emit_text(sec.paragraphs, sec.kind, sec.heading)
 
     for fig in doc.figures:
-        caption_body = fig.caption or ""
-        if fig.kind == "table" and getattr(fig, "table_markdown", ""):
-            caption_body = f"{caption_body}\n\n{fig.table_markdown}".strip()
+        caption_body = (fig.caption or "").strip()
+        tbl_md = (getattr(fig, "table_markdown", "") or "").strip()
+        if fig.kind == "table" and tbl_md:
+            # Avoid duplicating table_markdown when extract_tei already appended it to fig.caption
+            prose_caption = caption_body.replace(tbl_md, "").strip()
+            prefix = f"{fig.label}: {prose_caption}".rstrip(": ").strip() if prose_caption else fig.label
+            tbl_chunks = split_markdown_table_preserving_header(
+                tbl_md, hard_max=hard_max, caption_prefix=prefix
+            )
+            for tc in tbl_chunks:
+                if tc.strip():
+                    chunks.append(
+                        Chunk(
+                            tc,
+                            "caption",
+                            "caption",
+                            fig.label,
+                            fig.page,
+                            fig.page,
+                            len(chunks),
+                            figure_id=fig.id,
+                            figure_kind=fig.kind,
+                            figure_label=fig.label,
+                        )
+                    )
+            continue
         text = f"{fig.label}: {caption_body}" if caption_body else fig.label
         if not text.strip():
             continue

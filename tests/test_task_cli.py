@@ -117,7 +117,8 @@ class TestTaskCLI(unittest.TestCase):
         self.assertTrue(report_file.exists())
         report_content = report_file.read_text(encoding="utf-8")
         self.assertIn("Replication Scorecard", report_content)
-        self.assertIn("CERTIFIED_REPLICABLE", report_content)
+        self.assertIn("DRY_RUN_VALIDATED", report_content)
+        self.assertNotIn("CERTIFIED_REPLICABLE", report_content)
 
     def test_autonomous_mode_requires_the_acknowledgement_flag(self):
         plan_file = self.tmp_path / "plan.json"

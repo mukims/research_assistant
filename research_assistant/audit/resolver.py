@@ -485,7 +485,7 @@ def enrich_item_bibliometrics(
             )
         if dl_entry.get("citation_count") is not None and meta.get("citation_count") is None:
             meta["citation_count"] = dl_entry["citation_count"]
-        cand_venue = dl_entry.get("venue") or dl_entry.get("journal")
+        cand_venue = dl_entry.get("venue") or dl_entry.get("journal") or dl_entry.get("container")
         if cand_venue and not meta.get("venue"):
             meta["venue"] = cand_venue
         raw_doi = dl_entry.get("doi")
@@ -517,7 +517,7 @@ def enrich_item_bibliometrics(
             )
         if hit_meta.get("citation_count") is not None and meta.get("citation_count") is None:
             meta["citation_count"] = hit_meta["citation_count"]
-        cand_venue = hit_meta.get("venue") or hit_meta.get("journal")
+        cand_venue = hit_meta.get("venue") or hit_meta.get("journal") or hit_meta.get("container")
         if cand_venue and not meta.get("venue"):
             meta["venue"] = cand_venue
         raw_doi = hit_meta.get("doi")

@@ -156,6 +156,61 @@ def split_author_year_cites(txt: str) -> list[str]:
     return parts
 
 
+_NUM_RANGE_PART_RE = re.compile(r"^(\d{1,4})\s*[-–—]\s*(\d{1,4})$")
+
+
+def expand_numeric_cite_markers(txt: str, max_span: int = 15) -> list[str]:
+    """Expand a multi-number or range citation marker into individual markers.
+
+    Examples:
+      - ``'[13–16]'`` -> ``['[13]', '[14]', '[15]', '[16]']``
+      - ``'[4, 7, 9-10]'`` -> ``['[4]', '[7]', '[9]', '[10]']``
+      - ``'41–43'`` -> ``['41', '42', '43']``
+      - ``'[12]'`` -> ``['[12]']``
+    """
+    cleaned = (txt or "").strip()
+    if not cleaned or not is_numeric_cite(cleaned):
+        return [cleaned] if cleaned else []
+    # Keep split bracket halves like '[9,' or '10]' intact when standalone
+    if (cleaned.startswith("[") and not cleaned.endswith("]")) or (
+        cleaned.endswith("]") and not cleaned.startswith("[")
+    ):
+        if not re.search(r"\d+\s*[-–—]\s*\d+", cleaned):
+            return [cleaned]
+
+    has_sq = "[" in cleaned or "]" in cleaned
+    has_paren = "(" in cleaned or ")" in cleaned
+    body = re.sub(r"^(?:refs?\.?|references?)\s*", "", cleaned, flags=re.IGNORECASE)
+    body = body.strip("[]() ")
+    raw_parts = [p.strip() for p in re.split(r"[,;]+", body) if p.strip()]
+    if not raw_parts:
+        return [cleaned]
+
+    nums: list[int] = []
+    for part in raw_parts:
+        m_rng = _NUM_RANGE_PART_RE.match(part)
+        if m_rng:
+            a, b = int(m_rng.group(1)), int(m_rng.group(2))
+            if a <= 0 or b <= a or (b - a) > max_span:
+                return [cleaned]
+            nums.extend(range(a, b + 1))
+        elif part.isdigit():
+            val = int(part)
+            if val <= 0:
+                return [cleaned]
+            nums.append(val)
+        else:
+            return [cleaned]
+
+    if len(nums) <= 1:
+        return [cleaned]
+    if has_sq:
+        return [f"[{k}]" for k in nums]
+    if has_paren:
+        return [f"({k})" for k in nums]
+    return [str(k) for k in nums]
+
+
 def is_numeric_cite(txt: str) -> bool:
     """"[12]", "[9,", "10]", "3-5", "Ref. 11", "[IV]": a marker that carries no author words."""
     cleaned = (txt or "").strip()
@@ -258,6 +313,13 @@ _METHOD_RE = re.compile(
     r"we (?:use|used|adopt|adopted|follow|followed|employ|employed|apply|applied))\b",
     re.I,
 )
+_COMPUTATIONAL_SETUP_RE = re.compile(
+    r"\b(exchange[- ]correlation\s+functional|basis\s+sets?|\bpseudopotentials?\b|"
+    r"projector[- ]augmented[- ]wave|\bGGA[- ]PBE\b|\bB3LYP\b|\bHSE06\b|"
+    r"(?:calculations?|simulations?|computations?|relaxations?|optimizations?)\s+"
+    r"(?:were|are)\s+(?:carried\s+out|performed|conducted|done)\s+(?:using|with|within|in|by))\b",
+    re.I,
+)
 
 
 def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> str:
@@ -266,6 +328,7 @@ def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> 
     conservative: an unrecognised citation is evidential and gets judged."""
     before = sentence.split(token, 1)[0]
     window = " ".join(before.split()[-8:])
+    wide_window = " ".join(before.split()[-18:])
     ref = ref_info or {}
     ref_text = f"{ref.get('title') or ''} {ref.get('raw_reference') or ''}"
     if _SOFTWARE_REF_RE.search(ref_text) or _SOFTWARE_CONTEXT_RE.search(window):
@@ -274,7 +337,7 @@ def classify_citation_role(sentence: str, token: str, ref_info: dict | None) -> 
         return "pointer"
     if _DEFINITION_VERB_RE.search(sentence) and _EQUATION_RE.search(sentence):
         return "definition"
-    if _METHOD_RE.search(window):
+    if _METHOD_RE.search(window) or _COMPUTATIONAL_SETUP_RE.search(wide_window):
         return "method"
     return "evidential"
 

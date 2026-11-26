@@ -740,6 +740,7 @@ def fetch_papers(source_file: str | None = None):
                                         provider="oa_pdf_url",
                                         fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                         title=ref.get("title") or biblio.get("title") or "",
+                                        venue=(ref.get("venue") or ref.get("container") or ref.get("journal") or biblio.get("venue") or "").strip(),
                                         raw_reference=ref.get("raw_reference") or "",
                                         doi=doi or bib_doi or biblio.get("doi"),
                                         arxiv_id=arxiv_id or bib_arxiv,
@@ -788,6 +789,7 @@ def fetch_papers(source_file: str | None = None):
                                     provider="openalex" if (doi or biblio.get("doi")) else "abstract_only",
                                     fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                     title=ref.get("title") or biblio.get("title") or "",
+                                    venue=(ref.get("venue") or ref.get("container") or ref.get("journal") or biblio.get("venue") or "").strip(),
                                     raw_reference=ref.get("raw_reference") or "",
                                     doi=doi or bib_doi or biblio.get("doi"),
                                     arxiv_id=arxiv_id or bib_arxiv,
@@ -822,6 +824,13 @@ def fetch_papers(source_file: str | None = None):
                         provider=provider,
                         fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         title=ref.get("title") or (biblio.get("title") if isinstance(biblio, dict) else None),
+                        venue=(
+                            ref.get("venue")
+                            or ref.get("container")
+                            or ref.get("journal")
+                            or (biblio.get("venue") if isinstance(biblio, dict) else "")
+                            or ""
+                        ).strip(),
                         raw_reference=ref.get("raw_reference"),
                         doi=doi or (normalise_doi(biblio.get("doi")) if isinstance(biblio, dict) else None),
                         arxiv_id=arxiv_id or (biblio.get("arxiv_id") if isinstance(biblio, dict) else None),
@@ -863,6 +872,7 @@ def fetch_papers(source_file: str | None = None):
                     "doi_source": how,
                     "authoritative": is_authoritative(key),
                     "title": ref.get("title"),
+                    "container": ref.get("container") or ref.get("venue") or ref.get("journal"),
                     "cited_by": ref.get("source_file"),
                     "xml_id": ref.get("xml_id"),
                     "raw_reference": ref.get("raw_reference"),
@@ -960,6 +970,7 @@ def backfill_failed_downloads(
                         provider="oa_pdf_url",
                         fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         title=title or biblio.get("title") or "",
+                        venue=(rec.get("venue") or rec.get("container") or biblio.get("venue") or "").strip(),
                         raw_reference=raw,
                         doi=doi or biblio.get("doi"),
                         arxiv_id=rec.get("arxiv_id") or biblio.get("arxiv_id"),
@@ -986,6 +997,7 @@ def backfill_failed_downloads(
                         provider="openalex" if biblio.get("doi") else "abstract_only",
                         fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         title=title or biblio.get("title") or "",
+                        venue=(rec.get("venue") or rec.get("container") or biblio.get("venue") or "").strip(),
                         raw_reference=raw,
                         doi=doi or biblio.get("doi"),
                         arxiv_id=rec.get("arxiv_id"),

@@ -33,6 +33,7 @@ from research_assistant.shared.claim_text import (  # re-exported: seed_audit, a
     sentence_context,
     split_into_sentences,
 )
+from research_assistant.shared.draft_input import sidecar_path
 from research_assistant.shared.search import expand_neighbours, hybrid_search, rerank_candidates
 from research_assistant.shared.retry import retry
 from research_assistant.shared.llm import chat
@@ -663,7 +664,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         len(citation_mapping), len(key_registry),
     )
 
-    mapping_file = out_path.replace(".txt", "_citations.json")
+    mapping_file = sidecar_path(out_path, "_citations.json")
     with open(mapping_file, "w", encoding="utf-8") as f:
         json.dump(citation_mapping, f, indent=4)
     logger.info("Saved citation mapping to %s", mapping_file)
@@ -679,13 +680,13 @@ def run_batch_citer(file_path, out_path="cited_draft.txt", search_resources=None
         elif k_item in used_keys:
             used_evidence[k_item] = v_item
 
-    evidence_file = out_path.replace(".txt", "_citation_evidence.json")
+    evidence_file = sidecar_path(out_path, "_citation_evidence.json")
     with open(evidence_file, "w", encoding="utf-8") as f:
         json.dump(used_evidence, f, indent=4)
     logger.info("Saved citation evidence to %s", evidence_file)
 
     # ── Generate citation reasoning report ───────────────────────────────
-    report_path = out_path.replace(".txt", "_report.md")
+    report_path = sidecar_path(out_path, "_report.md")
     _generate_report(
         file_path, report_path, sentences, cited_sentences,
         needs_cite, citation_entries, citation_mapping, key_registry,

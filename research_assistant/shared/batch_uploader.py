@@ -9,6 +9,7 @@ import io
 import os
 import re
 import hashlib
+import tempfile
 import zipfile
 import ipaddress
 import socket
@@ -382,19 +383,34 @@ def fetch_and_stage_urls_or_dois(
                     logger.warning("Failed reading corpus file %s: %s", hit.path, exc)
             if not data:
                 # Try Unpaywall / Europe PMC via Agent 2
+                tmp_dest = None
                 try:
                     from research_assistant.agents import agent2_fetcher
 
-                    tmp_dest = os.path.join(destination_dir, "temp_doi_fetch.pdf")
-                    ok = agent2_fetcher.try_unpaywall(doi, tmp_dest)
+                    with tempfile.NamedTemporaryFile(
+                        prefix="temp_doi_fetch_",
+                        suffix=".pdf",
+                        dir=destination_dir,
+                        delete=False,
+                    ) as tf:
+                        tmp_dest = tf.name
+
+                    res_u = agent2_fetcher.try_unpaywall(doi, tmp_dest)
+                    ok = res_u[0] if isinstance(res_u, tuple) else bool(res_u)
                     if not ok:
-                        ok = agent2_fetcher.try_europepmc(doi, {"doi": doi}, tmp_dest)
-                    if ok and os.path.exists(tmp_dest):
+                        res_e = agent2_fetcher.try_europepmc(doi, {"doi": doi}, tmp_dest)
+                        ok = res_e[0] if isinstance(res_e, tuple) else bool(res_e)
+                    if ok and os.path.exists(tmp_dest) and os.path.getsize(tmp_dest) > 0:
                         with open(tmp_dest, "rb") as fh:
                             data = fh.read()
-                        os.unlink(tmp_dest)
                 except Exception as exc:
                     logger.warning("Failed resolving DOI %s: %s", doi, exc)
+                finally:
+                    if tmp_dest and os.path.exists(tmp_dest):
+                        try:
+                            os.unlink(tmp_dest)
+                        except OSError:
+                            pass
 
         if data:
             rec = _extract_from_bytes(data, orig_name, destination_dir)

@@ -11,17 +11,31 @@ from unittest.mock import patch
 from research_assistant.agents.agent8_verifier import verify_draft
 from research_assistant.audit.report import generate_seed_audit_markdown
 from research_assistant.audit.resolver import _resolve_ref, enrich_item_bibliometrics
-from research_assistant.judgement.judge import compose_context, filter_relevant_artifacts
-from research_assistant.judgement.policy import ReliabilityRating
+from research_assistant.judgement.judge import (
+    build_citing_paper_note,
+    compose_context,
+    filter_relevant_artifacts,
+    guard_abstract_only_verdict,
+    infer_evidence_tier,
+)
+from research_assistant.judgement.policy import ReliabilityRating, evaluate_reliability
 from research_assistant.judgement.source_assessor import SourceGrade, assess_source
+from research_assistant.shared.chunking import (
+    chunk_document,
+    is_markdown_table,
+    split_markdown_table_preserving_header,
+)
 from research_assistant.shared.claim_text import (
+    classify_citation_role,
     describe_citation_locus,
+    expand_numeric_cite_markers,
     is_non_citation_ref,
     split_author_year_cites,
 )
 from research_assistant.shared.search import (
     extract_salient_claim_terms,
     rerank_candidates,
+    resolve_cross_encoder_target,
     supplement_intra_doc_lexical_hits,
 )
 from research_assistant.shared.seed_audit import (
@@ -30,6 +44,7 @@ from research_assistant.shared.seed_audit import (
     cross_check_seed_audit,
     detect_uncited_claims,
     extract_seed_citation_claims,
+    extract_seed_self_identity,
     extract_uncited_candidate_sentences,
 )
 
@@ -596,6 +611,271 @@ class TestStep7EvalExpansionAndUncitedDetector(unittest.TestCase):
         flagged = detect_uncited_claims(soup, batch_checker=lambda batch: [True for _ in batch])
         self.assertEqual(len(flagged), 1)
         self.assertEqual(flagged[0]["section"], "introduction")
+
+
+class TestRound2Improvement1AbstractOnlyGuard(unittest.TestCase):
+    def test_abstract_only_caps_does_not_support_to_unclear(self):
+        v = {
+            "judgement": "Does not support",
+            "evidence_sufficiency": "partial",
+            "confidence": "High",
+            "supporting_span": None,
+            "reason": "The abstract discusses PbTe thermopower without listing 170 uV/K.",
+            "rubric_violations": [],
+        }
+        guarded = guard_abstract_only_verdict(v, "abstract_only")
+        self.assertEqual(guarded["judgement"], "Unclear / insufficient evidence")
+        self.assertEqual(guarded["model_judgement"], "Does not support")
+        self.assertTrue(guarded["rubric_mismatch"])
+        self.assertIn("abstract", guarded["reason"].lower())
+
+        # Full-text Does not support is untouched
+        untouched = guard_abstract_only_verdict(v, "full_text")
+        self.assertEqual(untouched["judgement"], "Does not support")
+
+        # Policy also maps abstract_only Does not support to UNRESOLVED rather than UNSUPPORTED
+        rel = evaluate_reliability("Does not support", evidence_tier="abstract_only")
+        self.assertEqual(rel["rating"], ReliabilityRating.UNRESOLVED.value)
+
+    def test_infer_evidence_tier_handles_stored_form_and_prior_tier(self):
+        self.assertEqual(
+            infer_evidence_tier([{"metadata": {"stored_form": "abstract_only"}}]),
+            "abstract_only",
+        )
+        self.assertEqual(
+            infer_evidence_tier([{"metadata": {"document": "x"}}], prior_tier="abstract_only"),
+            "abstract_only",
+        )
+        self.assertEqual(
+            infer_evidence_tier([{"metadata": {"stored_form": "text_chunk"}}], prior_tier="abstract_only"),
+            "full_text",
+        )
+
+
+class TestRound2Improvement2CitingPaperSelfIdentity(unittest.TestCase):
+    def test_extracts_self_coined_framework_from_abstract_and_title(self):
+        from bs4 import BeautifulSoup
+        tei = """<?xml version="1.0" encoding="UTF-8"?>
+        <TEI xmlns="http://www.tei-c.org/ns/1.0">
+          <teiHeader>
+            <fileDesc>
+              <titleStmt><title type="main">Reimagining research papers as interactive AI agents</title></titleStmt>
+            </fileDesc>
+            <profileDesc>
+              <abstract><p>Here we introduce Paper2Agent, an automated framework that converts papers into agents.</p></abstract>
+            </profileDesc>
+          </teiHeader>
+        </TEI>
+        """
+        title, names = extract_seed_self_identity(BeautifulSoup(tei, "xml"))
+        self.assertEqual(title, "Reimagining research papers as interactive AI agents")
+        self.assertEqual(names, ["Paper2Agent"])
+
+        note = build_citing_paper_note(
+            "Paper2Agent represents each scientific paper as a Model Context Protocol (MCP) server.",
+            seed_title=title,
+            seed_self_names=names,
+        )
+        self.assertIsNotNone(note)
+        self.assertIn("Paper2Agent", note)
+        self.assertIn("Do NOT require", note)
+
+        # Unrelated claim without Paper2Agent gets None (zero distraction)
+        self.assertIsNone(
+            build_citing_paper_note(
+                "Prior tools focused on containerization for reproducibility.",
+                seed_title=title,
+                seed_self_names=names,
+            )
+        )
+
+
+class TestRound2Improvement3RangeExpansionAndMethodRole(unittest.TestCase):
+    def test_expand_numeric_cite_markers(self):
+        self.assertEqual(expand_numeric_cite_markers("[13–16]"), ["[13]", "[14]", "[15]", "[16]"])
+        self.assertEqual(expand_numeric_cite_markers("[4, 7, 9-10]"), ["[4]", "[7]", "[9]", "[10]"])
+        self.assertEqual(expand_numeric_cite_markers("41–43"), ["41", "42", "43"])
+        self.assertEqual(expand_numeric_cite_markers("[12]"), ["[12]"])
+        self.assertEqual(expand_numeric_cite_markers("[9,"), ["[9,"])
+
+    def test_computational_setup_role_classified_as_method(self):
+        sent = (
+            "All calculations were carried out using a double-zeta basis set with polarization "
+            "orbitals within the GGA-PBE exchange-correlation functional ⟦C0⟧ ⟦C1⟧ ."
+        )
+        self.assertEqual(classify_citation_role(sent, "⟦C0⟧", {"title": "Generalized Gradient Approximation Made Simple"}), "method")
+        self.assertEqual(classify_citation_role(sent, "⟦C1⟧", {"title": "SIESTA"}), "method")
+
+    def test_extract_claims_expands_single_and_split_numeric_ranges(self):
+        from bs4 import BeautifulSoup
+        tei = """<?xml version="1.0" encoding="UTF-8"?>
+        <TEI xmlns="http://www.tei-c.org/ns/1.0">
+          <text>
+            <body>
+              <div>
+                <p><s>Graphene nanoribbons have been fabricated by lithography, unzipping, and synthesis <ref type="bibr">[1–</ref><ref type="bibr">3]</ref>.</s></p>
+              </div>
+            </body>
+            <back>
+              <listBibl>
+                <biblStruct xml:id="b0"><analytic><title level="a">STM lithography of nanoribbons</title><author><persName><surname>Tapaszto</surname></persName></author></analytic><monogr><imprint><date when="2008"/></imprint></monogr></biblStruct>
+                <biblStruct xml:id="b1"><analytic><title level="a">Longitudinal unzipping of nanotubes</title><author><persName><surname>Kosynkin</surname></persName></author></analytic><monogr><imprint><date when="2009"/></imprint></monogr></biblStruct>
+                <biblStruct xml:id="b2"><analytic><title level="a">Atomically precise bottom-up nanoribbons</title><author><persName><surname>Cai</surname></persName></author></analytic><monogr><imprint><date when="2010"/></imprint></monogr></biblStruct>
+              </listBibl>
+            </back>
+          </text>
+        </TEI>
+        """
+        claims = extract_seed_citation_claims(BeautifulSoup(tei, "xml"))
+        self.assertEqual(len(claims), 3)
+        self.assertEqual([c["ref"]["xml_id"] for c in claims], ["b0", "b1", "b2"])
+
+
+class TestRound2Improvement4TableChunking(unittest.TestCase):
+    def test_split_markdown_table_preserves_header_and_dedupes_caption_table_md(self):
+        from research_assistant.shared.extract import Document, Figure, Paragraph, Section
+
+        rows = ["| Material | S (uV/K) | PF (mW/mK2) |", "| --- | --- | --- |"]
+        for i in range(12):
+            rows.append(f"| Compound_{i:02d} | {150 + i * 10} | {1.2 + i * 0.2:.1f} |")
+        tbl_md = "\n".join(rows)
+        self.assertTrue(is_markdown_table(tbl_md))
+
+        split_chunks = split_markdown_table_preserving_header(
+            tbl_md, hard_max=220, caption_prefix="Table 1: Thermoelectric metrics."
+        )
+        self.assertGreaterEqual(len(split_chunks), 3)
+        for ch in split_chunks:
+            self.assertIn("Table 1: Thermoelectric metrics.", ch)
+            self.assertIn("| Material | S (uV/K) | PF (mW/mK2) |", ch)
+            self.assertIn("| --- | --- | --- |", ch)
+
+        # Verify extract_tei-style Figure (where caption already had table_md appended) does NOT duplicate table_md
+        short_tbl = "| Mat | S |\n| --- | --- |\n| PbTe | 170 |"
+        fig = Figure(
+            "tab_1", "table", "Table 1", f"Thermopower.\n\n{short_tbl}", 2, None, table_markdown=short_tbl
+        )
+        doc = Document("d.pdf", "Title", [], [Section("Results", "results", [Paragraph(tbl_md, 2)])], [fig], "grobid")
+        doc_chunks = chunk_document(doc, target=180, hard_max=240)
+        cap_chunks = [c for c in doc_chunks if c.type == "caption"]
+        self.assertEqual(len(cap_chunks), 1)
+        self.assertEqual(cap_chunks[0].text.count("| PbTe | 170 |"), 1)
+        # Numeric Markdown table in section paragraphs survived low alpha_ratio and kept headers in every chunk
+        text_chunks = [c for c in doc_chunks if c.type == "text"]
+        self.assertGreaterEqual(len(text_chunks), 2)
+        for tc in text_chunks:
+            self.assertIn("| Material | S (uV/K) | PF (mW/mK2) |", tc.text)
+
+
+class TestRound2Improvement5SelectiveVotingAndCrossEncoder(unittest.TestCase):
+    def test_selective_voting_casts_tie_breakers_only_on_disputed_or_hedged_verdicts(self):
+        import types
+        from research_assistant.judgement import judge as judge_mod
+
+        def _raw_reply(verdict_name: str, finding: str = "Supports"):
+            return types.SimpleNamespace(content=json.dumps({
+                "slots": {
+                    "finding": {"assertion": "graphene mobility", "verdict": finding},
+                    "scope": {"assertion": "graphene", "verdict": "Supports"},
+                    "strength": {"assertion": "high", "verdict": "Partially supports" if verdict_name == "Partially supports" else "Supports"},
+                },
+                "judgement": verdict_name,
+                "evidence_sufficiency": "sufficient",
+                "confidence": "High",
+                "supporting_span": "graphene mobility is high",
+                "reason": "because",
+            }))
+
+        # 1. Supports on pass 1 returns immediately in 1 call (zero extra cost)
+        with (
+            patch.object(judge_mod, "JUDGEMENT_VOTES", 1),
+            patch.object(judge_mod, "JUDGEMENT_SELECTIVE_VOTES", True),
+            patch.object(judge_mod, "chat", side_effect=[_raw_reply("Supports")]) as m_chat,
+        ):
+            res_sup = judge_mod.judge("graphene mobility is high", "graphene mobility is high")
+            self.assertEqual(res_sup["judgement"], "Supports")
+            self.assertEqual(m_chat.call_count, 1)
+
+        # 2. Fluke Contradicts on pass 1 followed by 2 Supports tie-breakers resolves to Supports (3 calls)
+        with (
+            patch.object(judge_mod, "JUDGEMENT_VOTES", 1),
+            patch.object(judge_mod, "JUDGEMENT_SELECTIVE_VOTES", True),
+            patch.object(
+                judge_mod,
+                "chat",
+                side_effect=[
+                    _raw_reply("Contradicts", finding="Contradicts"),
+                    _raw_reply("Supports", finding="Supports"),
+                    _raw_reply("Supports", finding="Supports"),
+                ],
+            ) as m_chat2,
+        ):
+            res_tie = judge_mod.judge("graphene mobility is high", "graphene mobility is high")
+            self.assertEqual(res_tie["judgement"], "Supports")
+            self.assertEqual(m_chat2.call_count, 3)
+            self.assertEqual(res_tie["votes"], {"Contradicts": 1, "Supports": 2})
+
+    def test_resolve_cross_encoder_target_auto_discovers_local_dir_and_respects_explicit_disable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(
+                resolve_cross_encoder_target(use_flag=False, model_name="m", local_dir=tmp, explicit_env=None)
+            )
+            with open(os.path.join(tmp, "config.json"), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            # Local weights auto-discovered offline
+            self.assertEqual(
+                resolve_cross_encoder_target(use_flag=False, model_name="m", local_dir=tmp, explicit_env=None),
+                tmp,
+            )
+            # Explicit CITATION_USE_CROSS_ENCODER=0 overrides auto-discovery
+            self.assertIsNone(
+                resolve_cross_encoder_target(use_flag=False, model_name="m", local_dir=tmp, explicit_env="0")
+            )
+
+
+class TestRound2Improvement6VerifierEvalCoverage(unittest.TestCase):
+    def test_corpus_backed_verifier_gold_cases_exceed_thirty_across_all_verdict_classes(self):
+        from research_assistant.judgement.evalset import load_cases, split_held_out
+        from research_assistant.judgement.harvest import candidates_from_verification
+        from research_assistant.judgement.judge import PROMPT_TEMPLATE, VALID_JUDGEMENTS
+
+        cases = load_cases()
+        held, refused = split_held_out(cases, PROMPT_TEMPLATE)
+        leaked = [c["id"] for c in refused if c["source"] != "prompt_example"]
+        self.assertEqual(leaked, [])
+        self.assertGreaterEqual(len(held), 75)
+
+        verifier_cases = [c for c in held if c.get("document") and c.get("citation_source")]
+        self.assertGreaterEqual(len(verifier_cases), 30)
+        covered_labels = {c["expected_judgement"] for c in verifier_cases}
+        self.assertEqual(covered_labels, set(VALID_JUDGEMENTS))
+
+        # Also verify harvest preserves document when present
+        cands = candidates_from_verification(
+            {
+                "results": [
+                    {
+                        "outcome": "judged",
+                        "claim": "C1",
+                        "evidence": "E1",
+                        "document": "doc1.pdf",
+                        "citation_source": "Src1",
+                        "judgement": "Supports",
+                    }
+                ]
+            },
+            prefix="v1",
+        )
+        self.assertEqual(cands[0]["document"], "doc1.pdf")
+
+    def test_span_is_verbatim_tolerates_grobid_footnote_space_before_punctuation(self):
+        from research_assistant.judgement.judge import span_is_verbatim
+
+        ev = "First, GWAS do not directly pinpoint relevant genes, as most associated variants are non-coding 13 . Moreover, 0.5 eV and -0.43 eV remain exact."
+        span = "First, GWAS do not directly pinpoint relevant genes, as most associated variants are non-coding 13."
+        self.assertTrue(span_is_verbatim(span, ev))
+        # Different decimal or sign still fails
+        self.assertFalse(span_is_verbatim("Moreover, 0.43 eV remain exact.", ev))
 
 
 if __name__ == "__main__":

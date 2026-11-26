@@ -3,19 +3,48 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
+import unittest.mock
 import xml.etree.ElementTree as ET
 from typing import Callable
 
 import numpy as np
 
+from research_assistant import config
 from research_assistant.config import (
+    ARXIV_RATE_LIMIT,
     OPENALEX_MAILTO,
     OPENALEX_URL,
     TRANSFER_PRIOR_ART_DONE,
     TRANSFER_PRIOR_ART_PARTIAL,
     USER_AGENT,
 )
+from research_assistant.shared.log import get_logger
 from research_assistant.transfer.models import PriorArt
+
+logger = get_logger("transfer.prior_art")
+
+_RATE_LOCKS: dict[str, threading.Lock] = {
+    "openalex": threading.Lock(),
+    "arxiv": threading.Lock(),
+}
+_LAST_CALL_TS: dict[str, float] = {}
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _throttle_provider(provider: str, min_interval: float, is_mocked: bool) -> None:
+    if is_mocked or min_interval <= 0:
+        return
+    lock = _RATE_LOCKS.setdefault(provider, threading.Lock())
+    with lock:
+        now = time.monotonic()
+        last = _LAST_CALL_TS.get(provider)
+        if last is not None:
+            wait = min_interval - (now - last)
+            if wait > 0:
+                time.sleep(wait)
+        _LAST_CALL_TS[provider] = time.monotonic()
 
 
 def reconstruct_abstract(inverted_index: dict | None) -> str:
@@ -100,18 +129,52 @@ def parse_arxiv(xml_text: str) -> list[dict]:
     return results
 
 
-def default_get_json(url: str, params: dict) -> dict:
+def _request_with_retry(url: str, params: dict):
     import requests
-    resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
+
+    is_mocked = isinstance(requests.get, unittest.mock.Base)
+    provider = "arxiv" if "arxiv.org" in url else ("openalex" if "openalex.org" in url else "other")
+    interval = float(ARXIV_RATE_LIMIT) if provider == "arxiv" else (0.12 if provider == "openalex" else 0.0)
+
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        _throttle_provider(provider, interval, is_mocked=is_mocked)
+        try:
+            resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt == 0 and not is_mocked:
+                time.sleep(1.5)
+                continue
+            raise
+
+        status_code = getattr(resp, "status_code", None)
+        if isinstance(status_code, int) and status_code in _RETRYABLE_STATUS_CODES and attempt == 0:
+            if not is_mocked:
+                retry_after = 1.5
+                hdrs = getattr(resp, "headers", None)
+                if isinstance(hdrs, dict) and hdrs.get("Retry-After"):
+                    try:
+                        retry_after = min(10.0, max(0.5, float(hdrs["Retry-After"])))
+                    except (ValueError, TypeError):
+                        pass
+                time.sleep(retry_after)
+            continue
+
+        resp.raise_for_status()
+        return resp
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Request to {url} failed after retries")
+
+
+def default_get_json(url: str, params: dict) -> dict:
+    return _request_with_retry(url, params).json()
 
 
 def default_get_text(url: str, params: dict) -> str:
-    import requests
-    resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
-    resp.raise_for_status()
-    return resp.text
+    return _request_with_retry(url, params).text
 
 
 _QUERY_STOPWORDS = frozenset({
@@ -154,6 +217,8 @@ class PriorArtClient:
         self.get_text = get_text
         self.embed_documents = embed_documents
         self.limit = limit
+        self._cache_lock = threading.Lock()
+        self._hit_cache: dict[tuple[str, int | None], list[dict]] = {}
 
     def check(
         self,
@@ -166,35 +231,71 @@ class PriorArtClient:
         Check literature for prior art combining the technique and quantities.
 
         1. Query is built via _build_prior_art_query(technique_name, quantities[:2]).
-        2. Searches OpenAlex and arXiv.
+        2. Searches OpenAlex and arXiv independently (surviving single-provider outages).
         3. Drops hits with year >= before_year.
         4. Scores hits by cosine similarity between summary and title+abstract.
         5. Assigns status: done_before, partial, not_found, or unchecked.
         """
-        try:
-            query = _build_prior_art_query(technique_name, quantities)
+        query = _build_prior_art_query(technique_name, quantities)
+        cache_key = (query, before_year)
 
+        with self._cache_lock:
+            cached_hits = self._hit_cache.get(cache_key)
+
+        partial_error: str | None = None
+        if cached_hits is not None:
+            all_hits = list(cached_hits)
+        else:
             oa_params: dict[str, str | int] = {
                 "search": query,
                 "per_page": self.limit,
             }
-            if OPENALEX_MAILTO:
-                oa_params["mailto"] = OPENALEX_MAILTO
+            mailto = getattr(config, "OPENALEX_MAILTO", None) or OPENALEX_MAILTO
+            if mailto:
+                oa_params["mailto"] = mailto
+            api_key = getattr(config, "OPENALEX_API_KEY", None)
+            if api_key:
+                oa_params["api_key"] = api_key
             if before_year is not None:
                 oa_params["filter"] = f"to_publication_date:{before_year - 1}-12-31"
 
-            oa_payload = self.get_json(OPENALEX_URL, oa_params)
-            oa_hits = parse_openalex(oa_payload)
+            oa_hits: list[dict] = []
+            arxiv_hits: list[dict] = []
+            provider_errors: list[str] = []
+
+            try:
+                oa_payload = self.get_json(OPENALEX_URL, oa_params)
+                oa_hits = parse_openalex(oa_payload)
+            except Exception as exc:
+                logger.warning("OpenAlex prior-art lookup failed for query %r: %s", query, exc)
+                provider_errors.append(f"openalex: {exc}")
 
             arxiv_params: dict[str, str | int] = {
                 "search_query": f"all:{query}",
                 "max_results": self.limit,
             }
-            arxiv_text = self.get_text("https://export.arxiv.org/api/query", arxiv_params)
-            arxiv_hits = parse_arxiv(arxiv_text)
+            try:
+                arxiv_text = self.get_text("https://export.arxiv.org/api/query", arxiv_params)
+                arxiv_hits = parse_arxiv(arxiv_text)
+            except Exception as exc:
+                logger.warning("arXiv prior-art lookup failed for query %r: %s", query, exc)
+                provider_errors.append(f"arxiv: {exc}")
+
+            partial_error = "; ".join(provider_errors) if provider_errors else None
+            if len(provider_errors) >= 2:
+                logger.warning(
+                    "Prior-art check failed across all providers for %r (%s) — marking unchecked",
+                    technique_name,
+                    partial_error,
+                )
+                return PriorArt(status="unchecked", hits=[], error=partial_error)
 
             all_hits = oa_hits + arxiv_hits
+            if not provider_errors:
+                with self._cache_lock:
+                    self._hit_cache[cache_key] = list(all_hits)
 
+        try:
             # Filter by cutoff year
             if before_year is not None:
                 all_hits = [
@@ -203,7 +304,7 @@ class PriorArtClient:
                 ]
 
             if not all_hits or self.embed_documents is None:
-                return PriorArt(status="not_found", hits=[])
+                return PriorArt(status="not_found", hits=[], error=partial_error)
 
             # Deduplicate by title
             seen_titles: set[str] = set()
@@ -259,7 +360,9 @@ class PriorArtClient:
                         status = "partial"
                         break
 
-            return PriorArt(status=status, hits=top_hits)
+            return PriorArt(status=status, hits=top_hits, error=partial_error)
 
-        except Exception:
-            return PriorArt(status="unchecked", hits=[])
+        except Exception as exc:
+            logger.warning("Prior-art scoring failed for %r: %s", technique_name, exc)
+            err_msg = f"{partial_error}; scoring: {exc}" if partial_error else f"scoring: {exc}"
+            return PriorArt(status="unchecked", hits=[], error=err_msg)

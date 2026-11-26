@@ -89,7 +89,8 @@ class TestTaskRunner(unittest.TestCase):
         self.assertEqual(report.completed_count, 4)
         self.assertEqual(report.failed_count, 0)
         self.assertEqual(report.blocked_count, 0)
-        self.assertEqual(report.scorecard["rating"], "CERTIFIED_REPLICABLE")
+        self.assertEqual(report.scorecard["rating"], "DRY_RUN_VALIDATED")
+        self.assertNotEqual(report.scorecard["rating"], "CERTIFIED_REPLICABLE")
         self.assertEqual(report.scorecard["replication_rate"], 1.0)
 
         # Verify physical output files were created in workspace
@@ -113,7 +114,9 @@ class TestTaskRunner(unittest.TestCase):
         # Markdown rendering check
         md = report.render_markdown()
         self.assertIn("# Replication Scorecard: Quantum AI", md)
-        self.assertIn("CERTIFIED_REPLICABLE", md)
+        self.assertIn("DRY_RUN_VALIDATED", md)
+        self.assertNotIn("CERTIFIED_REPLICABLE", md)
+        self.assertIn("Simulation Dry Run", md)
         self.assertIn("| `t1` | ✅ completed |", md)
 
     def test_task_runner_blocked_downstream(self):
@@ -142,7 +145,7 @@ class TestTaskRunner(unittest.TestCase):
         self.assertEqual(report.completed_count, 0)
         self.assertEqual(report.failed_count, 1)
         self.assertEqual(report.blocked_count, 3)  # t2, t3, t4 are blocked
-        self.assertEqual(report.scorecard["rating"], "REPLICATION_FAILED")
+        self.assertEqual(report.scorecard["rating"], "DRY_RUN_FAILED")
         self.assertEqual(report.results["t1"].status, TaskStatus.FAILED)
         self.assertEqual(report.results["t2"].status, TaskStatus.BLOCKED)
         self.assertEqual(report.results["t3"].status, TaskStatus.BLOCKED)
@@ -182,6 +185,7 @@ class TestTaskRunner(unittest.TestCase):
         report = runner.execute()
 
         self.assertEqual(report.completed_count, 1)
+        self.assertEqual(report.scorecard["rating"], "CERTIFIED_REPLICABLE")
         out_path = os.path.join(workspace, "src", "model.py")
         self.assertTrue(os.path.exists(out_path))
         with open(out_path, "r", encoding="utf-8") as f:

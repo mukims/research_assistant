@@ -50,6 +50,8 @@ from research_assistant.judgement.judge import (
     PROVENANCE_FIELDS,
     REQUIRED_FIELDS,
     JudgementParseError,
+    guard_abstract_only_verdict,
+    infer_evidence_tier,
     judge,
 )
 from research_assistant.audit.resolver import (
@@ -61,6 +63,7 @@ from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
 from research_assistant.shared.atomic import atomic_write, atomic_write_json
 from research_assistant.shared.claim_text import tidy_punctuation
+from research_assistant.shared.draft_input import sidecar_path
 from research_assistant.shared.log import get_logger
 from research_assistant.shared.retry import retry
 from research_assistant.shared.search import (
@@ -253,7 +256,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         dict: the same record written to the JSON file.
     """
     if citations_path is None:
-        citations_path = draft_path.replace(".txt", "_citations.json")
+        citations_path = sidecar_path(draft_path, "_citations.json")
 
     if not os.path.exists(citations_path):
         raise FileNotFoundError(
@@ -267,9 +270,12 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         mapping = json.load(fh)
 
     # Check for replayed evidence persisted by Agent 5
-    evidence_path = citations_path.replace("_citations.json", "_citation_evidence.json")
+    if citations_path.endswith("_citations.json"):
+        evidence_path = citations_path[: -len("_citations.json")] + "_citation_evidence.json"
+    else:
+        evidence_path = sidecar_path(citations_path, "_citation_evidence.json")
     if not os.path.exists(evidence_path):
-        evidence_path = draft_path.replace(".txt", "_citation_evidence.json")
+        evidence_path = sidecar_path(draft_path, "_citation_evidence.json")
 
     evidence_registry = {}
     if os.path.exists(evidence_path):
@@ -347,6 +353,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
                 logger.warning(" -> judging call failed on replayed evidence: %s: %s", type(exc).__name__, exc)
                 return entry
 
+            verdict = guard_abstract_only_verdict(verdict, entry.get("evidence_tier"))
             entry["outcome"] = "judged"
             entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
             entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
@@ -445,11 +452,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         for h in hits[:top_k]:
             if isinstance(h.get("metadata"), dict):
                 enrich_item_bibliometrics(entry, hit_meta=h["metadata"])
-        entry["evidence_tier"] = (
-            "abstract_only"
-            if all((h.get("metadata") or {}).get("tier") == "abstract_only" for h in hits[:top_k])
-            else "full_text"
-        )
+        entry["evidence_tier"] = infer_evidence_tier(hits[:top_k], prior_tier=entry.get("evidence_tier"))
         entry["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
         entry["evidence_hits"] = min(top_k, len(hits))
         entry["escalated"] = False
@@ -503,6 +506,7 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
             logger.warning(" -> judging call failed: %s: %s", type(exc).__name__, exc)
             return entry
 
+        verdict = guard_abstract_only_verdict(verdict, entry.get("evidence_tier"))
         entry["outcome"] = "judged"
         entry.update({field: verdict[field] for field in sorted(REQUIRED_FIELDS)})
         entry.update({field: verdict[field] for field in sorted(DERIVED_FIELDS) if field in verdict})
@@ -540,8 +544,10 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         actual_venue = (
             paper_meta.get("venue")
             or paper_meta.get("journal")
+            or paper_meta.get("container")
             or (entry.get("ref") or {}).get("venue")
             or (entry.get("ref") or {}).get("journal")
+            or (entry.get("ref") or {}).get("container")
             or ""
         )
         if actual_venue and not paper_meta.get("venue"):
@@ -581,11 +587,11 @@ def verify_draft(draft_path, citations_path=None, top_k=None,
         "totals": _totals(results),
     }
 
-    json_path = draft_path.replace(".txt", "_verification.json")
+    json_path = sidecar_path(draft_path, "_verification.json")
     atomic_write_json(json_path, report)
     logger.info("Saved verification record to %s", json_path)
 
-    md_path = draft_path.replace(".txt", "_verification.md")
+    md_path = sidecar_path(draft_path, "_verification.md")
     _write_markdown(md_path, report)
     logger.info("Saved verification report to %s", md_path)
 

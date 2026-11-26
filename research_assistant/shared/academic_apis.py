@@ -569,6 +569,13 @@ def fetch_bibliometrics_and_abstract(target: str, timeout: int = DEFAULT_TIMEOUT
                         res["title"] = paper.get("title")
                     if not res["year"] and paper.get("year"):
                         res["year"] = paper.get("year")
+                    if not res["venue"]:
+                        s2_pub_venue = paper.get("publicationVenue")
+                        res["venue"] = (
+                            (s2_pub_venue.get("name") if isinstance(s2_pub_venue, dict) else None)
+                            or paper.get("venue")
+                            or None
+                        )
                     ext_ids = paper.get("externalIds") or {}
                     if isinstance(ext_ids, dict):
                         if not res["doi"] and ext_ids.get("DOI"):
@@ -599,6 +606,12 @@ def fetch_bibliometrics_and_abstract(target: str, timeout: int = DEFAULT_TIMEOUT
             cr_resp = requests.get(cr_url, headers=DEFAULT_HEADERS, timeout=timeout)
             if cr_resp.status_code == 200:
                 cr_msg = (cr_resp.json() or {}).get("message") or {}
+                if not res["venue"]:
+                    ct = cr_msg.get("container-title")
+                    if isinstance(ct, list) and ct:
+                        res["venue"] = str(ct[0]).strip() or None
+                    elif isinstance(ct, str) and ct.strip():
+                        res["venue"] = ct.strip()
                 raw_abs = cr_msg.get("abstract")
                 if isinstance(raw_abs, str) and raw_abs.strip():
                     cleaned_abs = re.sub(r"<[^>]+>", " ", html.unescape(raw_abs))

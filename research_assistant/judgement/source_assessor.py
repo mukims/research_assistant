@@ -43,7 +43,9 @@ _PHYS_REV_PRIMARY = re.compile(
 
 _REVIEW_VENUES = re.compile(
     r"\b(reviews?\s+of\s+modern\s+physics|chem(?:ical)?\.?\s*rev(?:iews?)?|annual\s+review|"
-    r"nature\s+reviews?|trends\s+in|advances\s+in|surveys?\s+in|progress\s+in|"
+    r"nature\s+reviews?|trends\s+in|"
+    r"advances\s+in(?!\s+(?:neural\s+information\s+processing|cryptology))|"
+    r"surveys?\s+in|progress\s+in|"
     r"physics\s+reports|phys\.?\s*rep\.?|reports?\s+on\s+progress|rep\.?\s*prog\.?|"
     r"science\s+reports|reviews?\s+in)\b",
     re.IGNORECASE,
@@ -56,9 +58,35 @@ _REVIEW_TITLE_INDICATORS = re.compile(
 )
 
 _HIGH_IMPACT_VENUES = re.compile(
-    r"\b(nature|science|cell|phys(?:ical)?\.?\s*rev(?:iew)?\.?\s*(?:lett|letters|x|b|a)?|prl|pnas|"
-    r"acs\s+nano|advanced\s+materials|nano\s+letters|ieee\s+trans|chem(?:ical)?\.?\s*rev|joule|"
-    r"energy\s*&\s*environmental\s*science|applied\s+physics\s+letters|apl)\b",
+    r"(?:"
+    r"^\s*nature(?:\s+(?:physics|materials|nanotechnology|photonics|electronics|communications|"
+    r"machine\s+intelligence|medicine|methods|biotechnology|chemistry|energy|catalysis|astronomy|"
+    r"geoscience|climate\s+change|genetics|neuroscience|immunology|cell\s+biology|structural|"
+    r"computational\s+science|biomedical\s+engineering|human\s+behaviour|chemical\s+biology|"
+    r"microbiology|plants|ecology|sustainability|cancer|cardiovascular|metabolism|synthesis|protocols))?\s*$|"
+    r"^\s*science(?:\s+(?:advances|robotics|translational\s+medicine|immunology|signaling))?\s*$|"
+    r"^\s*(?:(?:molecular|cancer|developmental)\s+)?cell(?:\s+(?:metabolism|stem\s+cell|"
+    r"host(?:\s*&\s*microbe)?|reports|systems|chemical\s+biology))?\s*$|"
+    r"\b(?:"
+    r"phys(?:ical)?\.?\s*rev(?:iew)?\.?\s*(?:lett|letters|x|b|a|d|e|materials|research|applied)?|"
+    r"prl|prx|pnas|proceedings\s+of\s+the\s+national\s+academy\s+of\s+sciences|"
+    r"acs\s+nano|advanced\s+materials|nano\s+letters|journal\s+of\s+the\s+american\s+chemical\s+society|"
+    r"jacs|angewandte\s+chemie|joule|energy\s*&\s*environmental\s*science|applied\s+physics\s+letters|apl|"
+    r"neurips|neural\s+information\s+processing\s+systems|nips|"
+    r"icml|international\s+conference\s+on\s+machine\s+learning|"
+    r"iclr|international\s+conference\s+on\s+learning\s+representations|"
+    r"cvpr|computer\s+vision\s+and\s+pattern\s+recognition|iccv|eccv|"
+    r"acl|association\s+for\s+computational\s+linguistics|emnlp|naacl|"
+    r"aaai|ijcai|kdd|sigmod|vldb|sosp|osdi|nsdi|sigcomm|pldi|popl|stoc|focs|"
+    r"acm\s+ccs|computer\s+and\s+communications\s+security|"
+    r"ieee\s+s\s*&\s*p|symposium\s+on\s+security\s+and\s+privacy|usenix\s+security|ndss|"
+    r"journal\s+of\s+machine\s+learning\s+research|jmlr|"
+    r"ieee\s+trans(?:actions)?|acm\s+trans(?:actions)?|communications\s+of\s+the\s+acm|proceedings\s+of\s+the\s+ieee|"
+    r"new\s+england\s+journal\s+of\s+medicine|n\.?\s*engl\.?\s*j\.?\s*med\.?|nejm|"
+    r"(?:the\s+)?lancet(?:\s+(?:oncology|neurology|infectious\s+diseases|digital\s+health|respiratory\s+medicine|psychiatry|public\s+health|global\s+health))?|"
+    r"jama|journal\s+of\s+the\s+american\s+medical\s+association|bmj|british\s+medical\s+journal|annals\s+of\s+internal\s+medicine"
+    r")\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -80,7 +108,7 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
                 meta[k] = v
 
     title = str(meta.get("title") or "").strip()
-    venue = str(meta.get("venue") or meta.get("journal") or "").strip()
+    venue = str(meta.get("venue") or meta.get("journal") or meta.get("container") or "").strip()
     raw_doi = str(meta.get("doi") or "").strip()
     doi = normalise_doi(raw_doi) or raw_doi.lower()
     arxiv_id = str(meta.get("arxiv_id") or "").strip()
@@ -180,9 +208,9 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
         }
 
     # 4. Primary Peer-Reviewed Literature
+    is_well_cited = citation_count is not None and citation_count >= 50
     if venue:
         is_high_impact = bool(_HIGH_IMPACT_VENUES.search(venue))
-        is_well_cited = citation_count is not None and citation_count >= 50
         if is_high_impact or is_well_cited:
             return {
                 "grade": SourceGrade.RIGOROUS_PRIMARY.value,
@@ -205,6 +233,18 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
             "rationale": "Peer-reviewed primary experimental or theoretical publication (heuristic from venue and title; not verified against Crossref).",
         }
 
+    if is_well_cited:
+        return {
+            "grade": SourceGrade.RIGOROUS_PRIMARY.value,
+            "grade_label": "Rigorous Primary Literature",
+            "badge": "🏛️ Rigorous Primary",
+            "is_preprint": False,
+            "is_retracted": False,
+            "venue": "",
+            "citation_count": citation_count,
+            "rationale": "Published primary work with substantial citation impact (citation_count >= 50; venue string absent).",
+        }
+
     # 5. Sparse / Unknown Metadata
     return {
         "grade": SourceGrade.UNKNOWN.value,
@@ -213,7 +253,7 @@ def assess_source(metadata: dict[str, Any] | None = None, ref_info: dict[str, An
         "is_preprint": False,
         "is_retracted": False,
         "venue": "",
-        "citation_count": None,
+        "citation_count": citation_count,
         "rationale": (
             "DOI present but venue unknown — peer-review status not graded."
             if doi else

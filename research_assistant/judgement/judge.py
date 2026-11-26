@@ -23,6 +23,7 @@ from research_assistant.config import (
     LLM_MODEL,
     JUDGEMENT_MODEL,
     JUDGEMENT_OLLAMA_OPTIONS,
+    JUDGEMENT_SELECTIVE_VOTES,
     JUDGEMENT_TEMPERATURE,
     JUDGEMENT_VOTES,
 )
@@ -114,13 +115,18 @@ _ELLIPSIS_RE = re.compile(r"(\.\.\.|…|\[\s*\.\.\.\s*\]|\[…\])")
 # breaks and hyphenated words while strictly preserving minus signs preceding
 # numbers (e.g. -0.5 eV, 10^-5) so negative quantities are not sign-inverted.
 _LINE_HYPHEN_RE = re.compile(r"(?<=[a-zA-Z])-\s*(?=[a-zA-Z])")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,;:!?)\]]|\.(?=\s|$))")
+_SPACE_AFTER_OPEN_RE = re.compile(r"([(\[])\s+")
 
 
 def _normalise(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "").translate(_QUOTES)
     text = _ELLIPSIS_RE.sub(" ", text)
     text = _LINE_HYPHEN_RE.sub("", text)
-    return " ".join(text.lower().split())
+    text = " ".join(text.lower().split())
+    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    text = _SPACE_AFTER_OPEN_RE.sub(r"\1", text)
+    return text
 
 
 _SPAN_PIECE_MIN_CHARS = 12
@@ -273,6 +279,57 @@ def enforce_rubric(result: dict, evidence: str, claim: str | None = None) -> dic
             result["confidence"] = "Medium"
     return result
 
+
+def infer_evidence_tier(hits: list[dict], prior_tier: str | None = None) -> str:
+    """Determine whether *hits* represent ``'abstract_only'`` or ``'full_text'`` evidence."""
+    def _hit_is_abs(h: dict) -> bool:
+        m = h.get("metadata") or {}
+        return (
+            m.get("tier") == "abstract_only"
+            or m.get("stored_form") == "abstract_only"
+            or m.get("type") == "abstract_only"
+            or m.get("evidence_tier") == "abstract_only"
+        )
+
+    if hits and all(_hit_is_abs(h) for h in hits):
+        return "abstract_only"
+    if prior_tier == "abstract_only":
+        has_full = any(
+            (h.get("metadata") or {}).get("tier") == "full_text"
+            or (h.get("metadata") or {}).get("stored_form") in ("text_chunk", "table", "caption")
+            for h in hits
+        )
+        if not has_full:
+            return "abstract_only"
+    return "full_text"
+
+
+def guard_abstract_only_verdict(verdict: dict, evidence_tier: str | None) -> dict:
+    """Prevent asserting absence ('Does not support') when only a paper's abstract was available.
+
+    A 150-word abstract rarely lists computational parameters, benchmark table rows, or
+    secondary controls; silence in an abstract is 'Unclear / insufficient evidence',
+    never proof that the full paper omits the finding.
+    """
+    if evidence_tier != "abstract_only" or not isinstance(verdict, dict):
+        return verdict
+    if verdict.get("judgement") != "Does not support":
+        return verdict
+    updated = dict(verdict)
+    updated["model_judgement"] = updated.get("model_judgement") or "Does not support"
+    updated["rubric_mismatch"] = True
+    violations = list(updated.get("rubric_violations") or [])
+    violations.append(
+        "absence asserted from abstract-only evidence: only the abstract was available, "
+        "which cannot establish that the full paper omits this"
+    )
+    updated["rubric_violations"] = violations
+    updated["judgement"] = "Unclear / insufficient evidence"
+    base_reason = str(updated.get("reason") or "").rstrip()
+    note = "[Only the cited paper's abstract was available; full text is required to verify absence.]"
+    updated["reason"] = f"{base_reason} {note}".strip()
+    return updated
+
 _FENCE_RE = re.compile(r"\A```(?:json)?\s*\n(.*?)\n?```\Z", re.DOTALL)
 
 
@@ -342,18 +399,52 @@ def filter_relevant_artifacts(claim_text: str | None, artifacts: list | None) ->
     return selected
 
 
-def compose_context(window: str | None, section: str | None = None, artifacts: list | None = None) -> str | None:
-    """The judge's context block from its parts: a [Section: …] header, one
-    line per figure or table the paragraph points at, then the sentence
-    window with the claim marked. None without a window — a header alone
-    tells the judge nothing about the claim. The cited paper's summary is
-    deliberately not a part: it is model prose about the paper the
-    evidence comes from, and the grounding rule forbids using it as such."""
+def build_citing_paper_note(
+    claim_text: str | None,
+    seed_title: str | None = None,
+    seed_self_names: list[str] | None = None,
+) -> str | None:
+    """Build a scoping header when *claim_text* names the citing manuscript's own system/framework.
+
+    Prevents the judge from demanding that a cited reference (e.g. a protocol or
+    dataset paper) mention the citing manuscript's newly coined framework name
+    (e.g. 'Paper2Agent represents a paper as an MCP server [17]').
+    """
+    if not claim_text:
+        return None
+    matched_names = [
+        nm for nm in (seed_self_names or [])
+        if nm and re.search(rf"\b{re.escape(nm)}\b", claim_text)
+    ]
+    if not matched_names:
+        return None
+    names_str = ", ".join(f"'{n}'" for n in matched_names)
+    title_part = f" (\"{seed_title}\")" if seed_title else ""
+    return (
+        f"[Citing Paper Self-Identity: The citing manuscript{title_part} introduces {names_str} "
+        f"as its own work. Do NOT require the cited reference to mention {names_str}; evaluate "
+        "the cited reference only on the underlying concept, protocol, method, or prior finding "
+        "that the sentence attributes to it.]"
+    )
+
+
+def compose_context(
+    window: str | None,
+    section: str | None = None,
+    artifacts: list | None = None,
+    citing_paper_note: str | None = None,
+) -> str | None:
+    """The judge's context block from its parts: a [Section: …] header,
+    optional citing-paper self-identity note, one line per figure or table
+    referenced, then the sentence window with the claim marked. None without
+    a window — a header alone tells the judge nothing about the claim."""
     if not window or not str(window).strip():
         return None
     lines = []
     if section and str(section).strip():
         lines.append(f"[Section: {str(section).strip()}]")
+    if citing_paper_note and str(citing_paper_note).strip():
+        lines.append(str(citing_paper_note).strip())
     for a in artifacts or []:
         caption = " ".join(str(a.get("caption") or "").split())[:ARTIFACT_CAPTION_CHARS]
         if a.get("label") and caption:
@@ -434,6 +525,9 @@ def parse_judgement(raw: str) -> dict:
     return _validate(result, raw)
 
 
+_SELECTIVE_VOTE_TRIGGERS = frozenset({"Contradicts", "Does not support", "Partially supports"})
+
+
 def judge(
     claim: str,
     citation_evidence: str,
@@ -458,6 +552,14 @@ def judge(
         for _ in range(JUDGEMENT_VOTES)
     ]
     if len(votes) == 1:
+        if JUDGEMENT_SELECTIVE_VOTES and votes[0]["judgement"] in _SELECTIVE_VOTE_TRIGGERS:
+            try:
+                v1 = _judge_vote(messages, effective_model, effective_backend, citation_evidence, claim)
+                v2 = _judge_vote(messages, effective_model, effective_backend, citation_evidence, claim)
+                return _tally([votes[0], v1, v2])
+            except StopIteration:
+                # Single-reply test mocks keep their single vote
+                return votes[0]
         return votes[0]
     return _tally(votes)
 

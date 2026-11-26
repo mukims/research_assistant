@@ -229,11 +229,15 @@ LANCE_SUMMARY_TABLE_NAME = SUMMARY_COLLECTION_NAME
 QUARANTINE_TABLE_NAME    = f"quarantine_chunks{_INDEX_SUFFIX}"
 
 # ─── Docling Document Conversion Settings ────────────────────────────────────
+DOCLING_PDF_BACKEND         = os.environ.get("CITATION_DOCLING_PDF_BACKEND", "pypdfium2")
 DOCLING_IMAGE_SCALE         = float(os.environ.get("CITATION_DOCLING_IMAGE_SCALE", "2.0"))
 DOCLING_MIN_FIG_PX          = _env_int("CITATION_DOCLING_MIN_FIG_PX", 60)
 DOCLING_FIGURE_PADDING      = float(os.environ.get("CITATION_DOCLING_FIGURE_PADDING", "14.0"))
 DOCLING_CACHE_DIR           = os.path.join(DATA_DIR, "docling_cache")
 DOCLING_DO_TABLE_STRUCTURE  = _env_bool("CITATION_DOCLING_TABLE_STRUCTURE", True)
+DOCLING_BATCH_SIZE          = max(1, _env_int("CITATION_DOCLING_BATCH_SIZE", 1))
+DOCLING_QUEUE_MAX_SIZE      = max(2, _env_int("CITATION_DOCLING_QUEUE_MAX_SIZE", 4))
+DOCLING_NUM_THREADS         = max(1, _env_int("CITATION_DOCLING_NUM_THREADS", 2))
 
 # ─── Directories ──────────────────────────────────────────────────────────────
 RAW_DIR          = os.path.join(DATA_DIR, "raw")
@@ -315,6 +319,9 @@ JUDGEMENT_TEMPERATURE = 0.0
 JUDGEMENT_VOTES       = max(1, _env_int("CITATION_JUDGEMENT_VOTES", 1))
 if JUDGEMENT_VOTES % 2 == 0:
     JUDGEMENT_VOTES += 1
+# When JUDGEMENT_VOTES == 1, cast two tie-breaking votes selectively only when pass 1
+# returns a disputed/hedged verdict (Contradicts, Does not support, Partially supports).
+JUDGEMENT_SELECTIVE_VOTES = _env_bool("CITATION_JUDGEMENT_SELECTIVE_VOTES", True)
 # Chunks judged per cited source. 3 = judge top 3 matching chunks.
 JUDGEMENT_TOP_K       = _env_int("CITATION_JUDGEMENT_TOP_K", 3)
 # Evidence escalation. The top JUDGEMENT_TOP_K hit(s), each with
@@ -477,12 +484,19 @@ SEARCH_PROVIDERS  = os.environ.get(
     "CITATION_SEARCH_PROVIDERS", "arxiv,openalex,semanticscholar"
 ).split(",")
 SEARCH_LIMIT      = 15    # Candidates to rank through looking for an OA PDF
-USE_CROSS_ENCODER = os.environ.get("CITATION_USE_CROSS_ENCODER", "0") == "1"
+USE_CROSS_ENCODER = _env_bool("CITATION_USE_CROSS_ENCODER", False)
+CROSS_ENCODER_MODEL = os.environ.get(
+    "CITATION_CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+)
+CROSS_ENCODER_LOCAL_DIR = os.environ.get(
+    "CITATION_CROSS_ENCODER_LOCAL_DIR", os.path.join(DATA_DIR, "models", "cross-encoder")
+)
 
 OPENALEX_URL      = "https://api.openalex.org/works"
 # OpenAlex gives requests that supply a contact address the faster "polite"
 # pool. Reuses the same address Unpaywall needs; None means send no mailto.
 OPENALEX_MAILTO   = os.environ.get("OPENALEX_MAILTO") or UNPAYWALL_EMAIL
+OPENALEX_API_KEY  = os.environ.get("OPENALEX_API_KEY") or None
 
 S2_API_KEY        = os.environ.get("S2_API_KEY")
 S2_SEARCH_URL     = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -535,6 +549,7 @@ _REFRESHABLE_ATTRS = (
     "UNPAYWALL_EMAIL",
     "USER_AGENT",
     "OPENALEX_MAILTO",
+    "OPENALEX_API_KEY",
     "S2_API_KEY",
 )
 
@@ -543,7 +558,7 @@ def _apply_env_settings() -> None:
     """Recompute credential, backend and contact settings from os.environ."""
     global GEMINI_API_KEY, LLM_BACKEND, EMBED_BACKEND, OPENAI_BASE_URL, OPENAI_API_KEY
     global HF_TOKEN, LLM_MODEL, CHAT_MODEL, EMBED_MODEL, EMBED_IMAGES, CHAT_WINDOW_TOKENS
-    global JUDGEMENT_MODEL, UNPAYWALL_EMAIL, USER_AGENT, OPENALEX_MAILTO, S2_API_KEY
+    global JUDGEMENT_MODEL, UNPAYWALL_EMAIL, USER_AGENT, OPENALEX_MAILTO, OPENALEX_API_KEY, S2_API_KEY
 
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     llm_backend = os.environ.get("LLM_BACKEND")
@@ -590,6 +605,7 @@ def _apply_env_settings() -> None:
         f"; mailto:{UNPAYWALL_EMAIL}" if UNPAYWALL_EMAIL else ""
     ) + ")"
     OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO") or UNPAYWALL_EMAIL
+    OPENALEX_API_KEY = os.environ.get("OPENALEX_API_KEY") or None
     S2_API_KEY = os.environ.get("S2_API_KEY")
 
 

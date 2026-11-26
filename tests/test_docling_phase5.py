@@ -274,5 +274,82 @@ class TestDoclingCropPaddedAndMerge(unittest.TestCase):
         self.assertEqual(doc.figures[0].caption, "Figure 1: Two-panel plot")
 
 
+class TestDoclingMemoryGuardrails(unittest.TestCase):
+    def tearDown(self):
+        from research_assistant.shared import docling_extract
+
+        docling_extract.release_converters()
+
+    def test_release_converters_clears_cached_instances(self):
+        from research_assistant.shared import docling_extract
+
+        docling_extract._DIGITAL_CONVERTER = object()
+        docling_extract._OCR_CONVERTER = object()
+        with patch.object(docling_extract, "_trim_native_memory") as mock_trim:
+            docling_extract.release_converters()
+        self.assertIsNone(docling_extract._DIGITAL_CONVERTER)
+        self.assertIsNone(docling_extract._OCR_CONVERTER)
+        mock_trim.assert_called_once()
+
+    def test_digital_converter_uses_pypdfium2_and_bounded_pipeline_options(self):
+        from tests.optional_deps import available
+
+        if not available("docling"):
+            self.skipTest("docling is not installed")
+
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+        from docling.datamodel.base_models import InputFormat
+        from research_assistant.shared import docling_extract
+
+        docling_extract.release_converters()
+        conv = docling_extract.get_digital_converter()
+        pdf_opt = conv.format_to_options[InputFormat.PDF]
+        self.assertIs(pdf_opt.backend, PyPdfiumDocumentBackend)
+        pipe_opts = pdf_opt.pipeline_options
+        self.assertFalse(pipe_opts.generate_picture_images)
+        self.assertFalse(pipe_opts.generate_page_images)
+        self.assertEqual(pipe_opts.images_scale, 1.0)
+        self.assertEqual(pipe_opts.layout_batch_size, 1)
+        self.assertEqual(pipe_opts.table_batch_size, 1)
+        self.assertEqual(pipe_opts.ocr_batch_size, 1)
+        self.assertEqual(pipe_opts.queue_max_size, 4)
+
+
+class TestSequentialIngestIsolation(unittest.TestCase):
+    def test_sequential_ingest_isolates_failed_pdf_and_releases_converters(self):
+        import research_assistant.shared.ingestion as ing
+        import research_assistant.shared.manifest as manifest_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            good = os.path.join(tmpdir, "good.pdf")
+            bad = os.path.join(tmpdir, "bad.pdf")
+            for p in (good, bad):
+                with open(p, "wb") as fh:
+                    fh.write(b"%PDF-1.4 fake")
+
+            def fake_process(path, label, *a, **k):
+                if path == bad:
+                    raise RuntimeError("corrupt pdf")
+                return [{"content": "ok", "document": ing.pdf_key(path), "extraction": "docling"}]
+
+            with patch.object(manifest_mod, "MANIFEST_PATH", os.path.join(tmpdir, "ingested.json")), \
+                 patch.object(ing, "INGEST_LOCK_PATH", os.path.join(tmpdir, "ingest.lock")), \
+                 patch.object(ing, "is_grobid_alive", return_value=False), \
+                 patch.object(ing, "_drop_title_duplicates", side_effect=lambda cands, corp, **kw: (cands, corp, [], {})), \
+                 patch.object(ing, "_add_ingested_to_paper_index"), \
+                 patch.object(ing, "run_sweep"), \
+                 patch.object(ing, "process_pdf", fake_process), \
+                 patch.object(ing, "upsert_corpus", return_value=1), \
+                 patch.object(ing, "rebuild_bm25"), \
+                 patch("research_assistant.shared.docling_extract.release_converters") as mock_release:
+                res = ing.ingest_pdfs([bad, good], workers=1, rebuild_index=False)
+                loaded = manifest_mod.load()
+
+            self.assertEqual(res["failed"], [bad])
+            self.assertIn(ing.pdf_key(good), loaded)
+            self.assertNotIn(ing.pdf_key(bad), loaded)
+            mock_release.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

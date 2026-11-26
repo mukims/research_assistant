@@ -1015,71 +1015,80 @@ def _ingest_pdfs_locked(
 
         corpus = []
         scanned_or_empty = []
-        if workers <= 1:
-            logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
-            for i, (path, label) in enumerate(candidates.items(), 1):
-                if pipeline_status.is_cancel_requested():
-                    logger.info("%sIngestion stopped early by user request at PDF %d/%d", log_prefix, i, len(candidates))
-                    pipeline_status.add_event(f"⏹️ Ingestion stopped by user ({i-1}/{len(candidates)} processed)")
-                    break
-                name = os.path.basename(path)
-                pipeline_status.update_progress(
-                    item_current=i,
-                    item_total=len(candidates),
-                    current_item_name=label or name,
-                    detail=f"Parsing PDF [{i}/{len(candidates)}]: {name}",
-                )
-                logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), name)
-                entries = process_pdf(
-                    path,
-                    label,
-                    enable_ocr=enable_ocr,
-                    ocr_engine=ocr_engine,
-                )
-                if not entries:
-                    scanned_or_empty.append(name)
-                corpus.extend(entries)
-        else:
-            logger.info(
-                "%sProcessing %d PDF(s) with %d workers…", log_prefix, len(candidates), workers
-            )
-            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(
-                        process_pdf,
-                        path,
-                        label,
-                        None,
-                        enable_ocr,
-                        ocr_engine,
-                    ): (path, label)
-                    for path, label in candidates.items()
-                }
-                completed_count = 0
-                for future in concurrent.futures.as_completed(futures):
+        try:
+            if workers <= 1:
+                logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
+                for i, (path, label) in enumerate(candidates.items(), 1):
                     if pipeline_status.is_cancel_requested():
-                        logger.info("%sIngestion stopped early by user request (cancelling pending jobs)", log_prefix)
-                        for f in futures:
-                            f.cancel()
-                        pipeline_status.add_event(f"⏹️ Ingestion stopped by user ({completed_count}/{len(candidates)} processed)")
+                        logger.info("%sIngestion stopped early by user request at PDF %d/%d", log_prefix, i, len(candidates))
+                        pipeline_status.add_event(f"⏹️ Ingestion stopped by user ({i-1}/{len(candidates)} processed)")
                         break
-                    path, label = futures[future]
                     name = os.path.basename(path)
-                    completed_count += 1
                     pipeline_status.update_progress(
-                        item_current=completed_count,
+                        item_current=i,
                         item_total=len(candidates),
                         current_item_name=label or name,
-                        detail=f"Parsed [{completed_count}/{len(candidates)}]: {name}",
+                        detail=f"Parsing PDF [{i}/{len(candidates)}]: {name}",
                     )
+                    logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), name)
                     try:
-                        entries = future.result()
+                        entries = process_pdf(
+                            path,
+                            label,
+                            enable_ocr=enable_ocr,
+                            ocr_engine=ocr_engine,
+                        )
                         if not entries:
                             scanned_or_empty.append(name)
                         corpus.extend(entries)
                     except Exception as e:
-                        logger.error("%sWorker failed on %s: %s", log_prefix, path, e)
+                        if pipeline_status.is_cancellation(e):
+                            raise
+                        logger.error("%sFailed to parse %s: %s", log_prefix, path, e)
                         result["failed"].append(path)
+            else:
+                logger.info(
+                    "%sProcessing %d PDF(s) with %d workers…", log_prefix, len(candidates), workers
+                )
+                with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(
+                            process_pdf,
+                            path,
+                            label,
+                            None,
+                            enable_ocr,
+                            ocr_engine,
+                        ): (path, label)
+                        for path, label in candidates.items()
+                    }
+                    completed_count = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        if pipeline_status.is_cancel_requested():
+                            logger.info("%sIngestion stopped early by user request (cancelling pending jobs)", log_prefix)
+                            for f in futures:
+                                f.cancel()
+                            pipeline_status.add_event(f"⏹️ Ingestion stopped by user ({completed_count}/{len(candidates)} processed)")
+                            break
+                        path, label = futures[future]
+                        name = os.path.basename(path)
+                        completed_count += 1
+                        pipeline_status.update_progress(
+                            item_current=completed_count,
+                            item_total=len(candidates),
+                            current_item_name=label or name,
+                            detail=f"Parsed [{completed_count}/{len(candidates)}]: {name}",
+                        )
+                        try:
+                            entries = future.result()
+                            if not entries:
+                                scanned_or_empty.append(name)
+                            corpus.extend(entries)
+                        except Exception as e:
+                            logger.error("%sWorker failed on %s: %s", log_prefix, path, e)
+                            result["failed"].append(path)
+        finally:
+            docling_extract.release_converters()
 
         result["processed"] = len(candidates)
         result["scanned_or_empty"] = scanned_or_empty
@@ -1103,9 +1112,11 @@ def _ingest_pdfs_locked(
         # not only in a warning somewhere up the log.
         from research_assistant.shared.ingest_v2 import EXTRACTION_MODES_V2 as modes
 
+        mode_aliases = {"docling_cached": "docling", "docling_ocr": "ocr"}
         by_mode = {mode: set() for mode in modes}
         for entry in corpus:
-            docs = by_mode.get(entry.get("extraction"))
+            raw_mode = entry.get("extraction")
+            docs = by_mode.get(mode_aliases.get(raw_mode, raw_mode))
             if docs is not None and entry.get("document"):
                 docs.add(entry["document"])
         result["extraction"] = {mode: len(docs) for mode, docs in by_mode.items()}

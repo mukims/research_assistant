@@ -12,6 +12,7 @@ Converts full-text PDFs into canonical Document representations:
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
@@ -101,6 +102,67 @@ def needs_ocr(pdf_path: str, min_chars_per_page: Optional[int] = None) -> bool:
         return False
 
 
+def _trim_native_memory() -> None:
+    """Run Python GC and return unused glibc heap pages to the OS on Linux."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+
+def release_converters() -> None:
+    """Release cached Docling converters and reclaim native/PyTorch memory."""
+    global _DIGITAL_CONVERTER, _OCR_CONVERTER
+    had_converter = (_DIGITAL_CONVERTER is not None) or (_OCR_CONVERTER is not None)
+    _DIGITAL_CONVERTER = None
+    _OCR_CONVERTER = None
+    if had_converter:
+        _trim_native_memory()
+
+
+def _pdf_backend_class():
+    """Return the PDF backend class configured for Docling conversion.
+
+    Defaults to PyPdfiumDocumentBackend: docling-parse's C++ shape decoder can
+    allocate >6 GB on a single vector-heavy figure page (e.g. 10k+ matplotlib
+    drawing paths), OOM-killing long-lived server processes like Streamlit.
+    """
+    backend_name = getattr(config, "DOCLING_PDF_BACKEND", "pypdfium2").strip().lower()
+    if backend_name in ("docling_parse", "docling-parse", "threaded_docling_parse"):
+        from docling.backend.docling_parse_backend import ThreadedDoclingParseDocumentBackend
+
+        return ThreadedDoclingParseDocumentBackend
+    from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+
+    return PyPdfiumDocumentBackend
+
+
+def _pipeline_memory_kwargs() -> dict:
+    """Common memory-bounding options for StandardPdfPipeline."""
+    from docling.datamodel.accelerator_options import AcceleratorOptions
+
+    batch_size = max(1, int(getattr(config, "DOCLING_BATCH_SIZE", 1)))
+    queue_max_size = max(2, int(getattr(config, "DOCLING_QUEUE_MAX_SIZE", 4)))
+    num_threads = max(1, int(getattr(config, "DOCLING_NUM_THREADS", 2)))
+    return {
+        # extract_docling() renders clean padded figure crops on demand via PyMuPDF
+        # at config.DOCLING_IMAGE_SCALE, so Docling does not need 2x full-page bitmaps
+        # or base64 picture blobs in memory / cache JSON.
+        "generate_picture_images": False,
+        "generate_page_images": False,
+        "images_scale": 1.0,
+        "layout_batch_size": batch_size,
+        "table_batch_size": batch_size,
+        "ocr_batch_size": batch_size,
+        "queue_max_size": queue_max_size,
+        "accelerator_options": AcceleratorOptions(num_threads=num_threads),
+    }
+
+
 def get_digital_converter():
     """Lazily instantiate the high-performance digital converter (no OCR)."""
     global _DIGITAL_CONVERTER
@@ -114,11 +176,15 @@ def get_digital_converter():
     opts = PdfPipelineOptions(
         do_ocr=False,
         do_table_structure=config.DOCLING_DO_TABLE_STRUCTURE,
-        generate_picture_images=True,
-        images_scale=config.DOCLING_IMAGE_SCALE,
+        **_pipeline_memory_kwargs(),
     )
     _DIGITAL_CONVERTER = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=opts,
+                backend=_pdf_backend_class(),
+            )
+        }
     )
     return _DIGITAL_CONVERTER
 
@@ -148,11 +214,15 @@ def get_ocr_converter():
         do_ocr=True,
         ocr_options=ocr_opts,
         do_table_structure=config.DOCLING_DO_TABLE_STRUCTURE,
-        generate_picture_images=True,
-        images_scale=config.DOCLING_IMAGE_SCALE,
+        **_pipeline_memory_kwargs(),
     )
     _OCR_CONVERTER = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=opts,
+                backend=_pdf_backend_class(),
+            )
+        }
     )
     return _OCR_CONVERTER
 
@@ -181,23 +251,41 @@ def extract_docling(
     images_dir: Optional[str] = None,
     force_ocr: Optional[bool] = None,
     enable_ocr: Optional[bool] = None,
+    ocr_engine: Optional[str] = None,
     use_cache: bool = True,
 ) -> Document:
     """Extract full-text, structured tables, and clean figure crops using Docling.
 
     Returns a canonical research_assistant Document instance.
     """
-    disable_ocr = os.environ.get("DOCLING_DISABLE_OCR", "0").lower() in ("1", "true", "yes")
-    if disable_ocr:
-        force_ocr = False
-    elif enable_ocr is not None:
-        force_ocr = bool(enable_ocr)
+    env_disable_ocr = os.environ.get("DOCLING_DISABLE_OCR", "0").lower() in ("1", "true", "yes")
+    if env_disable_ocr or enable_ocr is False:
+        ocr_allowed = False
+    elif enable_ocr is True or force_ocr is True:
+        ocr_allowed = True
+    else:
+        ocr_allowed = bool(getattr(config, "OCR_ENABLED", True))
+
+    effective_ocr_engine = (
+        ocr_engine or getattr(config, "OCR_ENGINE", "easyocr") or "easyocr"
+    ).strip().lower()
+
     key = key or os.path.basename(pdf_path).strip().replace(" ", "_").lower()
     images_dir = images_dir or config.IMAGES_DIR
     os.makedirs(images_dir, exist_ok=True)
     os.makedirs(config.DOCLING_CACHE_DIR, exist_ok=True)
 
-    from docling_core.types.doc.document import DoclingDocument
+    do_ocr = (
+        False
+        if not ocr_allowed
+        else (bool(force_ocr) if force_ocr is not None else needs_ocr(pdf_path))
+    )
+
+    if do_ocr and effective_ocr_engine == "vlm":
+        from research_assistant.shared.ocr import extract_ocr
+
+        logger.info("Routing %s to Vision LLM OCR…", os.path.basename(pdf_path))
+        return extract_ocr(pdf_path, key=key, engine="vlm")
 
     cache_file = _docling_cache_path(pdf_path)
     doc = None
@@ -205,6 +293,8 @@ def extract_docling(
 
     if use_cache and os.path.isfile(cache_file):
         try:
+            from docling_core.types.doc.document import DoclingDocument
+
             with open(cache_file, "r", encoding="utf-8") as fh:
                 doc_data = json.load(fh)
                 doc = DoclingDocument.model_validate(doc_data)
@@ -215,7 +305,6 @@ def extract_docling(
             doc = None
 
     if doc is None:
-        do_ocr = False if disable_ocr else (force_ocr if force_ocr is not None else needs_ocr(pdf_path))
         converter = get_ocr_converter() if do_ocr else get_digital_converter()
         extraction_mode = "docling_ocr" if do_ocr else "docling"
 
@@ -224,7 +313,16 @@ def extract_docling(
             conv_res = converter.convert(pdf_path)
             doc = conv_res.document
         except Exception as exc:
-            if not do_ocr and not disable_ocr:
+            if not do_ocr and ocr_allowed:
+                if effective_ocr_engine == "vlm":
+                    from research_assistant.shared.ocr import extract_ocr
+
+                    logger.warning(
+                        "Digital Docling conversion failed for %s (%s) — retrying with Vision LLM OCR.",
+                        key,
+                        exc,
+                    )
+                    return extract_ocr(pdf_path, key=key, engine="vlm")
                 logger.warning("Digital Docling conversion failed for %s (%s) — retrying with OCR.", key, exc)
                 conv_res = get_ocr_converter().convert(pdf_path)
                 doc = conv_res.document
@@ -237,15 +335,26 @@ def extract_docling(
             else:
                 raise
 
-        # Fallback check: if digital conversion returned zero texts, retry with OCR if not disabled
-        if not do_ocr and not disable_ocr and len(doc.texts) == 0:
-            logger.info("Digital Docling produced 0 texts for %s — retrying with OCR…", key)
-            try:
-                conv_res = get_ocr_converter().convert(pdf_path)
-                doc = conv_res.document
-                extraction_mode = "docling_ocr"
-            except Exception as exc:
-                logger.warning("OCR fallback conversion failed for %s: %s", key, exc)
+        # Fallback check: if digital conversion returned zero texts, retry with OCR if permitted
+        if not do_ocr and ocr_allowed and len(doc.texts) == 0:
+            if effective_ocr_engine == "vlm":
+                from research_assistant.shared.ocr import extract_ocr
+
+                logger.info("Digital Docling produced 0 texts for %s — retrying with Vision LLM OCR…", key)
+                try:
+                    vlm_doc = extract_ocr(pdf_path, key=key, engine="vlm")
+                    if vlm_doc.abstract or any(s.paragraphs for s in vlm_doc.sections):
+                        return vlm_doc
+                except Exception as exc:
+                    logger.warning("Vision LLM OCR fallback conversion failed for %s: %s", key, exc)
+            else:
+                logger.info("Digital Docling produced 0 texts for %s — retrying with OCR…", key)
+                try:
+                    conv_res = get_ocr_converter().convert(pdf_path)
+                    doc = conv_res.document
+                    extraction_mode = "docling_ocr"
+                except Exception as exc:
+                    logger.warning("OCR fallback conversion failed for %s: %s", key, exc)
 
         # Cache converted Docling document JSON for fast subsequent runs
         try:
@@ -253,6 +362,9 @@ def extract_docling(
                 json.dump(doc.model_dump(mode="json"), fh)
         except Exception as exc:
             logger.warning("Failed to write Docling cache for %s: %s", key, exc)
+
+        conv_res = None
+        _trim_native_memory()
 
     # ─── 1. Map Body Sections & Paragraphs ────────────────────────────────────
     sections: list[Section] = []

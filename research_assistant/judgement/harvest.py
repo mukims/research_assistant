@@ -64,7 +64,7 @@ def candidates_from_verification(report: dict, prefix: str) -> list[dict]:
             "source": "verification",
             "claim": entry["claim"],
             "citation_evidence": entry["evidence"],
-            "document": None,
+            "document": entry.get("document"),
             "citation_source": entry.get("citation_source"),
             "section": None,
             "context": entry.get("context"),

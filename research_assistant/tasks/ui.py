@@ -533,9 +533,28 @@ def render_planner_tab():
             rating = sc.get("rating", "UNKNOWN")
             rate = sc.get("replication_rate", 0.0)
 
+            is_sim_report = (
+                getattr(report, "mode", None) == ExecutionMode.SIMULATION
+                or str(rating).startswith("DRY_RUN")
+            )
             col_grade, col_stats = st.columns([1, 2])
             with col_grade:
-                if rating == "CERTIFIED_REPLICABLE":
+                if is_sim_report:
+                    if rating == "DRY_RUN_VALIDATED":
+                        st.info(
+                            f"### Grade: {rating}\n"
+                            f"**Dry-Run Contract Pass Rate: {rate:.1%}**\n\n"
+                            "Simulation stub run only — scientific claims were not executed or replicated."
+                        )
+                    elif rating == "DRY_RUN_PARTIAL":
+                        st.warning(
+                            f"### Grade: {rating}\n"
+                            f"**Dry-Run Contract Pass Rate: {rate:.1%}**\n\n"
+                            "Simulation stub run only — some contract checks failed."
+                        )
+                    else:
+                        st.error(f"### Grade: {rating}\n**Dry-Run Contract Pass Rate: {rate:.1%}**")
+                elif rating == "CERTIFIED_REPLICABLE":
                     st.success(f"### Grade: {rating}\n**Replication Success: {rate:.1%}**")
                 elif rating == "PARTIALLY_REPLICATED":
                     st.warning(f"### Grade: {rating}\n**Replication Success: {rate:.1%}**")

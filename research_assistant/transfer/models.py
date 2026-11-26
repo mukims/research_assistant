@@ -132,6 +132,7 @@ class Critique:
 class PriorArt:
     status: str = "unchecked"
     hits: list[dict] = field(default_factory=list)
+    error: str | None = None
 
 
 @dataclass

@@ -67,7 +67,13 @@ def process_pdf_v2(
     if extractor in ("docling", None) and os.path.isfile(pdf_path):
         try:
             from research_assistant.shared.docling_extract import extract_docling
-            doc = extract_docling(pdf_path, key=key, images_dir=images_dir, enable_ocr=enable_ocr)
+            doc = extract_docling(
+                pdf_path,
+                key=key,
+                images_dir=images_dir,
+                enable_ocr=enable_ocr,
+                ocr_engine=ocr_engine,
+            )
             if not doc.sections and not doc.figures and not doc.abstract:
                 logger.warning("Docling yielded empty document for %s — falling back to legacy extract", os.path.basename(pdf_path))
                 doc = None

@@ -41,7 +41,7 @@ os.environ["CITATION_WORKSPACE_DIR"] = _WORKSPACE_DIR
 
 # Keys and .env files never reach the test process (see config.load_env_files).
 os.environ["CITATION_DISABLE_DOTENV"] = "1"
-for _key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "HF_TOKEN", "S2_API_KEY"):
+for _key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "HF_TOKEN", "S2_API_KEY", "OPENALEX_API_KEY"):
     os.environ.pop(_key, None)
 # A subprocess does not inherit the socket patch below, so point every provider at a closed
 # port (discard, 9) and let it fail fast.

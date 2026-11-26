@@ -1044,7 +1044,8 @@ class TestTier5TwoCycleReflexionRunner(unittest.TestCase):
         self.assertEqual(report.completed_count, 2)
         self.assertEqual(report.failed_count, 0)
         self.assertEqual(report.blocked_count, 0)
-        self.assertEqual(report.scorecard["rating"], "CERTIFIED_REPLICABLE")
+        self.assertEqual(report.scorecard["rating"], "DRY_RUN_VALIDATED")
+        self.assertNotEqual(report.scorecard["rating"], "CERTIFIED_REPLICABLE")
         self.assertIn("Replication Scorecard", report.render_markdown())
 
     def test_upstream_dependency_failure_cascades_blocked_status(self):

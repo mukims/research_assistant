@@ -8,7 +8,24 @@ here, with a message the reader can act on.
 Streamlit-free: the tab shows the message, this module only decides it.
 """
 
+import os
+from pathlib import Path
 import re
+
+
+def sidecar_path(path: str | os.PathLike[str], suffix: str) -> str:
+    """Build a sidecar file path alongside *path* without clobbering non-.txt extensions.
+
+    Replaces the stem's extension cleanly regardless of whether *path* ends in
+    ``.txt``, ``.md``, ``.tex``, another extension, or no extension at all, and
+    never mutates ``.txt`` substrings in parent directory names.
+    """
+    p = Path(path)
+    stem = p.stem if p.suffix else p.name
+    candidate = p.with_name(f"{stem}{suffix}")
+    if candidate == p:
+        candidate = p.with_name(f"{p.name}{suffix}")
+    return str(candidate)
 
 NOT_UTF8 = (
     "This file isn't UTF-8 text. Save it as UTF-8 (in Word: Save As → Plain Text → UTF-8) "

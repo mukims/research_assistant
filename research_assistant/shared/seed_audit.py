@@ -22,6 +22,7 @@ from research_assistant.shared.claim_text import (
     classify_citation_role,
     clean_text,
     describe_citation_locus,
+    expand_numeric_cite_markers,
     is_non_citation_ref,
     is_numeric_cite,
     paragraph_sentences,
@@ -40,8 +41,11 @@ from research_assistant.judgement.evidence import (
 from research_assistant.judgement.judge import (
     _judge_once,
     _judgement_model,
+    build_citing_paper_note,
     compose_context,
     filter_relevant_artifacts,
+    guard_abstract_only_verdict,
+    infer_evidence_tier,
 )
 from research_assistant.judgement.policy import evaluate_reliability
 from research_assistant.judgement.source_assessor import assess_source
@@ -163,6 +167,60 @@ def _build_number_map(body, bib_by_id: dict) -> dict[int, dict]:
 
 AUDIT_SCHEMA_VERSION = 2
 
+_GENERIC_TITLE_LEAD_WORDS = frozenset({
+    "a", "an", "the", "on", "in", "of", "to", "for", "towards", "toward", "beyond", "rethinking",
+    "reimagining", "understanding", "learning", "deep", "quantum", "experimental", "theoretical",
+    "direct", "high", "low", "new", "novel", "scalable", "efficient", "automated", "general",
+    "introduction", "methods", "results", "discussion", "review", "survey", "overview",
+})
+_ABSTRACT_SELF_INTRO_RE = re.compile(
+    r"\b(?:we\s+(?:introduce|present|propose|develop|design|build|report)|"
+    r"(?:called|named|termed|dubbed))\s+([A-Z][A-Za-z0-9_\-]{2,24})\b"
+)
+
+
+def extract_seed_self_identity(soup: BeautifulSoup) -> tuple[str | None, list[str]]:
+    """Extract the citing seed manuscript's own title and self-coined framework/system names."""
+    seed_title = None
+    ts = soup.find("titleStmt")
+    if ts:
+        t_node = ts.find("title", attrs={"type": "main"}) or ts.find("title")
+        if t_node:
+            t_clean = _clean(t_node)
+            if t_clean:
+                seed_title = t_clean
+
+    self_names: list[str] = []
+    seen_low: set[str] = set()
+
+    def _add_name(cand: str) -> None:
+        cl = cand.strip(".,;:()[]\"'")
+        low = cl.lower()
+        if len(cl) < 3 or low in _GENERIC_TITLE_LEAD_WORDS or low in seen_low:
+            return
+        has_special_shape = (
+            any(c.isdigit() for c in cl)
+            or any(c.isupper() for c in cl[1:])
+            or "-" in cl
+        )
+        if not has_special_shape and not cl[0].isupper():
+            return
+        seen_low.add(low)
+        self_names.append(cl)
+
+    if seed_title and ":" in seed_title:
+        lead = seed_title.split(":", 1)[0].strip()
+        if re.match(r"^[A-Z][A-Za-z0-9_\-]{2,24}$", lead):
+            _add_name(lead)
+
+    ab = soup.find("abstract")
+    if ab:
+        ab_txt = _clean(ab)
+        for m in _ABSTRACT_SELF_INTRO_RE.finditer(ab_txt):
+            _add_name(m.group(1))
+
+    return seed_title, self_names
+
 
 def extract_seed_citation_claims(
     tei_source: str | BeautifulSoup,
@@ -200,6 +258,8 @@ def extract_seed_citation_claims(
             return []
         with open(tei_source, "r", encoding="utf-8") as f:
             soup = BeautifulSoup(f, "xml")
+
+    seed_title, seed_self_names = extract_seed_self_identity(soup)
 
     # 1. Parse bibliography from <listBibl>
     from research_assistant.audit.pdf_refs import (
@@ -474,11 +534,17 @@ def extract_seed_citation_claims(
                 and has_year_b
                 and re.search(r"(?:\band\b|&|,\s*$)", ta, re.IGNORECASE)
             )
-            if is_split_lifespan or is_split_author:
-                merged = " ".join(x for x in (ta, mid, tb) if x)
+            # Case 3: Split numeric range, e.g. '[13–' + '15]' or '41–' + '43'
+            is_split_num_range = bool(
+                not mid
+                and re.search(r"\d+\s*[-–—]\s*$", ta)
+                and re.match(r"^\s*\d+\s*[\]\)]?\s*$", tb)
+            )
+            if is_split_lifespan or is_split_author or is_split_num_range:
+                merged = f"{ta}{tb}" if is_split_num_range else " ".join(x for x in (ta, mid, tb) if x)
                 ra.clear()
                 ra.append(merged)
-                if is_split_lifespan:
+                if is_split_lifespan or is_split_num_range:
                     if "target" in ra.attrs:
                         del ra.attrs["target"]
                 elif rb.get("target") and len(split_author_year_cites(merged)) == 1:
@@ -531,17 +597,42 @@ def extract_seed_citation_claims(
                 ref.replace_with(f" {txt} " if txt else " ")
                 continue
 
-            sub_cites = split_author_year_cites(txt) if not is_numeric_cite(txt) else [txt]
+            if not is_numeric_cite(txt):
+                sub_cites = split_author_year_cites(txt)
+            else:
+                cand_num_cites = expand_numeric_cite_markers(txt)
+                if len(cand_num_cites) > 1:
+                    # Expand only when bibliography holds entries for the expanded indices
+                    known_hits = 0
+                    for nc in cand_num_cites:
+                        ns = _NUM_RE.findall(nc)
+                        if ns:
+                            kv = int(ns[0])
+                            if (
+                                kv in active_bib_by_index
+                                or kv in active_endnotes
+                                or kv in active_number_map
+                            ):
+                                known_hits += 1
+                    sub_cites = cand_num_cites if known_hits >= 2 else [txt]
+                else:
+                    sub_cites = [txt]
+
             replacement_tokens = []
             for sub_txt in sub_cites:
                 n = tok_counter
                 tok_counter += 1
                 sub_target = target if len(sub_cites) == 1 else ""
                 if len(sub_cites) > 1 and target and target in bib_by_id:
-                    # Retain target only for the sub-citation whose author/year matches bib_by_id[target]
-                    cand_match, _, _ = _resolve_ref("", sub_txt, {target: bib_by_id[target]}, {}, {})
-                    if cand_match is not None:
-                        sub_target = target
+                    if is_numeric_cite(sub_txt):
+                        ns = _NUM_RE.findall(sub_txt)
+                        if ns and bib_by_id[target].get("index") == int(ns[0]):
+                            sub_target = target
+                    else:
+                        # Retain target only for the sub-citation whose author/year matches bib_by_id[target]
+                        cand_match, _, _ = _resolve_ref("", sub_txt, {target: bib_by_id[target]}, {}, {})
+                        if cand_match is not None:
+                            sub_target = target
 
                 # Check if numeric marker points to a printed explanatory endnote in this bibliography group
                 endnote_hit = None
@@ -664,6 +755,8 @@ def extract_seed_citation_claims(
                     "paragraph_id": p_id,
                     "paragraph_index": p_idx,
                     "sentence_refs": sent_refs,
+                    **({"seed_title": seed_title} if seed_title else {}),
+                    **({"seed_self_names": seed_self_names} if seed_self_names else {}),
                 })
 
         p_unique_refs = list(p_refs_dict.values())
@@ -932,11 +1025,7 @@ def _judge_claim_entry(
     for h in hits[:top_k]:
         if isinstance(h.get("metadata"), dict):
             enrich_item_bibliometrics(item, hit_meta=h["metadata"])
-    item["evidence_tier"] = (
-        "abstract_only"
-        if all((h.get("metadata") or {}).get("tier") == "abstract_only" for h in hits[:top_k])
-        else "full_text"
-    )
+    item["evidence_tier"] = infer_evidence_tier(hits[:top_k], prior_tier=item.get("evidence_tier"))
     item["evidence"] = assemble_evidence(hits[:top_k], JUDGEMENT_EVIDENCE_MAX_CHARS)
 
     def _provenance(k):
@@ -953,11 +1042,21 @@ def _judge_claim_entry(
         rel_artifacts = filter_relevant_artifacts(
             item.get("sentence") or item.get("claim"), item.get("artifacts")
         )
+        citing_note = build_citing_paper_note(
+            item.get("claim"),
+            seed_title=item.get("seed_title"),
+            seed_self_names=item.get("seed_self_names"),
+        )
         sec_label = item.get("section_heading") or (
             str(item["section"]).replace("_", " ").title() if item.get("section") else None
         )
-        if sec_label or rel_artifacts:
-            claim_context = compose_context(claim_context, section=sec_label, artifacts=rel_artifacts)
+        if sec_label or rel_artifacts or citing_note:
+            claim_context = compose_context(
+                claim_context,
+                section=sec_label,
+                artifacts=rel_artifacts,
+                citing_paper_note=citing_note,
+            )
 
     try:
         verdict = _judge_once(item["claim"], item["evidence"], context=claim_context)
@@ -1044,6 +1143,7 @@ def _judge_claim_entry(
             except Exception as exc:
                 logger.debug("Second judge pass skipped: %s", exc)
 
+        verdict = guard_abstract_only_verdict(verdict, item.get("evidence_tier"))
         item["outcome"] = "judged"
         for k in REQUIRED_FIELDS:
             if k in verdict:

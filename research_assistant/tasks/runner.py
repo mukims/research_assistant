@@ -172,6 +172,8 @@ class ExecutionReport:
 
     def render_markdown(self) -> str:
         """Renders an executive replication scorecard in Markdown."""
+        is_sim = self.mode == ExecutionMode.SIMULATION
+        rate_label = "Dry-Run Contract Pass Rate" if is_sim else "Overall Replication Score"
         lines = [
             f"# Replication Scorecard: {self.paper_title}",
             f"- **Paper ID**: `{self.paper_id}`",
@@ -180,14 +182,21 @@ class ExecutionReport:
             f"- **Status Summary**: {self.completed_count}/{self.total_tasks} Completed, "
             f"{self.failed_count} Failed, {self.blocked_count} Blocked",
             "",
+        ]
+        if is_sim:
+            lines.extend([
+                "> **Simulation Dry Run:** Stub deliverables were generated to validate DAG topology and contract wiring only. No paper code or empirical benchmarks were executed.",
+                "",
+            ])
+        lines.extend([
             "## Replication Grade",
-            f"**Overall Replication Score**: `{self.scorecard.get('replication_rate', 0.0):.1%}`",
+            f"**{rate_label}**: `{self.scorecard.get('replication_rate', 0.0):.1%}`",
             f"**Integrity Rating**: `{self.scorecard.get('rating', 'UNKNOWN')}`",
             "",
             "## Task Execution Details",
             "| Task ID | Status | Duration | Artifacts | Error |",
             "| :--- | :--- | :--- | :--- | :--- |",
-        ]
+        ])
         for tid, res in self.results.items():
             status_icon = "✅" if res.status == TaskStatus.COMPLETED else ("❌" if res.status == TaskStatus.FAILED else "⛔")
             art_count = len(res.output_artifacts)
@@ -347,12 +356,20 @@ class TaskRunner:
         blocked_count = sum(1 for r in results.values() if r.status == TaskStatus.BLOCKED)
 
         rep_rate = completed_count / len(self.graph.tasks) if self.graph.tasks else 0.0
-        if rep_rate >= 0.99:
-            rating = "CERTIFIED_REPLICABLE"
-        elif rep_rate >= 0.7:
-            rating = "PARTIALLY_REPLICATED"
+        if self.mode == ExecutionMode.SIMULATION:
+            if rep_rate >= 0.99:
+                rating = "DRY_RUN_VALIDATED"
+            elif rep_rate >= 0.7:
+                rating = "DRY_RUN_PARTIAL"
+            else:
+                rating = "DRY_RUN_FAILED"
         else:
-            rating = "REPLICATION_FAILED"
+            if rep_rate >= 0.99:
+                rating = "CERTIFIED_REPLICABLE"
+            elif rep_rate >= 0.7:
+                rating = "PARTIALLY_REPLICATED"
+            else:
+                rating = "REPLICATION_FAILED"
 
         scorecard = {
             "replication_rate": rep_rate,
@@ -734,24 +751,30 @@ class TaskRunner:
             hashes[out] = _compute_sha256(out_path)
 
         logs.append(f"[RUNNER] Produced {len(output_files)} deliverables: {', '.join(output_files)}")
-        logs.append(f"[RUNNER] Acceptance criteria verified: {len(task.acceptance_criteria)} checks passed.")
 
         # Test harness check if available
         test_script = getattr(task, "test_harness_script", None) or generate_task_test_script(task, self.workspace_dir)
         harness_ok, h_stdout, h_stderr = run_task_test_script(test_script, self.workspace_dir)
         if harness_ok:
+            logs.append(f"[RUNNER] Acceptance criteria verified: {len(task.acceptance_criteria)} checks passed.")
             logs.append("[RUNNER] Automated test harness: PASSED")
+            status = TaskStatus.COMPLETED
+            error_message = None
         else:
-            logs.append(f"[RUNNER] Automated test harness: WARNING ({h_stderr.strip()[:100]})")
+            detail = (h_stderr or h_stdout).strip()[:200]
+            logs.append(f"[RUNNER] Automated test harness: FAILED ({detail})")
+            status = TaskStatus.FAILED
+            error_message = f"Simulation contract harness failed: {detail}"
 
         duration = max(0.01, time.time() - t_start)
         return TaskExecutionResult(
             task_id=task.task_id,
-            status=TaskStatus.COMPLETED,
+            status=status,
             duration_seconds=duration,
             output_artifacts=output_files,
             artifact_hashes=hashes,
             logs="\n".join(logs),
+            error_message=error_message,
         )
 
     def execute_with_reflection(

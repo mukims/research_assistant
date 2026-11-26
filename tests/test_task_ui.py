@@ -238,7 +238,7 @@ class TestTaskUI(unittest.TestCase):
             mock_runner = MagicMock()
             mock_report = MagicMock()
             mock_report.scorecard = {
-                "rating": "CERTIFIED_REPLICABLE",
+                "rating": "DRY_RUN_VALIDATED",
                 "replication_rate": 1.0,
                 "total_tasks": 1,
                 "completed_tasks": 1,

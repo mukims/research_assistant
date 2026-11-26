@@ -119,6 +119,7 @@ class DownloadedPaper(_Record):
     is_retracted: bool = False
     citation_count: int | None = None
     title: str | None = None
+    venue: str | None = None
     raw_reference: str | None = None
     doi: str | None = None
     arxiv_id: str | None = None

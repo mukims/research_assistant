@@ -8,6 +8,7 @@ singleton instance across many calls (needed for the planned Agent 5's
 per-sentence loop).
 """
 
+import os
 import re
 import numpy as np
 
@@ -262,26 +263,61 @@ _CROSS_ENCODER = None
 _CROSS_ENCODER_TRIED = False
 
 
+def resolve_cross_encoder_target(
+    use_flag: bool | None = None,
+    model_name: str | None = None,
+    local_dir: str | None = None,
+    explicit_env: str | None = None,
+) -> str | None:
+    """Return the local directory or model identifier to load for CrossEncoder, or None if disabled.
+
+    Auto-activates an offline local model under ``data/models/cross-encoder`` when
+    present unless ``CITATION_USE_CROSS_ENCODER=0`` was explicitly set.
+    """
+    from research_assistant import config as _cfg
+
+    if use_flag is None:
+        use_flag = getattr(_cfg, "USE_CROSS_ENCODER", False)
+    if model_name is None:
+        model_name = getattr(_cfg, "CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    if local_dir is None:
+        local_dir = getattr(_cfg, "CROSS_ENCODER_LOCAL_DIR", "")
+    if explicit_env is None:
+        explicit_env = os.environ.get("CITATION_USE_CROSS_ENCODER")
+
+    if explicit_env is not None and explicit_env.strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if local_dir and os.path.isfile(os.path.join(local_dir, "config.json")):
+        return local_dir
+    if model_name and os.path.isdir(model_name) and os.path.isfile(os.path.join(model_name, "config.json")):
+        return model_name
+    if use_flag:
+        return model_name
+    return None
+
+
 def get_cross_encoder():
-    """Lazily load cross-encoder model for candidate re-ranking if enabled."""
+    """Lazily load cross-encoder model for candidate re-ranking if enabled or cached locally."""
     global _CROSS_ENCODER, _CROSS_ENCODER_TRIED
     if _CROSS_ENCODER_TRIED:
         return _CROSS_ENCODER
     _CROSS_ENCODER_TRIED = True
 
-    try:
-        from research_assistant.config import USE_CROSS_ENCODER
-        if not USE_CROSS_ENCODER:
-            _CROSS_ENCODER = None
-            return None
-    except Exception:
-        pass
+    target = resolve_cross_encoder_target()
+    if not target:
+        _CROSS_ENCODER = None
+        return None
 
     try:
         from sentence_transformers import CrossEncoder
-        _CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        try:
+            _CROSS_ENCODER = CrossEncoder(target, local_files_only=True)
+        except Exception:
+            if os.path.isdir(target):
+                raise
+            _CROSS_ENCODER = CrossEncoder(target)
     except Exception as exc:
-        logger.debug("CrossEncoder not available (%s); using original ranking.", exc)
+        logger.debug("CrossEncoder not available (%s); using deterministic lexical reranker.", exc)
         _CROSS_ENCODER = None
     return _CROSS_ENCODER
 
@@ -443,6 +479,9 @@ def rerank_candidates(
             return ranked[:top_k]
         except Exception as exc:
             logger.debug("Cross-encoder re-ranking failed (%s); falling back to lexical reranker.", exc)
+
+    if claim_text is None:
+        return candidates[:top_k]
 
     combined_q = f"{claim_text or ''} {query or ''}".strip()
     salient = [t.lower() for t in extract_salient_claim_terms(combined_q, max_terms=16)]

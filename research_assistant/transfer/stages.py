@@ -948,9 +948,11 @@ def develop_isolated(
             summary,
             settings.prior_art_before_year,
         )
+        if getattr(prior_art, "error", None):
+            transfer_warnings.append(f"prior art warning for {transfer_id}: {prior_art.error}")
     except Exception as err:
         transfer_warnings.append(f"prior art check failed for {transfer_id}: {err}")
-        prior_art = PriorArt(status="unchecked")
+        prior_art = PriorArt(status="unchecked", error=str(err))
 
     mapping_objs = [
         MappingRow(

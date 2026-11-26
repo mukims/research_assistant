@@ -94,6 +94,13 @@ def evaluate_reliability(
 
     # 1b. The paper was read and does not say this.
     if rel == "Does not support":
+        if evidence_tier == "abstract_only":
+            return {
+                "rating": ReliabilityRating.UNRESOLVED.value,
+                "badge": "⚪ Unresolved (Paywalled Full Text)",
+                "rating_label": "Unverifiable from Abstract Alone",
+                "explanation": "Only the cited paper's abstract was available and does not report this detail; full text is required to verify absence.",
+            }
         return {
             "rating": ReliabilityRating.UNSUPPORTED.value,
             "badge": "🟠 Unsupported",

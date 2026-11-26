@@ -8,7 +8,7 @@ import streamlit as st
 
 from research_assistant import config
 from research_assistant.agents.agent8_verifier import verify_draft
-from research_assistant.shared.draft_input import DraftInputError, read_draft
+from research_assistant.shared.draft_input import DraftInputError, read_draft, sidecar_path
 from research_assistant.ui.common import _get_resources_mtime, get_cached_search_resources
 from research_assistant.ui.jobs import _handle_job_state
 
@@ -56,7 +56,7 @@ def _start_draft_job(kind: Literal["cite", "verify"], text_or_path: str) -> str 
         ) as fh:
             fh.write(text_or_path)
             draft_path = fh.name
-        out_path = draft_path.replace(".txt", "_cited.txt")
+        out_path = sidecar_path(draft_path, "_cited.txt")
         job_id = run_jobs.job_id_for(f"draft-cite:{draft_path}")
         label = "Citing the draft"
 
@@ -144,14 +144,14 @@ def render_draft_tab(chunks):
         st.download_button("Download cited draft", cited,
                            file_name=os.path.basename(written))
 
-        mapping_path = written.replace(".txt", "_citations.json")
+        mapping_path = sidecar_path(written, "_citations.json")
         if os.path.exists(mapping_path):
             with open(mapping_path, encoding="utf-8") as fh:
                 mapping = json.load(fh)
             st.markdown(f"**Sources cited** — {len(mapping)}")
             st.json(mapping, expanded=False)
 
-        report_path = written.replace(".txt", "_report.md")
+        report_path = sidecar_path(written, "_report.md")
         if os.path.exists(report_path):
             with open(report_path, encoding="utf-8") as fh:
                 report = fh.read()
@@ -198,8 +198,8 @@ def render_draft_tab(chunks):
             cols[3].metric("Need review", needs_review)
             cols[4].metric("Not judged", not_judged)
 
-            md_path = written.replace(".txt", "_verification.md")
-            json_path = written.replace(".txt", "_verification.json")
+            md_path = sidecar_path(written, "_verification.md")
+            json_path = sidecar_path(written, "_verification.json")
             if os.path.exists(md_path):
                 with open(md_path, encoding="utf-8") as fh:
                     report_md = fh.read()
